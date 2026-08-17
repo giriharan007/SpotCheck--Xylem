@@ -104,6 +104,7 @@ SpotCheck/
 ├── Compare_cropped_images.py  # Cross-page pure graphic template comparison engine
 ├── Tables/
 │   └── Compare_Tables.py      # Table structure comparison utilities
+     └──Table_extraction.py     # Table extraction utilities
 ├── build_exe.bat              # Windows 1-click PyInstaller packaging automation
 ├── requirements.txt           # Python package dependencies
 ├── .gitignore                 # Standard repository exclusion rules
