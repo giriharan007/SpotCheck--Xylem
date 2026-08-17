@@ -19,7 +19,7 @@ echo [1/4] Checking and installing required dependencies...
 pip install -r requirements.txt
 if %ERRORLEVEL% NEQ 0 (
     echo [WARNING] Some dependencies failed to install. Retrying critical packages...
-    pip install customtkinter pyinstaller pymupdf pdfplumber opencv-python numpy pyzbar openpyxl
+    pip install customtkinter pyinstaller pymupdf pdfplumber opencv-python numpy pyzbar openpyxl Pillow
 )
 
 :: 2. Clean previous builds
