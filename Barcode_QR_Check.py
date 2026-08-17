@@ -165,19 +165,20 @@ def extract_barcode_qr_model(pdf_path, dpi=200):
     pages_with_barcode = set()
     pages_with_qr = set()
 
-    for page_idx in range(len(doc)):
-        page = doc[page_idx]
-        codes = detect_barcodes_and_qr_codes(page, dpi=dpi)
-        for c in codes:
-            all_codes.append(c)
-            if c["type"] == "BARCODE":
-                barcode_count += 1
-                pages_with_barcode.add(c["page_num"])
-            elif c["type"] == "QRCODE":
-                qr_count += 1
-                pages_with_qr.add(c["page_num"])
-
-    doc.close()
+    try:
+        for page_idx in range(len(doc)):
+            page = doc[page_idx]
+            codes = detect_barcodes_and_qr_codes(page, dpi=dpi)
+            for c in codes:
+                all_codes.append(c)
+                if c["type"] == "BARCODE":
+                    barcode_count += 1
+                    pages_with_barcode.add(c["page_num"])
+                elif c["type"] == "QRCODE":
+                    qr_count += 1
+                    pages_with_qr.add(c["page_num"])
+    finally:
+        doc.close()
 
     return {
         "filename": os.path.basename(pdf_path),

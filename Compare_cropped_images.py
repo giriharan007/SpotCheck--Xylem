@@ -1,16 +1,16 @@
 import os
 import sys
 import argparse
-import fitz  # PyMuPDF
+import pymupdf as fitz  # PyMuPDF (aliased as fitz for API compat)
 import cv2
 import numpy as np
 
 # ==============================================================================
 # CONFIGURATION - EDIT YOUR PATHS HERE DIRECTLY
 # ==============================================================================
-ENGLISH_CROPS_DIR = r"C:\Xylem Project\Spotcheck for Agents\Output_Cropped_Images\894387_5.0_en-US_2026-04_IOM.Start350"
-TRANSLATED_PDF_DIR = r"C:\Xylem Project\Spotcheck for Agents\Input\Translated"
-OUTPUT_REPORT_DIR = r"C:\Xylem Project\Spotcheck for Agents\Output_Cropped_Comparison"
+ENGLISH_CROPS_DIR = r"Output\Cropped_Images"
+TRANSLATED_PDF_DIR = r"Input\Translated"
+OUTPUT_REPORT_DIR = r"Output\Cropped_Comparison"
 SIMILARITY_THRESHOLD = 80.0  # Pass threshold percentage (e.g. 80.0%)
 DPI = 150
 # ==============================================================================
@@ -23,24 +23,33 @@ def render_translated_pdf_pages_pure_graphics(trans_pdf_path, dpi=DPI):
     doc = fitz.open(trans_pdf_path)
     bgr_imgs = []
     gray_imgs = []
-    for p_idx in range(len(doc)):
-        page = doc[p_idx]
-        
-        # Mask text spans on page to isolate pure visual graphics
-        text_dict = page.get_text("dict")
-        for b in text_dict.get("blocks", []):
-            if b.get("type") == 0:  # Text block
-                for line in b.get("lines", []):
-                    l_rect = fitz.Rect(line["bbox"])
-                    page.draw_rect(l_rect, color=(1, 1, 1), fill=(1, 1, 1))
+    try:
+        for p_idx in range(len(doc)):
+            page = doc[p_idx]
+            
+            # Mask text spans on page to isolate pure visual graphics
+            text_dict = page.get_text("dict")
+            for b in text_dict.get("blocks", []):
+                if b.get("type") == 0:  # Text block
+                    for line in b.get("lines", []):
+                        l_rect = fitz.Rect(line["bbox"])
+                        page.draw_rect(l_rect, color=(1, 1, 1), fill=(1, 1, 1))
 
-        pix = page.get_pixmap(dpi=dpi)
-        img_data = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3)
-        img_bgr = cv2.cvtColor(img_data, cv2.COLOR_RGB2BGR)
-        img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        bgr_imgs.append(img_bgr)
-        gray_imgs.append(img_gray)
-    doc.close()
+            pix = page.get_pixmap(dpi=dpi)
+            data = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+            if pix.n == 4:
+                img_gray = cv2.cvtColor(data, cv2.COLOR_RGBA2GRAY)
+                img_bgr = cv2.cvtColor(data, cv2.COLOR_RGBA2BGR)
+            elif pix.n == 3:
+                img_gray = cv2.cvtColor(data, cv2.COLOR_RGB2GRAY)
+                img_bgr = cv2.cvtColor(data, cv2.COLOR_RGB2BGR)
+            else:
+                img_gray = data
+                img_bgr = cv2.cvtColor(data, cv2.COLOR_GRAY2BGR)
+            bgr_imgs.append(img_bgr)
+            gray_imgs.append(img_gray)
+    finally:
+        doc.close()
     return bgr_imgs, gray_imgs
 
 def create_crop_match_image(crop_img_gray, target_page_bgr, max_loc, max_val, eng_page, trans_page):

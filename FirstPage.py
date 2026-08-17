@@ -30,11 +30,11 @@ except ImportError:
 # -----------------------------------------------------------
 
 LANGUAGE_CODES = {
-    "EN", "EG", "BG", "HR","CZ", "DK","NL", "EE","FI", 
-    "CA","FR", "DE","GR", "IL","HU", "IS","IE", "IT",
-    "KR", "LV","LT", "MT","NO", "PL","BR", "PT","RO",
-    "RU","SP", "CN","SK", "SI","LA", "ES","SE", "TR","UA",
-    "EL","DA","SV", "NL",
+    "EN", "EG", "BG", "HR", "CZ", "DK", "NL", "EE", "FI", 
+    "CA", "FR", "DE", "GR", "IL", "HU", "IS", "IE", "IT",
+    "KR", "LV", "LT", "MT", "NO", "PL", "BR", "PT", "RO",
+    "RU", "SP", "CN", "SK", "SI", "LA", "ES", "SE", "TR", "UA",
+    "EL", "DA", "SV",
 }
 
 # Predefined List of Manual Types
@@ -60,145 +60,8 @@ MANUAL_TYPES = [
     "Others",
 ]
 
-# Version & Document Number pattern: e.g. "894387_5.0"
-VERSION_PATTERN = re.compile(r"(\d+)_(\d+\.\d+)")
-
-
-# -----------------------------------------------------------
-# Page Object Model Extraction
-# -----------------------------------------------------------
-
-def extract_page_model(pdf_path, ref_manual_bbox=None, ref_manual_type=None, padding=15):
-    """
-    Extract minimal Page Object Model from page 1 of a PDF.
-
-    Parameters:
-      pdf_path: str - Path to PDF file
-      ref_manual_bbox: tuple (x0, y0, x1, y1) - Bounding box from English Master PDF
-      ref_manual_type: str - Identified manual type from English Master PDF
-      padding: float - Tolerance in points for extracting text at ref_manual_bbox position
-
-    Returns dict containing page 1 properties, extracted Title, and Manual Type information.
-    """
-    doc = pymupdf.open(pdf_path)
-    page = doc[0]
-
-    # 1. Page Size
-    width = round(page.rect.width, 2)
-    height = round(page.rect.height, 2)
-
-    # 2. Text Spans Analysis: Font sizes, Title, Document Number, Version, Language Code
-    text_dict = page.get_text("dict")
-    spans = []
-    for block in text_dict.get("blocks", []):
-        if "lines" in block:
-            for line in block["lines"]:
-                for span in line["spans"]:
-                    txt = span["text"].strip()
-                    if txt:
-                        spans.append({
-                            "size": span["size"],
-                            "text": txt,
-                            "bbox": span["bbox"],
-                            "flags": span.get("flags", 0)
-                        })
-
-    text = page.get_text("text")
-
-    doc_num = None
-    doc_len = None
-    version = None
-    language = None
-
-    match = VERSION_PATTERN.search(text)
-    if match:
-        doc_num = match.group(1)
-        doc_len = len(doc_num)
-        version = match.group(2)
-
-    # Detect Language Code: check standalone uppercase spans first to avoid prose words (e.g. Dutch 'en', Spanish 'de')
-    for s in spans:
-        stxt = s["text"].strip()
-        if stxt in LANGUAGE_CODES and stxt.isupper():
-            language = stxt
-            break
-
-    # Fallback to uppercase standalone words if span match not found
-    if not language:
-        words = text.split()
-        for w in words:
-            w_clean = w.strip()
-            if w_clean in LANGUAGE_CODES and w_clean.isupper():
-                language = w_clean
-                break
-
-    # -------------------------------------------------------
-    # Title Extraction: Text with highest font size on page 1
-    # -------------------------------------------------------
-    title = ""
-    max_font_size = 0.0
-    if spans:
-        max_font_size = max(s["size"] for s in spans)
-        # Gather all spans with maximum font size (within 0.1pt tolerance)
-        title_spans = [s for s in spans if abs(s["size"] - max_font_size) < 0.1]
-        # Sort by vertical position (y0), then horizontal position (x0)
-        title_spans.sort(key=lambda s: (s["bbox"][1], s["bbox"][0]))
-        title = " ".join(s["text"] for s in title_spans).strip()
-
-    has_title = len(title) > 0
-
-    # -------------------------------------------------------
-    # Manual Type Detection & Positional Verification
-    # -------------------------------------------------------
-    manual_type = "Others"
-    manual_type_bbox = None
-    has_manual_type = False
-    translated_manual_text = ""
-
-    # Match English manual types from list
-    for mtype in MANUAL_TYPES:
-        if mtype == "Others":
-            continue
-        pattern = re.escape(mtype)
-        if re.search(pattern, text, re.IGNORECASE):
-            manual_type = mtype
-            matching_spans = [s for s in spans if re.search(pattern, s["text"], re.IGNORECASE)]
-            if not matching_spans:
-                mtype_words = [w for w in mtype.lower().split() if len(w) > 2]
-                matching_spans = [s for s in spans if any(w in s["text"].lower() for w in mtype_words)]
-            
-            if matching_spans:
-                x0 = min(s["bbox"][0] for s in matching_spans)
-                y0 = min(s["bbox"][1] for s in matching_spans)
-                x1 = max(s["bbox"][2] for s in matching_spans)
-                y1 = max(s["bbox"][3] for s in matching_spans)
-                manual_type_bbox = (x0, y0, x1, y1)
-            has_manual_type = True
-            break
-
-    # If reference manual_bbox is provided (for Translated PDFs)
-    if ref_manual_bbox is not None:
-        rx0, ry0, rx1, ry1 = ref_manual_bbox
-        padded_rect = pymupdf.Rect(
-            max(0, rx0 - padding),
-            max(0, ry0 - padding),
-            rx1 + padding,
-            ry1 + padding
-        )
-        clip_text = page.get_text("text", clip=padded_rect).strip()
-        raw_text = " ".join(clip_text.split())
-        clean_text = re.sub(r"\b\d{5,8}[_\s]*\d.*$", "", raw_text).strip()
-        translated_manual_text = clean_text if clean_text else raw_text
-        has_manual_type = len(translated_manual_text) > 0
-        if ref_manual_type:
-            manual_type = ref_manual_type
-
-    return {
-        "manual_type": manual_type,
-        "has_manual_type": has_manual_type,
-        "manual_type_bbox": manual_type_bbox,
-        "translated_manual_text": translated_manual_text
-    }
+# Version & Document Number pattern: e.g. "894387_5.0", "95-27772-0000_4.0", "123_456_0.5"
+VERSION_PATTERN = re.compile(r"([0-9]+(?:[-_][0-9]+)*)_(\d+\.\d+)")
 
 
 # -----------------------------------------------------------
@@ -245,132 +108,162 @@ def extract_page_model(pdf_path, ref_manual_bbox=None, ref_manual_type=None, pad
     Returns dict containing page 1 properties, extracted Title, and Manual Type & Barcode/QR information.
     """
     doc = pymupdf.open(pdf_path)
-    page = doc[0]
+    try:
+        page = doc[0]
 
-    # 1. Page Size
-    width = round(page.rect.width, 2)
-    height = round(page.rect.height, 2)
+        # 1. Page Size
+        width = round(page.rect.width, 2)
+        height = round(page.rect.height, 2)
 
-    # 2. Text Spans Analysis: Font sizes, Title, Document Number, Version, Language Code
-    text_dict = page.get_text("dict")
-    spans = []
-    for block in text_dict.get("blocks", []):
-        if "lines" in block:
-            for line in block["lines"]:
-                for span in line["spans"]:
-                    txt = span["text"].strip()
-                    if txt:
-                        spans.append({
-                            "size": span["size"],
-                            "text": txt,
-                            "bbox": span["bbox"],
-                            "flags": span.get("flags", 0)
-                        })
+        # 2. Text Spans Analysis: Font sizes, Title, Document Number, Version, Language Code
+        text_dict = page.get_text("dict")
+        spans = []
+        for block in text_dict.get("blocks", []):
+            if "lines" in block:
+                for line in block["lines"]:
+                    for span in line["spans"]:
+                        txt = span["text"].strip()
+                        if txt:
+                            spans.append({
+                                "size": span["size"],
+                                "text": txt,
+                                "bbox": span["bbox"],
+                                "flags": span.get("flags", 0)
+                            })
 
-    text = page.get_text("text")
+        text = page.get_text("text")
 
-    doc_num = None
-    doc_len = None
-    version = None
-    language = None
+        doc_num = None
+        doc_len = None
+        version = None
+        language = None
 
-    match = VERSION_PATTERN.search(text)
-    if match:
-        doc_num = match.group(1)
-        doc_len = len(doc_num)
-        version = match.group(2)
+        match = VERSION_PATTERN.search(text)
+        if match:
+            doc_num = match.group(1)
+            doc_len = len(doc_num)
+            version = match.group(2)
 
-    # Detect Language Code: check standalone uppercase spans first to avoid prose words (e.g. Dutch 'en', Spanish 'de')
-    for s in spans:
-        stxt = s["text"].strip()
-        if stxt in LANGUAGE_CODES and stxt.isupper():
-            language = stxt
-            break
-
-    # Fallback to uppercase standalone words if span match not found
-    if not language:
-        words = text.split()
-        for w in words:
-            w_clean = w.strip()
-            if w_clean in LANGUAGE_CODES and w_clean.isupper():
-                language = w_clean
+        # Detect Language Code: check standalone uppercase spans first to avoid prose words (e.g. Dutch 'en', Spanish 'de')
+        for s in spans:
+            stxt = s["text"].strip()
+            if stxt in LANGUAGE_CODES and stxt.isupper():
+                language = stxt
                 break
 
-    # -------------------------------------------------------
-    # Title Extraction: Text with highest font size on page 1
-    # -------------------------------------------------------
-    title = ""
-    max_font_size = 0.0
-    if spans:
-        max_font_size = max(s["size"] for s in spans)
-        # Gather all spans with maximum font size (within 0.1pt tolerance)
-        title_spans = [s for s in spans if abs(s["size"] - max_font_size) < 0.1]
-        # Sort by vertical position (y0), then horizontal position (x0)
-        title_spans.sort(key=lambda s: (s["bbox"][1], s["bbox"][0]))
-        title = " ".join(s["text"] for s in title_spans).strip()
+        # Fallback to uppercase standalone words if span match not found
+        if not language:
+            words = text.split()
+            for w in words:
+                w_clean = w.strip()
+                if w_clean in LANGUAGE_CODES and w_clean.isupper():
+                    language = w_clean
+                    break
 
-    has_title = len(title) > 0
+        # -------------------------------------------------------
+        # Title Extraction: Text with highest font size on page 1
+        # -------------------------------------------------------
+        title = ""
+        max_font_size = 0.0
+        if spans:
+            max_font_size = max(s["size"] for s in spans)
+            # Gather all spans with maximum font size (within 0.1pt tolerance)
+            title_spans = [s for s in spans if abs(s["size"] - max_font_size) < 0.1]
+            # Sort by vertical position (y0), then horizontal position (x0)
+            title_spans.sort(key=lambda s: (s["bbox"][1], s["bbox"][0]))
+            title = " ".join(s["text"] for s in title_spans).strip()
 
-    # -------------------------------------------------------
-    # Manual Type Detection & Positional Verification
-    # -------------------------------------------------------
-    manual_type = "Others"
-    manual_type_bbox = None
-    has_manual_type = False
-    translated_manual_text = ""
+        has_title = len(title) > 0
 
-    # Match English manual types from list
-    for mtype in MANUAL_TYPES:
-        if mtype == "Others":
-            continue
-        pattern = re.escape(mtype)
-        if re.search(pattern, text, re.IGNORECASE):
-            manual_type = mtype
-            matching_spans = [s for s in spans if re.search(pattern, s["text"], re.IGNORECASE)]
-            if not matching_spans:
-                mtype_words = [w for w in mtype.lower().split() if len(w) > 2]
-                matching_spans = [s for s in spans if any(w in s["text"].lower() for w in mtype_words)]
-            
-            if matching_spans:
-                x0 = min(s["bbox"][0] for s in matching_spans)
-                y0 = min(s["bbox"][1] for s in matching_spans)
-                x1 = max(s["bbox"][2] for s in matching_spans)
-                y1 = max(s["bbox"][3] for s in matching_spans)
-                manual_type_bbox = (x0, y0, x1, y1)
-            has_manual_type = True
-            break
+        # -------------------------------------------------------
+        # Sub-title Extraction: 2nd highest font size on page 1 (excluding Manual Types)
+        # -------------------------------------------------------
+        sub_title = ""
+        sub_title_font_size = 0.0
+        has_sub_title = False
 
-    # If reference manual_bbox is provided (for Translated PDFs)
-    if ref_manual_bbox is not None:
-        rx0, ry0, rx1, ry1 = ref_manual_bbox
-        padded_rect = pymupdf.Rect(
-            max(0, rx0 - padding),
-            max(0, ry0 - padding),
-            rx1 + padding,
-            ry1 + padding
-        )
-        clip_text = page.get_text("text", clip=padded_rect).strip()
-        raw_text = " ".join(clip_text.split())
-        clean_text = re.sub(r"\b\d{5,8}[_\s]*\d.*$", "", raw_text).strip()
-        translated_manual_text = clean_text if clean_text else raw_text
-        has_manual_type = len(translated_manual_text) > 0
-        if ref_manual_type:
-            manual_type = ref_manual_type
+        if spans and max_font_size > 0:
+            other_sizes = sorted(list(set(s["size"] for s in spans if (max_font_size - s["size"]) >= 0.5)), reverse=True)
+            manual_keywords = ["installation", "operation", "maintenance", "manual", "datasheet", "quick start", "guide", "specification", "repair", "safety", "instructions"]
 
-    # 3. Barcode & QR Code Detection (Page 1 & All Pages)
-    p1_codes = detect_barcodes_and_qr_codes(page, dpi=150)
-    has_qr = any(c["type"] == "QRCODE" for c in p1_codes)
-    qr_data = next((c["data"] for c in p1_codes if c["type"] == "QRCODE"), "Missing")
+            for cand_sz in other_sizes:
+                cand_spans = [s for s in spans if abs(s["size"] - cand_sz) < 0.3]
+                cand_spans.sort(key=lambda s: (s["bbox"][1], s["bbox"][0]))
+                cand_text = " ".join(s["text"] for s in cand_spans).strip()
 
-    has_barcode = any(c["type"] == "BARCODE" for c in p1_codes)
-    barcode_data = next((c["data"] for c in p1_codes if c["type"] == "BARCODE"), "Missing")
+                cand_lower = cand_text.lower()
+                is_manual_type = any(m.lower() in cand_lower or cand_lower in m.lower() for m in MANUAL_TYPES if m != "Others")
+                if not is_manual_type:
+                    is_manual_type = any(kw in cand_lower for kw in manual_keywords)
 
-    # Fallback for Page 1 Barcode presence: check page embedded images if detector is unavailable
-    if not has_barcode and len(page.get_images()) > 0:
-        has_barcode = True
-        barcode_data = "Barcode Present"
+                is_metadata = bool(VERSION_PATTERN.search(cand_text)) or (cand_text.upper() in LANGUAGE_CODES)
 
-    doc.close()
+                if not is_manual_type and not is_metadata and len(cand_text) > 1:
+                    sub_title = cand_text
+                    sub_title_font_size = cand_sz
+                    has_sub_title = True
+                    break
+
+        # -------------------------------------------------------
+        # Manual Type Detection & Positional Verification
+        # -------------------------------------------------------
+        manual_type = "Others"
+        manual_type_bbox = None
+        has_manual_type = False
+        translated_manual_text = ""
+
+        # Match English manual types from list
+        for mtype in MANUAL_TYPES:
+            if mtype == "Others":
+                continue
+            pattern = re.escape(mtype)
+            if re.search(pattern, text, re.IGNORECASE):
+                manual_type = mtype
+                matching_spans = [s for s in spans if re.search(pattern, s["text"], re.IGNORECASE)]
+                if not matching_spans:
+                    mtype_words = [w for w in mtype.lower().split() if len(w) > 2]
+                    matching_spans = [s for s in spans if any(w in s["text"].lower() for w in mtype_words)]
+                
+                if matching_spans:
+                    x0 = min(s["bbox"][0] for s in matching_spans)
+                    y0 = min(s["bbox"][1] for s in matching_spans)
+                    x1 = max(s["bbox"][2] for s in matching_spans)
+                    y1 = max(s["bbox"][3] for s in matching_spans)
+                    manual_type_bbox = (x0, y0, x1, y1)
+                has_manual_type = True
+                break
+
+        # If reference manual_bbox is provided (for Translated PDFs)
+        if ref_manual_bbox is not None:
+            rx0, ry0, rx1, ry1 = ref_manual_bbox
+            padded_rect = pymupdf.Rect(
+                max(0, rx0 - padding),
+                max(0, ry0 - padding),
+                rx1 + padding,
+                ry1 + padding
+            )
+            clip_text = page.get_text("text", clip=padded_rect).strip()
+            raw_text = " ".join(clip_text.split())
+            clean_text = re.sub(r"\b[0-9]+(?:[-_][0-9]+)*[_\s]*\d.*$", "", raw_text).strip()
+            translated_manual_text = clean_text if clean_text else raw_text
+            has_manual_type = len(translated_manual_text) > 0
+            if ref_manual_type:
+                manual_type = ref_manual_type
+
+        # 3. Barcode & QR Code Detection (Page 1 & All Pages)
+        p1_codes = detect_barcodes_and_qr_codes(page, dpi=150)
+        has_qr = any(c["type"] == "QRCODE" for c in p1_codes)
+        qr_data = next((c["data"] for c in p1_codes if c["type"] == "QRCODE"), "Missing")
+
+        has_barcode = any(c["type"] == "BARCODE" for c in p1_codes)
+        barcode_data = next((c["data"] for c in p1_codes if c["type"] == "BARCODE"), "Missing")
+
+        # Fallback for Page 1 Barcode presence: check page embedded images if detector is unavailable
+        if not has_barcode and len(page.get_images()) > 0:
+            has_barcode = True
+            barcode_data = "Barcode Present"
+    finally:
+        doc.close()
 
     # Multi-page Barcode & QR Code check across ALL pages
     doc_code_info = extract_all_pages_barcode_qr(pdf_path, dpi=150)
@@ -386,6 +279,9 @@ def extract_page_model(pdf_path, ref_manual_bbox=None, ref_manual_type=None, pad
         "title": title,
         "has_title": has_title,
         "max_font_size": max_font_size,
+        "sub_title": sub_title,
+        "has_sub_title": has_sub_title,
+        "sub_title_font_size": sub_title_font_size,
         "manual_type": manual_type,
         "manual_type_bbox": manual_type_bbox,
         "has_manual_type": has_manual_type,
@@ -440,14 +336,27 @@ def compare_page_models(source_model, target_model):
     src_title = source_model["title"].strip()
     tgt_title = target_model["title"].strip()
     title_pass = bool(tgt_title) and (src_title.lower() == tgt_title.lower())
-    title_status = "Equal" if title_pass else "Not Equal"
+    title_status = f"Equal ({tgt_title})" if title_pass else f"Not Equal ({tgt_title if tgt_title else 'MISSING'})"
+
+    # 7b. Sub-Title Check (Optional: compared if master has a sub-title)
+    src_has_st = source_model.get("has_sub_title", False)
+    tgt_has_st = target_model.get("has_sub_title", False)
+    src_st = source_model.get("sub_title", "").strip()
+    tgt_st = target_model.get("sub_title", "").strip()
+
+    if src_has_st:
+        st_pass = tgt_has_st and (src_st.lower() == tgt_st.lower())
+        sub_title_status = f"Equal ({tgt_st})" if st_pass else f"Not Equal ({tgt_st if tgt_st else 'MISSING'})"
+    else:
+        st_pass = True
+        sub_title_status = "N/A"
 
     # 8. Manual Type Check
     manual_type_pass = target_model["has_manual_type"]
 
     # Overall Verdict
     overall_pass = (
-        size_pass and ver_pass and doc_len_pass and lang_pass and bc_pass and qr_pass and title_pass and manual_type_pass
+        size_pass and ver_pass and doc_len_pass and lang_pass and bc_pass and qr_pass and title_pass and st_pass and manual_type_pass
     )
 
     version_display = f"PASS ({tgt_ver})" if ver_pass else f"FAIL ({tgt_ver if tgt_ver else 'N/A'})"
@@ -459,6 +368,8 @@ def compare_page_models(source_model, target_model):
         "language": tgt_lang if tgt_lang else "MISSING",
         "title_val": target_model["title"] if target_model["title"] else "MISSING",
         "title_status": title_status,
+        "sub_title_val": target_model.get("sub_title", "") or "N/A",
+        "sub_title_status": sub_title_status,
         "manual_type_val": target_model["manual_type"],
         "manual_type_status": "Present" if manual_type_pass else "Not Present",
         "page_size_val": f"{tgt_size[0]} x {tgt_size[1]}",

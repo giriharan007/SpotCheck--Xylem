@@ -16,15 +16,11 @@ import pymupdf
 
 def extract_toc_numerics(pdf_path):
     """
-    Extract ONLY topic numerics (e.g. '1', '1.1', '1.3.1', '2.1') from a PDF.
-
-    First attempts to extract from PDF Bookmarks (TOC).
-    If bookmarks are empty, falls back to parsing page text section headers.
+    Extract ONLY topic numerics (e.g. '1', '1.1', '1.3.1', '2.1') from PDF Bookmarks (TOC).
     """
     doc = pymupdf.open(pdf_path)
     numerics = []
 
-    # 1. Extract from PDF Bookmarks / Table of Contents
     try:
         toc = doc.get_toc(simple=False)
         for item in toc:
@@ -34,19 +30,9 @@ def extract_toc_numerics(pdf_path):
                 numerics.append(match.group(1))
     except Exception:
         pass
+    finally:
+        doc.close()
 
-    # 2. Fallback: Parse page text if PDF bookmark TOC is empty
-    if not numerics:
-        for page in doc:
-            text = page.get_text("text")
-            for line in text.splitlines():
-                match = re.match(r"^\s*(\d+(?:\.\d+)+)\s+[A-Za-z\u00C0-\u024F]", line)
-                if match:
-                    num = match.group(1)
-                    if num not in numerics:
-                        numerics.append(num)
-
-    doc.close()
     return numerics
 
 

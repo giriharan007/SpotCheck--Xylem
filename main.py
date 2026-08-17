@@ -137,6 +137,7 @@ def generate_unified_excel_report(
         "English Master PDF",
         "Translated PDF",
         "Title",
+        "Sub-Title",
         "Language Code",
         "Manual Type",
         "Document Number Length",
@@ -150,6 +151,7 @@ def generate_unified_excel_report(
             res["english_pdf"],
             res["translated_pdf"],
             res["title_status"],
+            res.get("sub_title_status", "N/A"),
             res["language_status"],
             res["manual_type_status"],
             res["doc_len_display"],
@@ -312,10 +314,10 @@ def generate_unified_excel_report(
                 )
 
                 val = str(cell.value or "")
-                if val.startswith("PASS") or val.startswith("Present") or val in ("Equal", "Matched", "MATCH (PASS)", "Same Page"):
+                if val.startswith("PASS") or val.startswith("Present") or val.startswith("Equal") or val in ("Matched", "MATCH (PASS)", "Same Page"):
                     cell.fill = pass_fill
                     cell.font = pass_font
-                elif val.startswith("FAIL") or val in ("Not Present", "Not Equal", "Not Matched", "CHECK", "MISSING") or "Missing:" in val or "Extra:" in val:
+                elif val.startswith("FAIL") or val.startswith("Not Present") or val.startswith("Not Equal") or val.startswith("Not Matched") or val in ("CHECK", "MISSING") or "Missing:" in val or "Extra:" in val:
                     cell.fill = fail_fill
                     cell.font = fail_font
 
@@ -382,9 +384,8 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     source_toc_numerics = TOC.extract_toc_numerics(source_pdf_path)
 
     # Extract Master Last Page Footer Model
-    doc_src = pymupdf.open(source_pdf_path)
-    src_last_page_text = doc_src[-1].get_text("text")
-    doc_src.close()
+    with pymupdf.open(source_pdf_path) as doc_src:
+        src_last_page_text = doc_src[-1].get_text("text")
     src_last_lines = [l.strip() for l in src_last_page_text.splitlines() if l.strip()]
     src_footer_line = src_last_lines[-1] if src_last_lines else ""
     source_lp_model = LastPage.parse_footer_line(src_footer_line)
@@ -432,8 +433,8 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
             )
             fp_res = FirstPage.compare_page_models(source_fp_model, target_fp_model)
         except Exception as e:
-            target_fp_model = {"language": "EN", "title": "Missing", "manual_type": "Others", "version": "N/A", "document_number": "N/A", "document_length": "N/A"}
-            fp_res = {"english_pdf": os.path.basename(source_pdf_path), "translated_pdf": tr_filename, "language": "MISSING", "title_val": "MISSING", "title_status": "Not Equal", "manual_type_val": "Others", "manual_type_status": "Not Present", "page_size_val": "N/A", "page_size_status": "FAIL", "version_val": "N/A", "version_status": "FAIL", "version_display": "FAIL", "doc_len_val": "N/A", "doc_len_status": "FAIL", "doc_len_display": "FAIL", "language_status": "Not Present", "barcode_status": "Not Present", "qr_status": "Not Present", "overall_verdict": "FAIL"}
+            target_fp_model = {"language": "EN", "title": "Missing", "sub_title": "N/A", "has_sub_title": False, "manual_type": "Others", "version": "N/A", "document_number": "N/A", "document_length": "N/A"}
+            fp_res = {"english_pdf": os.path.basename(source_pdf_path), "translated_pdf": tr_filename, "language": "MISSING", "title_val": "MISSING", "title_status": "Not Equal", "sub_title_val": "MISSING", "sub_title_status": "Not Equal", "manual_type_val": "Others", "manual_type_status": "Not Present", "page_size_val": "N/A", "page_size_status": "FAIL", "version_val": "N/A", "version_status": "FAIL", "version_display": "FAIL", "doc_len_val": "N/A", "doc_len_status": "FAIL", "doc_len_display": "FAIL", "language_status": "Not Present", "barcode_status": "Not Present", "qr_status": "Not Present", "overall_verdict": "FAIL"}
         fp_results.append(fp_res)
 
         # 2. TOC check
@@ -501,6 +502,7 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
             "english_pdf": os.path.basename(source_pdf_path),
             "translated_pdf": tr_filename,
             "title_of_manual": target_fp_model.get("title", "Missing"),
+            "sub_title": target_fp_model.get("sub_title", "N/A"),
             "manual_type": target_fp_model.get("manual_type", "Others"),
             "translated_manual_type": target_fp_model.get("translated_manual_text", "Missing") if target_fp_model.get("has_manual_type") else "Missing",
             "language_code": target_fp_model.get("language", "Missing"),
@@ -556,16 +558,19 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
 # ============================================================
 
 if __name__ == "__main__":
-    if sys.stdout.encoding != "utf-8":
-        sys.stdout.reconfigure(encoding="utf-8")
+    if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
 
-    default_eng_pdf = r"c:\Xylem Project\SpotCheck\Input\English\894387_5.0_en-US_2026-04_IOM.Start350.pdf"
+    default_eng_pdf = r"C:\Xylem Project\SpotCheck\Input\English\894387_5.0_en-US_2026-04_IOM.Start350.pdf"
     SOURCE_ENGLISH_PDF = default_eng_pdf
 
-    default_tr_dir = r"c:\Xylem Project\SpotCheck\Input\Translated"
+    default_tr_dir = r"C:\Xylem Project\SpotCheck\Input\Translated"
     TRANSLATED_TARGET = default_tr_dir
 
-    default_out_dir = r"c:\Xylem Project\SpotCheck\Output"
+    default_out_dir = r"C:\Xylem Project\SpotCheck\Output"
     OUTPUT_DIRECTORY = default_out_dir
 
     run_quality_inspection(

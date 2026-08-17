@@ -211,9 +211,7 @@ def get_disclaimer(lang_code="EN"):
     if "_" in code or "-" in code:
         code = re.split(r"[-_]", code)[0]
 
-    if isinstance(disclaimer_text, dict):
-        return disclaimer_text.get(code, disclaimer_text.get("EN"))
-    return disclaimer_text
+    return disclaimer_text.get(code, disclaimer_text.get("EN"))
 
 
 def get_copyright(lang_code="EN"):
@@ -226,9 +224,7 @@ def get_copyright(lang_code="EN"):
     if "_" in code or "-" in code:
         code = re.split(r"[-_]", code)[0]
 
-    if isinstance(copy_rights, dict):
-        return copy_rights.get(code, copy_rights.get("EN"))
-    return copy_rights
+    return copy_rights.get(code, copy_rights.get("EN"))
 
 
 # =========================================================
@@ -242,7 +238,7 @@ def normalize_text(text):
     text = text.replace("–", "-").replace("—", "-")
     text = text.replace("© ", "©")
     text = text.replace("ĳ", "ij")  # Normalize Dutch IJ ligature
-    text = re.sub(r"\s+", " ", text)
+    text = text.replace("web site", "website")  # Normalize 'web site' to 'website'
     text = text.replace(
         "[https://tpi.xylem.com](https://tpi.xylem.com)",
         "https://tpi.xylem.com"
@@ -251,6 +247,9 @@ def normalize_text(text):
         "[https://tpi.xylem.com]",
         "https://tpi.xylem.com"
     )
+    # Remove punctuation while preserving alphanumeric characters, spaces, and copyright symbol
+    text = re.sub(r"[^\w\s©]", " ", text)
+    text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
@@ -366,67 +365,68 @@ def verify_last_page(pdf_path, lang_code="EN", ref_footer_model=None, ref_manual
     Returns dict with detailed verification results.
     """
     doc = pymupdf.open(pdf_path)
-    last_page_number = len(doc) - 1
-    last_page = doc[last_page_number]
-    last_page_text = last_page.get_text("text")
-    page_normalized = normalize_text(last_page_text)
+    try:
+        last_page_number = len(doc) - 1
+        last_page = doc[last_page_number]
+        last_page_text = last_page.get_text("text")
+        page_normalized = normalize_text(last_page_text)
 
-    # 1. Address Check (common for all languages)
-    addr_normalized = normalize_text(address)
-    has_address = addr_normalized in page_normalized
+        # 1. Address Check (common for all languages)
+        addr_normalized = normalize_text(address)
+        has_address = addr_normalized in page_normalized
 
-    # 2. Disclaimer Check (language mapped)
-    target_disclaimer = get_disclaimer(lang_code)
-    disc_normalized = normalize_text(target_disclaimer)
-    has_disclaimer = disc_normalized in page_normalized
-    if not has_disclaimer and isinstance(disclaimer_text, dict):
-        for val in disclaimer_text.values():
-            if normalize_text(val) in page_normalized:
-                has_disclaimer = True
-                break
+        # 2. Disclaimer Check (language mapped)
+        target_disclaimer = get_disclaimer(lang_code)
+        disc_normalized = normalize_text(target_disclaimer)
+        has_disclaimer = disc_normalized in page_normalized
+        if not has_disclaimer:
+            for val in disclaimer_text.values():
+                if normalize_text(val) in page_normalized:
+                    has_disclaimer = True
+                    break
 
-    # 3. Copyright Check (language mapped)
-    target_copyright = get_copyright(lang_code)
-    copy_normalized = normalize_text(target_copyright)
-    has_copyright = copy_normalized in page_normalized
-    if not has_copyright and isinstance(copy_rights, dict):
-        for val in copy_rights.values():
-            if normalize_text(val) in page_normalized:
-                has_copyright = True
-                break
+        # 3. Copyright Check (language mapped)
+        target_copyright = get_copyright(lang_code)
+        copy_normalized = normalize_text(target_copyright)
+        has_copyright = copy_normalized in page_normalized
+        if not has_copyright:
+            for val in copy_rights.values():
+                if normalize_text(val) in page_normalized:
+                    has_copyright = True
+                    break
 
-    # 4. Extract & Parse Last Line Footer Metadata
-    lines = [line.strip() for line in last_page_text.splitlines() if line.strip()]
-    last_line_text = lines[-1] if lines else ""
-    parsed_footer = parse_footer_line(last_line_text)
+        # 4. Extract & Parse Last Line Footer Metadata
+        lines = [line.strip() for line in last_page_text.splitlines() if line.strip()]
+        last_line_text = lines[-1] if lines else ""
+        parsed_footer = parse_footer_line(last_line_text)
 
-    # Determine Expected Manual Type Code from reference manual type string
-    expected_manual_type_code = None
-    if ref_manual_type and ref_manual_type in MANUAL_TYPE_CODE_MAP:
-        expected_manual_type_code = MANUAL_TYPE_CODE_MAP[ref_manual_type]
-    elif ref_footer_model and ref_footer_model.get("manual_type_code"):
-        expected_manual_type_code = ref_footer_model.get("manual_type_code")
+        # Determine Expected Manual Type Code from reference manual type string
+        expected_manual_type_code = None
+        if ref_manual_type and ref_manual_type in MANUAL_TYPE_CODE_MAP:
+            expected_manual_type_code = MANUAL_TYPE_CODE_MAP[ref_manual_type]
+        elif ref_footer_model and ref_footer_model.get("manual_type_code"):
+            expected_manual_type_code = ref_footer_model.get("manual_type_code")
 
-    # Manual Type Code Check
-    extracted_type_code = parsed_footer.get("manual_type_code")
-    if expected_manual_type_code:
-        manual_type_code_pass = bool(extracted_type_code and (extracted_type_code.upper() == expected_manual_type_code.upper()))
-    else:
-        manual_type_code_pass = bool(extracted_type_code)
+        # Manual Type Code Check
+        extracted_type_code = parsed_footer.get("manual_type_code")
+        if expected_manual_type_code:
+            manual_type_code_pass = bool(extracted_type_code and (extracted_type_code.upper() == expected_manual_type_code.upper()))
+        else:
+            manual_type_code_pass = bool(extracted_type_code)
 
-    # Date Code Check (Compare with Master English PDF Date Code)
-    expected_date_code = ref_footer_model.get("date_code") if ref_footer_model else None
-    extracted_date_code = parsed_footer.get("date_code")
-    if expected_date_code:
-        date_code_pass = bool(extracted_date_code and (extracted_date_code == expected_date_code))
-    else:
-        date_code_pass = bool(extracted_date_code)
+        # Date Code Check (Compare with Master English PDF Date Code)
+        expected_date_code = ref_footer_model.get("date_code") if ref_footer_model else None
+        extracted_date_code = parsed_footer.get("date_code")
+        if expected_date_code:
+            date_code_pass = bool(extracted_date_code and (extracted_date_code == expected_date_code))
+        else:
+            date_code_pass = bool(extracted_date_code)
 
-    # Language Code Check in Footer Line
-    extracted_lang_code = parsed_footer.get("language_code")
-    lang_code_pass = bool(extracted_lang_code)
-
-    doc.close()
+        # Language Code Check in Footer Line
+        extracted_lang_code = parsed_footer.get("language_code")
+        lang_code_pass = bool(extracted_lang_code)
+    finally:
+        doc.close()
 
     # Overall verdict
     overall_pass = (

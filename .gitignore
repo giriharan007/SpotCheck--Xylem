@@ -1,0 +1,24 @@
+# Python cache & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# PyInstaller & Build artifacts
+SpotCheck.spec
+build/
+dist/
+*.exe
+
+# Input and Output test directories
+Input/
+Output/
+Godwin input/
+Godwin output/
+
+# Temporary / OS / Office lock files
+~$*
+*.tmp
+.DS_Store
+Thumbs.db
+*.log
