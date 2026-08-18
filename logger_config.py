@@ -22,18 +22,15 @@ _LOG_DIR = None
 _ROOT_LOGGER = None
 
 
-def _setup_dll_directories():
+def _setup_dynamic_library_paths():
     """
-    Ensure Windows DLL loader finds dynamic libraries (libiconv.dll, libzbar-64.dll, etc.)
-    both in frozen (PyInstaller) and standard execution modes.
+    Ensure dynamic libraries (DLLs on Windows, .dylib on macOS, .so on Linux)
+    are discoverable both in frozen (PyInstaller) and standard execution modes across all OS platforms.
     """
-    if sys.platform != 'win32':
-        return
-
     candidate_dirs = []
 
     if getattr(sys, 'frozen', False):
-        # Running as PyInstaller frozen exe
+        # Running as PyInstaller frozen package / executable
         base_dir = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
         exe_dir = os.path.dirname(sys.executable)
         candidate_dirs.extend([
@@ -54,22 +51,52 @@ def _setup_dll_directories():
         except Exception:
             pass
 
+    # Platform-specific search locations
+    if sys.platform == 'darwin':
+        # macOS Homebrew & standard library locations
+        candidate_dirs.extend([
+            '/opt/homebrew/lib',
+            '/usr/local/lib',
+            '/opt/homebrew/opt/zbar/lib',
+            '/usr/local/opt/zbar/lib',
+            '/opt/homebrew/opt/libiconv/lib',
+            '/usr/local/opt/libiconv/lib'
+        ])
+    elif sys.platform.startswith('linux'):
+        # Linux standard shared library locations
+        candidate_dirs.extend([
+            '/usr/lib',
+            '/usr/local/lib',
+            '/usr/lib/x86_64-linux-gnu',
+            '/usr/lib64',
+            '/usr/lib/aarch64-linux-gnu'
+        ])
+
     for d in candidate_dirs:
         if os.path.isdir(d):
-            # Add to Windows DLL search path (Python 3.8+)
-            if hasattr(os, 'add_dll_directory'):
+            # 1. Windows DLL search path (Python 3.8+)
+            if sys.platform == 'win32' and hasattr(os, 'add_dll_directory'):
                 try:
                     os.add_dll_directory(d)
                 except Exception:
                     pass
-            # Also prepend to os.environ['PATH'] for C runtime / legacy loader
-            cur_path = os.environ.get('PATH', '')
-            if d not in cur_path:
-                os.environ['PATH'] = d + os.pathsep + cur_path
+
+            # 2. Update platform environment variables for C dynamic linkers
+            env_vars = ['PATH']
+            if sys.platform == 'darwin':
+                env_vars.extend(['DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH'])
+            elif sys.platform.startswith('linux'):
+                env_vars.extend(['LD_LIBRARY_PATH'])
+
+            for ev in env_vars:
+                cur_val = os.environ.get(ev, '')
+                if d not in cur_val:
+                    os.environ[ev] = d + os.pathsep + cur_val if cur_val else d
 
 
-# Execute DLL setup immediately on import
-_setup_dll_directories()
+# Alias for backward compatibility and immediate execution on module load
+_setup_dll_directories = _setup_dynamic_library_paths
+_setup_dynamic_library_paths()
 
 
 class LogTeeStream:
@@ -329,12 +356,15 @@ def get_log_dir():
 
 
 def open_current_log():
-    """Open the current log file in the default Windows text editor (e.g. Notepad)."""
+    """Open the current log file in the default system text editor (Notepad, TextEdit, etc.)."""
     log_path = get_current_log_path()
     if log_path and os.path.exists(log_path):
         try:
             if sys.platform == 'win32':
                 os.startfile(log_path)
+            elif sys.platform == 'darwin':
+                import subprocess
+                subprocess.Popen(['open', log_path])
             else:
                 import subprocess
                 subprocess.Popen(['xdg-open', log_path])
@@ -346,12 +376,15 @@ def open_current_log():
 
 
 def open_log_folder():
-    """Open the logs directory in Windows File Explorer."""
+    """Open the logs directory in system file explorer (Explorer, Finder, Nautilus, etc.)."""
     log_dir = get_log_dir()
     if log_dir and os.path.exists(log_dir):
         try:
             if sys.platform == 'win32':
                 os.startfile(log_dir)
+            elif sys.platform == 'darwin':
+                import subprocess
+                subprocess.Popen(['open', log_dir])
             else:
                 import subprocess
                 subprocess.Popen(['xdg-open', log_dir])
@@ -360,3 +393,4 @@ def open_log_folder():
             print(f"[Error] Failed to open log folder: {e}")
             return False
     return False
+
