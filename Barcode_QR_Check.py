@@ -21,8 +21,9 @@ import pymupdf  # PyMuPDF
 try:
     from pyzbar.pyzbar import decode as pyzbar_decode
     HAS_PYZBAR = True
-except ImportError:
+except Exception as e:
     HAS_PYZBAR = False
+    print(f"[Warning] pyzbar dynamic library could not be loaded: {e}. OpenCV fallback will be used.")
 
 
 # -----------------------------------------------------------

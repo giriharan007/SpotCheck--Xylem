@@ -5,10 +5,10 @@ __pycache__/
 *.pyc
 
 # PyInstaller & Build artifacts
-SpotCheck.spec
 build/
 dist/
 *.exe
+logs/
 
 # Input and Output test directories
 Input/

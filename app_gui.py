@@ -16,10 +16,13 @@ import queue
 import traceback
 
 # ──────────────────────────────────────────────────────────────
-# Fix 1: Force UTF-8 stdout/stderr early, before ANY print or
-# import that might emit Unicode symbols. This prevents
-# UnicodeEncodeError on Windows cp1252 consoles.
+# Fix 1: Initialize Runtime Logger & Windows DLL Search Paths
+# MUST run before any third-party or sub-module imports.
 # ──────────────────────────────────────────────────────────────
+import logger_config
+logger_config.init_logging()
+
+
 def _ensure_utf8_console():
     """Reconfigure stdout/stderr to UTF-8 if they exist and support it."""
     for stream_name in ('stdout', 'stderr'):
@@ -117,13 +120,12 @@ FONT_FAMILY = _resolve_font_family()
 
 
 # ──────────────────────────────────────────────────────────────
-# Fix 1 (continued): Safe TextRedirector with encoding guard
+# Fix 1 (continued): Safe TextRedirector with encoding guard & file logging
 # ──────────────────────────────────────────────────────────────
 class TextRedirector:
     """
-    Redirects stdout/stderr streams to a thread-safe GUI text queue.
-    Handles encoding edge cases safely — non-encodable characters are
-    replaced rather than raising UnicodeEncodeError.
+    Redirects stdout/stderr streams to a thread-safe GUI text queue AND
+    appends all output to the active SpotCheck log file.
     """
     def __init__(self, text_queue):
         self.text_queue = text_queue
@@ -134,6 +136,14 @@ class TextRedirector:
             if isinstance(string, bytes):
                 string = string.decode('utf-8', errors='replace')
             self.text_queue.put(string)
+            # Simultaneously write to the session log file
+            log_path = logger_config.get_current_log_path()
+            if log_path:
+                try:
+                    with open(log_path, 'a', encoding='utf-8', errors='replace') as f:
+                        f.write(string)
+                except Exception:
+                    pass
 
     def flush(self):
         pass
@@ -431,6 +441,34 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 text_color=DEPENDABLE_BLUE
             ).pack(side="left")
 
+            open_log_btn = ctk.CTkButton(
+                log_header,
+                text="📄 Open Log File",
+                font=self._get_font(11, "bold"),
+                fg_color=DEPENDABLE_BLUE,
+                hover_color=UI_DARK_HOVER,
+                text_color=NEUTRAL_WHITE,
+                height=26,
+                width=115,
+                command=self._open_log_file
+            )
+            open_log_btn.pack(side="right", padx=(6, 0))
+
+            open_log_dir_btn = ctk.CTkButton(
+                log_header,
+                text="📁 Log Folder",
+                font=self._get_font(11, "bold"),
+                fg_color=UI_CARD_BG,
+                hover_color=UI_CARD_WELL,
+                text_color=DEPENDABLE_BLUE,
+                border_width=1,
+                border_color=UI_BORDER,
+                height=26,
+                width=95,
+                command=self._open_log_folder
+            )
+            open_log_dir_btn.pack(side="right")
+
             self.log_textbox = ctk.CTkTextbox(
                 log_frame,
                 font=ctk.CTkFont(family="Consolas", size=11),
@@ -512,6 +550,12 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
 
             log_frame = tk.LabelFrame(self, text=" Execution Console ", font=(FONT_FAMILY_FALLBACK, 10, "bold"), fg=DEPENDABLE_BLUE, bg=UI_CARD_BG, padx=8, pady=8)
             log_frame.pack(fill="both", expand=True, padx=12, pady=10)
+
+            log_bar = tk.Frame(log_frame, bg=UI_CARD_BG)
+            log_bar.pack(fill="x", pady=(0, 4))
+            tk.Button(log_bar, text="Open Log File", font=(FONT_FAMILY_FALLBACK, 9), bg=DEPENDABLE_BLUE, fg=NEUTRAL_WHITE, command=self._open_log_file).pack(side="right", padx=3)
+            tk.Button(log_bar, text="Log Folder", font=(FONT_FAMILY_FALLBACK, 9), bg=UI_CARD_WELL, fg=DEPENDABLE_BLUE, command=self._open_log_folder).pack(side="right", padx=3)
+
             self.log_textbox = tk.Text(log_frame, font=("Consolas", 10), bg=DEPENDABLE_BLUE, fg=NEUTRAL_WHITE)
             self.log_textbox.pack(fill="both", expand=True)
 
@@ -689,7 +733,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 self.status_lbl.config(text="\u25cf Finished with Issues", fg=VIVID_MAGENTA)
 
     # ──────────────────────────────────────────────────────────
-    # Post-Inspection Actions
+    # Post-Inspection & Log Actions
     # ──────────────────────────────────────────────────────────
     def _open_excel_report(self):
         if self.output_excel_path and os.path.exists(self.output_excel_path):
@@ -702,6 +746,16 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             os.startfile(self.output_dir_path)
         else:
             messagebox.showwarning("Folder Not Found", "Output folder does not exist.")
+
+    def _open_log_file(self):
+        log_path = logger_config.get_current_log_path()
+        if not logger_config.open_current_log():
+            messagebox.showinfo("Log File", f"Log file path:\n{log_path}")
+
+    def _open_log_folder(self):
+        log_dir = logger_config.get_log_dir()
+        if not logger_config.open_log_folder():
+            messagebox.showinfo("Log Folder", f"Logs folder:\n{log_dir}")
 
 
 def main():

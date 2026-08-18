@@ -35,8 +35,13 @@ pyinstaller SpotCheck.spec --noconfirm
 
 if %ERRORLEVEL% NEQ 0 (
     echo.
-    echo [ERROR] PyInstaller build failed! Falling back to direct CLI command...
+    echo [ERROR] PyInstaller spec build failed! Falling back to direct CLI command...
     pyinstaller --noconfirm --onedir --windowed --name "SpotCheck" ^
+        --collect-all "pyzbar" ^
+        --collect-all "customtkinter" ^
+        --collect-all "pymupdf" ^
+        --collect-all "cv2" ^
+        --collect-all "openpyxl" ^
         --hidden-import "fitz" ^
         --hidden-import "pymupdf" ^
         --hidden-import "pdfplumber" ^
@@ -52,16 +57,33 @@ if %ERRORLEVEL% NEQ 0 (
         --hidden-import "crop_pdf_images" ^
         --hidden-import "Compare_cropped_images" ^
         --hidden-import "main" ^
+        --hidden-import "logger_config" ^
         app_gui.py
 )
 
-:: 4. Verify Output
+:: 4. Verify Output and DLLs
 echo.
 if exist "dist\SpotCheck\SpotCheck.exe" (
     echo ===============================================================================
     echo [SUCCESS] SpotCheck.exe successfully built!
     echo Location: %CD%\dist\SpotCheck\SpotCheck.exe
     echo ===============================================================================
+    echo.
+    echo Checking pyzbar DLLs in distribution:
+    if exist "dist\SpotCheck\_internal\pyzbar\libiconv.dll" (
+        echo   [+] libiconv.dll found in _internal\pyzbar\
+    ) else if exist "dist\SpotCheck\_internal\libiconv.dll" (
+        echo   [+] libiconv.dll found in _internal\
+    ) else (
+        echo   [!] Warning: libiconv.dll not found in standard paths.
+    )
+    if exist "dist\SpotCheck\_internal\pyzbar\libzbar-64.dll" (
+        echo   [+] libzbar-64.dll found in _internal\pyzbar\
+    ) else if exist "dist\SpotCheck\_internal\libzbar-64.dll" (
+        echo   [+] libzbar-64.dll found in _internal\
+    ) else (
+        echo   [!] Warning: libzbar-64.dll not found in standard paths.
+    )
     echo.
     echo You can distribute the entire folder 'dist\SpotCheck' to any Windows computer.
 ) else if exist "dist\SpotCheck.exe" (
