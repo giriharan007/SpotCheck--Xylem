@@ -16,6 +16,11 @@ Output/
 Godwin input/
 Godwin output/
 
+# Models & heavy weights
+models/
+*.safetensors
+*.bin
+
 # Temporary / OS / Office lock files
 ~$*
 *.tmp

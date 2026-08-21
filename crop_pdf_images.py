@@ -42,10 +42,11 @@ def get_table_bboxes(fitz_page, pdfplumber_page=None):
 
     return table_rects
 
-def merge_rects_transitive(rect_list, gap_x=12, gap_y=12):
+def merge_rects_tight(rect_list, gap=2):
     """
-    Iteratively merges bounding boxes that intersect or are within (gap_x, gap_y) distance.
-    Repeats until no more boxes can be merged (transitive closure / connected components).
+    Tightly merges bounding boxes that intersect or touch (gap <= 2pt),
+    or are vertically aligned sub-parts of a single icon (such as an icon and its underline bar).
+    Does NOT group distinct icons or horizontally separate figures together.
     """
     rects = [fitz.Rect(r) for r in rect_list]
     changed = True
@@ -61,9 +62,23 @@ def merge_rects_transitive(rect_list, gap_x=12, gap_y=12):
             for j in range(i + 1, len(rects)):
                 if visited[j]:
                     continue
-                expanded = fitz.Rect(cur.x0 - gap_x, cur.y0 - gap_y, cur.x1 + gap_x, cur.y1 + gap_y)
-                if expanded.intersects(rects[j]):
-                    cur.include_rect(rects[j])
+                rj = rects[j]
+                
+                # Check direct intersection / tiny margin
+                exp = fitz.Rect(cur.x0 - gap, cur.y0 - gap, cur.x1 + gap, cur.y1 + gap)
+                should_merge = exp.intersects(rj)
+                
+                # Check vertical multi-part alignment of a single icon (e.g. WEEE bin + horizontal bar)
+                if not should_merge:
+                    x_overlap = min(cur.x1, rj.x1) - max(cur.x0, rj.x0)
+                    min_w = min(cur.width, rj.width)
+                    if min_w > 0 and (x_overlap / min_w) > 0.5:
+                        y_gap = max(0, max(cur.y0, rj.y0) - min(cur.y1, rj.y1))
+                        if y_gap <= 10:
+                            should_merge = True
+                            
+                if should_merge:
+                    cur.include_rect(rj)
                     visited[j] = True
                     changed = True
             new_rects.append(cur)
@@ -71,10 +86,10 @@ def merge_rects_transitive(rect_list, gap_x=12, gap_y=12):
     return rects
 
 
-def get_all_image_candidates(fitz_page, header_margin=HEADER_MARGIN, footer_margin=FOOTER_MARGIN, gap_x=12, gap_y=12):
+def get_all_image_candidates(fitz_page, header_margin=HEADER_MARGIN, footer_margin=FOOTER_MARGIN):
     """
-    Get bounding boxes of all raster images, logos, and vector drawing icons/diagrams/figures
-    by performing transitive multi-pass clustering.
+    Get bounding boxes of all raster images, logos, and vector drawing icons/diagrams/figures.
+    Excludes margin thumb tabs, divider lines, and avoids grouping distinct images together.
     """
     page_rect = fitz_page.rect
     raw_elements = []
@@ -85,6 +100,9 @@ def get_all_image_candidates(fitz_page, header_margin=HEADER_MARGIN, footer_marg
             if 'bbox' in img:
                 r = fitz.Rect(img['bbox'])
                 if r.y1 > header_margin and r.y0 < (page_rect.height - footer_margin):
+                    # Exclude edge margin artifacts
+                    if (r.x0 < 35 and r.width < 40) or (r.x1 > page_rect.width - 35 and r.width < 40):
+                        continue
                     raw_elements.append(r)
     except Exception:
         pass
@@ -96,23 +114,29 @@ def get_all_image_candidates(fitz_page, header_margin=HEADER_MARGIN, footer_marg
             if b.get("type") == 1:
                 r = fitz.Rect(b["bbox"])
                 if r.y1 > header_margin and r.y0 < (page_rect.height - footer_margin):
+                    if (r.x0 < 35 and r.width < 40) or (r.x1 > page_rect.width - 35 and r.width < 40):
+                        continue
                     raw_elements.append(r)
     except Exception:
         pass
 
-    # 3. Vector drawings, schematics, hazard icons, figures, & lines
+    # 3. Vector drawings, schematics, hazard icons, figures
     try:
         drawings = fitz_page.get_drawings()
         for d in drawings:
             r = fitz.Rect(d['rect'])
             if r.y1 <= header_margin or r.y0 >= (page_rect.height - footer_margin):
                 continue
-            # Ignore full-page separator lines
-            if r.width > (page_rect.width * 0.85) and r.height < 6:
+            # Ignore language thumb tabs / outer side margin indicators
+            if (r.x0 < 38 and r.width < 40) or (r.x1 > page_rect.width - 38 and r.width < 40):
                 continue
-            if r.height > (page_rect.height * 0.85) and r.width < 6:
+            # Ignore thin horizontal divider rules or vertical lines
+            if (r.height <= 2.5 and r.width > 20) or (r.width <= 2.5 and r.height > 20):
                 continue
-            if r.width > 3 and r.height > 3:
+            # Ignore full-page backgrounds / huge tint boxes
+            if r.width * r.height > (page_rect.width * page_rect.height * 0.4):
+                continue
+            if r.width > 1 and r.height > 1:
                 raw_elements.append(r)
     except Exception:
         pass
@@ -120,13 +144,13 @@ def get_all_image_candidates(fitz_page, header_margin=HEADER_MARGIN, footer_marg
     if not raw_elements:
         return []
 
-    # Transitive multi-pass clustering to merge fragmented vector paths & raster tiles into full figures
-    merged_rects = merge_rects_transitive(raw_elements, gap_x=gap_x, gap_y=gap_y)
+    # Tight clustering to assemble vector paths into individual icons without merging separate graphics
+    merged_rects = merge_rects_tight(raw_elements, gap=2)
 
-    # Filter out tiny standalone noise artifacts (smaller than 18x18 and area < 400 pt^2)
+    # Filter out tiny standalone noise artifacts (smaller than 12x12 and area < 140 pt^2)
     final_candidates = []
     for r in merged_rects:
-        if (r.width >= 18 and r.height >= 18) or (r.width * r.height >= 400):
+        if (r.width >= 12 and r.height >= 12) or (r.width * r.height >= 140):
             clamped = fitz.Rect(
                 max(0, r.x0),
                 max(0, r.y0),
@@ -136,6 +160,8 @@ def get_all_image_candidates(fitz_page, header_margin=HEADER_MARGIN, footer_marg
             if clamped.width > 5 and clamped.height > 5:
                 final_candidates.append(clamped)
 
+    # Sort top to bottom, left to right
+    final_candidates.sort(key=lambda r: (r.y0, r.x0))
     return final_candidates
 
 def mask_text_inside_rect(page, rect):

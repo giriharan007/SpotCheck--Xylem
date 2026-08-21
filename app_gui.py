@@ -401,6 +401,18 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             )
             self.open_folder_btn.pack(side="left", padx=6)
 
+            self.region_btn = ctk.CTkButton(
+                action_frame,
+                text="\U0001f4d0 Custom Region Inspector",
+                font=self._get_font(12, "bold"),
+                fg_color=XYLEM_BLUE,
+                hover_color=UI_HOVER_BLUE,
+                text_color=NEUTRAL_WHITE,
+                height=40,
+                command=self._open_region_inspector
+            )
+            self.region_btn.pack(side="left", padx=6)
+
             self.status_lbl = ctk.CTkLabel(
                 action_frame,
                 text="\u25cf Ready to inspect",
@@ -541,6 +553,9 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
 
             self.open_folder_btn = tk.Button(btn_frame, text="Open Output Folder", font=(FONT_FAMILY_FALLBACK, 10), state="disabled", command=self._open_output_folder)
             self.open_folder_btn.pack(side="left", padx=5)
+
+            self.region_btn = tk.Button(btn_frame, text="\U0001f4d0 Custom Region Inspector", font=(FONT_FAMILY_FALLBACK, 10, "bold"), bg=XYLEM_BLUE, fg=NEUTRAL_WHITE, command=self._open_region_inspector)
+            self.region_btn.pack(side="left", padx=5)
 
             self.status_lbl = tk.Label(btn_frame, text="\u25cf Ready", font=(FONT_FAMILY_FALLBACK, 10, "bold"), fg=XYLEM_BLUE, bg=UI_BG_CANVAS)
             self.status_lbl.pack(side="right", padx=10)
@@ -756,6 +771,40 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         log_dir = logger_config.get_log_dir()
         if not logger_config.open_log_folder():
             messagebox.showinfo("Log Folder", f"Logs folder:\n{log_dir}")
+
+    def _open_region_inspector(self):
+        try:
+            eng_pdf = self.eng_pdf_var.get().strip().strip('"').strip("'")
+            tr_target = self.tr_dir_var.get().strip().strip('"').strip("'")
+
+            if not eng_pdf:
+                messagebox.showerror(
+                    "English PDF Required",
+                    "Please select an English Master PDF file first using 'Browse PDF'."
+                )
+                return
+
+            if not os.path.exists(eng_pdf):
+                messagebox.showerror(
+                    "File Not Found",
+                    f"English Master PDF file does not exist:\n{eng_pdf}\n\nPlease check the file path."
+                )
+                return
+
+            import region_inspector
+            region_inspector.open_region_inspector(
+                parent=self,
+                eng_pdf_path=eng_pdf,
+                tr_target_path=tr_target
+            )
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            print(f"[ERROR] Failed to open region inspector: {e}\n{tb}")
+            messagebox.showerror(
+                "Error Opening Region Inspector",
+                f"An unexpected error occurred while launching the Region Inspector:\n{e}\n\nDetails:\n{tb}"
+            )
 
 
 def main():
