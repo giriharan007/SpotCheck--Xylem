@@ -1,37 +1,36 @@
 """
-main.py
+core/pipeline.py
 
-Unified Entry Point for PDF Quality & Consistency Inspection.
+Unified entry point for PDF quality & consistency inspection.
 
 Imports and coordinates:
-  - FirstPage.py           : Checks Page 1 (Page Size, Version, Doc Length, Language Code, Title, Manual Type)
-  - TOC.py                 : Checks Table of Contents Topic Numerics & Flags Missing Sections
-  - LastPage.py            : Checks Last Page (Address, Disclaimer, Copyright, Language Code, Manual Type Code, Revision Date)
-  - Barcode_QR_Check.py    : Multi-page Barcode & QR Code Count & Presence Validation (Non-visual)
-  - crop_pdf_images.py     : Pure Graphic Element Extraction (excluding text & Barcode/QR)
-  - Compare_cropped_images.py : Pure Visual Graphic Crops Comparison across pages
+  - toc.py            : Table of Contents topic numerics & missing-section flagging
+  - barcode_qr.py     : Multi-page barcode & QR code count & presence validation (non-visual)
+  - crop_images.py    : Pure graphic element extraction (excluding text & barcode/QR)
+  - compare_crops.py  : Pure visual graphic crop comparison across pages
+
+Page 1 and last-page field checks (title, sub-title, manual type, address,
+disclaimer, copyright, footer metadata) are deliberately NOT performed here.
+These manuals are stylesheet-based, so those fields are verified through the
+Region Inspector's scoped exact match instead - see core/region_engine.py.
 
 Generates:
-  - PDF_Quality_Inspection_Report.xlsx : Unified multi-sheet Excel report (Overview, First Page, TOC, Last Page, Barcode & QR, Images)
+  - PDF_Quality_Inspection_Report.xlsx : Unified multi-sheet Excel report
+    (Overview, TOC, Barcode & QR, Images, Image Counts)
 """
 
 import os
 import sys
+import argparse
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-import pymupdf
 
-import FirstPage
-
-try:
-    import TOC
-except ImportError:
-    import Toc as TOC
-
-import LastPage
-import Barcode_QR_Check
-import crop_pdf_images
-import Compare_cropped_images
+from core import toc as TOC
+from core import barcode_qr as Barcode_QR_Check
+from core import crop_images as crop_pdf_images
+from core import compare_crops as Compare_cropped_images
+from core import image_counts as ImageCounts
+from core import margins as PageMargins
 
 
 # ============================================================
@@ -39,23 +38,23 @@ import Compare_cropped_images
 # ============================================================
 
 def generate_unified_excel_report(
-    fp_results,
     toc_results,
-    lp_results,
     bc_qr_results,
     img_results_summary,
     img_crop_details_list,
-    values_data,
-    output_excel_path
+    count_results,
+    output_excel_path,
+    run_margins=None
 ):
     """
-    Generate ONE single unified Excel report containing 6 worksheets:
+    Generate ONE single unified Excel report containing 5 worksheets:
       1. Overview    : Executive overview of all sub-check verdicts and Master Verdict
-      2. First Page  : Detailed Page 1 checks (Title, Language Code, Manual Type, Doc Len, Version, Overall)
-      3. TOC         : Detailed TOC topic numerics, missing topics, and Overall status
-      4. Last Page   : Detailed Last Page checks (Address, Disclaimer, Copyright, Lang Code, Manual Type Code, Date, Overall)
-      5. Barcode & QR: Dedicated Barcode & QR Code count and presence matching
-      6. Images      : Detailed crop-by-crop visual graphic matching (Crop Name, Type, Eng Pg, Trans Pg, Movement, Similarity %, Status)
+      2. TOC         : Topic numerics, missing topics, and Overall status
+      3. Barcode & QR: Barcode & QR code count and presence matching
+      4. Images      : Crop-by-crop visual graphic matching
+      5. Image Counts: Symmetric per-topic counts - catches a graphic added to or
+                       missing from a translation, which one-directional crop
+                       matching cannot see
     """
     wb = openpyxl.Workbook()
 
@@ -85,83 +84,53 @@ def generate_unified_excel_report(
     headers_overview = [
         "English Master PDF",
         "Translated PDF",
-        "First Page",
         "TOC",
-        "Last Page",
         "Images",
+        "Image Counts",
         "Barcode & QR",
         "Master Verdict",
     ]
     ws_overview.append(headers_overview)
 
-    for i in range(len(fp_results)):
-        fp_res = fp_results[i]
+    for i in range(len(toc_results)):
         toc_res = toc_results[i]
-        lp_res = lp_results[i]
         bc_res = bc_qr_results[i]
         img_res = img_results_summary[i]
 
-        fp_status = fp_res["overall_verdict"]
         toc_status = toc_res["status"]
-        lp_status = lp_res["overall_verdict"]
         bc_status = bc_res["overall_verdict"]
         img_status = img_res["overall_status"]
+        cnt_status = count_results[i]["overall_verdict"]
 
         master_pass = (
-            fp_status == "PASS" and
             toc_status == "PASS" and
-            lp_status == "PASS" and
             bc_status == "PASS" and
-            img_status == "PASS"
+            img_status == "PASS" and
+            cnt_status == "PASS"
         )
         master_verdict = "PASS" if master_pass else "FAIL"
 
         row_data = [
-            fp_res["english_pdf"],
-            fp_res["translated_pdf"],
-            fp_status,
+            toc_res["english_pdf"],
+            toc_res["translated_pdf"],
             toc_status,
-            lp_status,
             img_status,
+            cnt_status,
             bc_status,
             master_verdict,
         ]
         ws_overview.append(row_data)
 
-    # --------------------------------------------------------
-    # TAB 2: FIRST PAGE (QR & Barcode columns removed)
-    # --------------------------------------------------------
-    ws_fp = wb.create_sheet(title="First Page")
-
-    headers_fp = [
-        "English Master PDF",
-        "Translated PDF",
-        "Title",
-        "Sub-Title",
-        "Language Code",
-        "Manual Type",
-        "Document Number Length",
-        "Version",
-        "Overall",
-    ]
-    ws_fp.append(headers_fp)
-
-    for res in fp_results:
-        row_data = [
-            res["english_pdf"],
-            res["translated_pdf"],
-            res["title_status"],
-            res.get("sub_title_status", "N/A"),
-            res["language_status"],
-            res["manual_type_status"],
-            res["doc_len_display"],
-            res["version_display"],
-            res["overall_verdict"],
-        ]
-        ws_fp.append(row_data)
+    # A report read a month later has to say what it was run with. The ignored
+    # margins change which graphics were extracted at all, so a count of 77 vs
+    # 74 between two runs is only explicable if the setting is recorded here.
+    ws_overview.append([])
+    ws_overview.append(["Ignored page margins",
+                        PageMargins.describe(run_margins),
+                        "Elements lying entirely inside these bands are not extracted or counted."])
 
     # --------------------------------------------------------
-    # TAB 3: TOC
+    # TAB 2: TOC
     # --------------------------------------------------------
     ws_toc = wb.create_sheet(title="TOC")
 
@@ -174,51 +143,18 @@ def generate_unified_excel_report(
     ]
     ws_toc.append(headers_toc)
 
-    for i, res in enumerate(toc_results):
-        vitem = values_data[i]
+    for res in toc_results:
         row_data = [
             res["english_pdf"],
             res["translated_pdf"],
-            vitem["toc_numerics"],
+            res.get("target_numerics_str") or "None",
             res["diff_msg"],
             res["status"],
         ]
         ws_toc.append(row_data)
 
     # --------------------------------------------------------
-    # TAB 4: LAST PAGE
-    # --------------------------------------------------------
-    ws_lp = wb.create_sheet(title="Last Page")
-
-    headers_lp = [
-        "English Master PDF",
-        "Translated PDF",
-        "Address",
-        "DISCLAIMER",
-        "Copyright",
-        "Language Code",
-        "Manual Type Code",
-        "Revision Date",
-        "Overall",
-    ]
-    ws_lp.append(headers_lp)
-
-    for res in lp_results:
-        row_data = [
-            res["english_pdf"],
-            res["translated_pdf"],
-            res["address_status"],
-            res["disclaimer_status"],
-            res["copyright_status"],
-            res["lang_code_status"],
-            res["manual_type_code_status"],
-            res["date_code_status"],
-            res["overall_verdict"],
-        ]
-        ws_lp.append(row_data)
-
-    # --------------------------------------------------------
-    # TAB 5: BARCODE & QR (Dedicated Worksheet)
+    # TAB 3: BARCODE & QR (Dedicated Worksheet)
     # --------------------------------------------------------
     ws_bc = wb.create_sheet(title="Barcode & QR")
 
@@ -235,6 +171,7 @@ def generate_unified_excel_report(
         "Master QR Pages",
         "Target QR Pages",
         "QR Status",
+        "Detection Method",
         "Overall Status",
     ]
     ws_bc.append(headers_bc)
@@ -258,12 +195,13 @@ def generate_unified_excel_report(
             m_qr_pages,
             t_qr_pages,
             res["qr_status"],
+            res.get("detection_note", ""),
             res["overall_verdict"],
         ]
         ws_bc.append(row_data)
 
     # --------------------------------------------------------
-    # TAB 6: IMAGES (Detailed Crop-by-Crop Worksheet)
+    # TAB 4: IMAGES (Detailed Crop-by-Crop Worksheet)
     # --------------------------------------------------------
     ws_img = wb.create_sheet(title="Images")
 
@@ -272,6 +210,7 @@ def generate_unified_excel_report(
         "Translated PDF",
         "Crop Name",
         "Image Type",
+        "Topic",
         "English Page",
         "Matched Target Page",
         "Page Movement",
@@ -286,6 +225,7 @@ def generate_unified_excel_report(
             crop_row["translated_pdf"],
             crop_row["crop_name"],
             crop_row["image_type"],
+            crop_row.get("topic") or "-",
             crop_row["eng_page"],
             crop_row["trans_page"] if crop_row["trans_page"] != -1 else "N/A",
             crop_row["shift_info"],
@@ -293,6 +233,22 @@ def generate_unified_excel_report(
             crop_row["status"],
         ]
         ws_img.append(row_data)
+
+    # --------------------------------------------------------
+    # TAB 5: IMAGE COUNTS (symmetric - both documents counted)
+    # --------------------------------------------------------
+    ws_cnt = wb.create_sheet(title="Image Counts")
+    ws_cnt.append([
+        "English Master PDF", "Translated PDF", "Granularity", "Topic Code",
+        "Topic Title", "Master Images", "Translated Images", "Status",
+    ])
+    for res in count_results:
+        for row in res["rows"]:
+            ws_cnt.append([
+                res["english_pdf"], res["translated_pdf"], res["granularity"],
+                row["topic_code"], row["topic_title"],
+                row["master_count"], row["target_count"], row["status"],
+            ])
 
     # Format all sheets with headers, borders, and PASS/Present/Equal/Matched fills
     for ws in wb.worksheets:
@@ -346,13 +302,20 @@ def generate_unified_excel_report(
 # MASTER BATCH RUNNER
 # ============================================================
 
-def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_dir):
+def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_dir, margins=None):
     """
-    Run Unified FirstPage, TOC, LastPage, Barcode_QR, and Images Inspection Report across translated PDFs.
+    Run unified TOC, Barcode/QR and Images inspection across all translated PDFs.
+
+    `margins` is the ignored-margin block from the selected stylesheet template
+    (header / footer / left / right, in points). It governs both the crop step
+    and the symmetric count step, which have to agree about what counts as page
+    furniture. Omitted, the built-in defaults apply.
     """
     if not os.path.exists(source_pdf_path):
         print(f"ERROR: Source English PDF not found: {source_pdf_path}")
         return
+
+    active_margins = PageMargins.normalize(margins)
 
     print("=" * 80)
     print("UNIFIED PDF QUALITY & VISUAL INSPECTION ENGINE (MAIN)")
@@ -360,6 +323,7 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     print(f"Master English Source: {os.path.basename(source_pdf_path)}")
     print(f"Translated Target    : {translated_path_or_folder}")
     print(f"Output Directory     : {output_dir}")
+    print(f"Ignored Margins      : {PageMargins.describe(active_margins)}")
     print("-" * 80)
 
     # 1. Discover translated PDFs
@@ -380,15 +344,8 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
 
     # 2. Extract Master Source Models & Crop Graphic Elements
     print("Extracting Master Models for Source PDF...")
-    source_fp_model = FirstPage.extract_page_model(source_pdf_path)
     source_toc_numerics = TOC.extract_toc_numerics(source_pdf_path)
-
-    # Extract Master Last Page Footer Model
-    with pymupdf.open(source_pdf_path) as doc_src:
-        src_last_page_text = doc_src[-1].get_text("text")
-    src_last_lines = [l.strip() for l in src_last_page_text.splitlines() if l.strip()]
-    src_footer_line = src_last_lines[-1] if src_last_lines else ""
-    source_lp_model = LastPage.parse_footer_line(src_footer_line)
+    source_count_model = ImageCounts.count_images_by_topic(source_pdf_path, margins=active_margins)
 
     # Crop pure graphic elements from Master English PDF for image comparison
     eng_crops_out_dir = os.path.join(output_dir, "Cropped_Images")
@@ -396,48 +353,29 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     eng_crops_dir = os.path.join(eng_crops_out_dir, pdf_name_no_ext)
 
     print(f"Extracting Pure Graphic Crops from Source PDF...")
-    crop_pdf_images.crop_pdf_elements(source_pdf_path, eng_crops_out_dir)
+    crop_pdf_images.crop_pdf_elements(source_pdf_path, eng_crops_out_dir, margins=active_margins)
 
-    print(f"  Source Language      : {source_fp_model['language']}")
-    print(f"  Source Title         : {source_fp_model['title']} (max font: {source_fp_model['max_font_size']:.1f})")
-    print(f"  Source MType (Page 1): {source_fp_model['manual_type']}")
-    print(f"  Source Version       : {source_fp_model['version']}")
-    print(f"  Source Doc Num       : {source_fp_model['document_number']} (len {source_fp_model['document_length']})")
     print(f"  Source Topics        : {len(source_toc_numerics)} sections")
-    print(f"  Source Last Footer   : {source_lp_model['raw_line']}")
+    print(f"  Source Images        : {source_count_model['total']} "
+          f"({'per-topic' if source_count_model['has_toc'] else 'document total - no TOC'})")
     print()
 
     # 3. Inspect each translated PDF across all modules
     print(f"Inspecting {len(translated_files)} Translated PDF(s)...")
     print()
 
-    fp_results = []
     toc_results = []
-    lp_results = []
     bc_qr_results = []
+    count_results = []
     img_results_summary = []
     img_crop_details_list = []
-    values_data = []
 
     diff_crops_out_dir = os.path.join(output_dir, "Cropped_Comparison")
 
     for idx, tr_path in enumerate(translated_files, start=1):
         tr_filename = os.path.basename(tr_path)
         
-        # 1. FirstPage check
-        try:
-            target_fp_model = FirstPage.extract_page_model(
-                tr_path,
-                ref_manual_bbox=source_fp_model.get("manual_type_bbox"),
-                ref_manual_type=source_fp_model.get("manual_type")
-            )
-            fp_res = FirstPage.compare_page_models(source_fp_model, target_fp_model)
-        except Exception as e:
-            target_fp_model = {"language": "EN", "title": "Missing", "sub_title": "N/A", "has_sub_title": False, "manual_type": "Others", "version": "N/A", "document_number": "N/A", "document_length": "N/A"}
-            fp_res = {"english_pdf": os.path.basename(source_pdf_path), "translated_pdf": tr_filename, "language": "MISSING", "title_val": "MISSING", "title_status": "Not Equal", "sub_title_val": "MISSING", "sub_title_status": "Not Equal", "manual_type_val": "Others", "manual_type_status": "Not Present", "page_size_val": "N/A", "page_size_status": "FAIL", "version_val": "N/A", "version_status": "FAIL", "version_display": "FAIL", "doc_len_val": "N/A", "doc_len_status": "FAIL", "doc_len_display": "FAIL", "language_status": "Not Present", "barcode_status": "Not Present", "qr_status": "Not Present", "overall_verdict": "FAIL"}
-        fp_results.append(fp_res)
-
-        # 2. TOC check
+        # 1. TOC check
         try:
             target_toc_numerics = TOC.extract_toc_numerics(tr_path)
             toc_res = TOC.compare_toc_numerics(source_toc_numerics, target_toc_numerics)
@@ -445,32 +383,30 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
             toc_res["translated_pdf"] = tr_filename
         except Exception as e:
             target_toc_numerics = []
-            toc_res = {"english_pdf": os.path.basename(source_pdf_path), "translated_pdf": tr_filename, "diff_msg": str(e), "status": "FAIL"}
+            toc_res = {"english_pdf": os.path.basename(source_pdf_path), "translated_pdf": tr_filename,
+                       "diff_msg": str(e), "status": "FAIL", "target_numerics_str": ""}
         toc_results.append(toc_res)
 
-        # 3. LastPage check
-        try:
-            tr_lang = target_fp_model.get("language") or "EN"
-            lp_res = LastPage.verify_last_page(
-                tr_path,
-                lang_code=tr_lang,
-                ref_footer_model=source_lp_model,
-                ref_manual_type=source_fp_model.get("manual_type")
-            )
-            lp_res["english_pdf"] = os.path.basename(source_pdf_path)
-            lp_res["translated_pdf"] = tr_filename
-        except Exception as e:
-            lp_res = {"english_pdf": os.path.basename(source_pdf_path), "translated_pdf": tr_filename, "address_status": "FAIL", "disclaimer_status": "FAIL", "copyright_status": "FAIL", "lang_code_status": "FAIL", "manual_type_code_status": "FAIL", "date_code_status": "FAIL", "overall_verdict": "FAIL"}
-        lp_results.append(lp_res)
-
-        # 4. Barcode & QR Code Count Check
+        # 2. Barcode & QR Code Count Check
         try:
             bc_res = Barcode_QR_Check.compare_barcode_qr(source_pdf_path, tr_path)
         except Exception as e:
             bc_res = {"english_pdf": os.path.basename(source_pdf_path), "translated_pdf": tr_filename, "master_barcode_count": 0, "target_barcode_count": 0, "master_pages_barcode": [], "target_pages_barcode": [], "barcode_status": "FAIL", "master_qr_count": 0, "target_qr_count": 0, "master_pages_qr": [], "target_pages_qr": [], "qr_status": "FAIL", "overall_verdict": "FAIL"}
         bc_qr_results.append(bc_res)
 
-        # 5. Pure Visual Graphic Images Comparison
+        # 3. Symmetric Image Count Check (per topic, or document total)
+        try:
+            cnt_res = ImageCounts.compare_image_counts(
+                source_count_model,
+                ImageCounts.count_images_by_topic(tr_path, margins=active_margins))
+        except Exception as e:
+            cnt_res = {"english_pdf": os.path.basename(source_pdf_path),
+                       "translated_pdf": tr_filename, "granularity": "unavailable",
+                       "master_total": 0, "target_total": 0, "mismatched_topics": [],
+                       "rows": [], "overall_verdict": "FAIL", "status": f"FAIL ({e})"}
+        count_results.append(cnt_res)
+
+        # 4. Pure Visual Graphic Images Comparison
         try:
             img_res = Compare_cropped_images.compare_english_crops_with_translated_pdf(
                 eng_crop_dir=eng_crops_dir,
@@ -490,45 +426,29 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
                 "translated_pdf": tr_filename,
                 "crop_name": crop_name,
                 "image_type": image_type,
+                "topic": cd.get("topic", ""),
                 "eng_page": cd["eng_page"],
                 "trans_page": cd["trans_page"],
                 "shift_info": cd["shift_info"],
                 "similarity": cd["match_pct"],
-                "status": cd["status"]
+                "status": cd["status"],
+                "match_img": cd.get("match_img", ""),
             })
 
-        # Extracted Values Data
-        values_data.append({
-            "english_pdf": os.path.basename(source_pdf_path),
-            "translated_pdf": tr_filename,
-            "title_of_manual": target_fp_model.get("title", "Missing"),
-            "sub_title": target_fp_model.get("sub_title", "N/A"),
-            "manual_type": target_fp_model.get("manual_type", "Others"),
-            "translated_manual_type": target_fp_model.get("translated_manual_text", "Missing") if target_fp_model.get("has_manual_type") else "Missing",
-            "language_code": target_fp_model.get("language", "Missing"),
-            "version": target_fp_model.get("version", "N/A"),
-            "document_number": target_fp_model.get("document_number", "N/A"),
-            "document_length": target_fp_model.get("document_length", "N/A"),
-            "toc_numerics": ", ".join(target_toc_numerics) if target_toc_numerics else "None",
-        })
-
         master_pass = (
-            fp_res["overall_verdict"] == "PASS" and
             toc_res["status"] == "PASS" and
-            lp_res["overall_verdict"] == "PASS" and
             bc_res["overall_verdict"] == "PASS" and
-            img_res["overall_status"] == "PASS"
+            img_res["overall_status"] == "PASS" and
+            cnt_res["overall_verdict"] == "PASS"
         )
         master_verdict = "PASS" if master_pass else "FAIL"
 
         print(
-            f"  [{idx:02d}/{len(translated_files):02d}] {tr_filename[:30]:<30} | "
-            f"Lang: {fp_res['language']:<4} | "
-            f"FP: {fp_res['overall_verdict']:<4} | "
+            f"  [{idx:02d}/{len(translated_files):02d}] {tr_filename[:34]:<34} | "
             f"TOC: {toc_res['status']:<4} | "
-            f"LP: {lp_res['overall_verdict']:<4} | "
             f"BC/QR: {bc_res['overall_verdict']:<4} | "
             f"Img: {img_res['overall_status']:<4} | "
+            f"Count: {cnt_res['overall_verdict']:<4} | "
             f"Master: {master_verdict}"
         )
 
@@ -538,19 +458,30 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     # 4. Generate ONE single Excel report with 6 worksheets
     unified_report_path = os.path.join(output_dir, "PDF_Quality_Inspection_Report.xlsx")
     generate_unified_excel_report(
-        fp_results,
         toc_results,
-        lp_results,
         bc_qr_results,
         img_results_summary,
         img_crop_details_list,
-        values_data,
-        unified_report_path
+        count_results,
+        unified_report_path,
+        run_margins=active_margins
     )
 
     print("=" * 80)
     print("UNIFIED QUALITY & VISUAL INSPECTION COMPLETE")
     print("=" * 80)
+
+    # Handed back so the GUI can show the comparison images in-app rather than
+    # leaving the user to dig through the output folder.
+    return {
+        "english_pdf": os.path.basename(source_pdf_path),
+        "report_path": unified_report_path,
+        "toc_results": toc_results,
+        "bc_qr_results": bc_qr_results,
+        "img_results_summary": img_results_summary,
+        "img_crop_details": img_crop_details_list,
+        "count_results": count_results,
+    }
 
 
 # ============================================================
@@ -564,18 +495,48 @@ if __name__ == "__main__":
         except Exception:
             pass
 
-    default_eng_pdf = r"C:\Xylem Project\SpotCheck\Input\English\894387_5.0_en-US_2026-04_IOM.Start350.pdf"
-    SOURCE_ENGLISH_PDF = default_eng_pdf
+    parser = argparse.ArgumentParser(
+        description="SpotCheck - unified PDF quality & visual inspection engine."
+    )
+    parser.add_argument(
+        "--english", default=os.path.join("Input", "English"),
+        help="Master English PDF, or a folder containing exactly one (default: Input/English)")
+    parser.add_argument(
+        "--translated", default=os.path.join("Input", "Translated"),
+        help="Translated PDF file or folder (default: Input/Translated)")
+    parser.add_argument(
+        "--output", default="Output",
+        help="Output directory for the report and comparison images (default: Output)")
+    parser.add_argument(
+        "--template", default=None,
+        help="Saved stylesheet template to take the ignored page margins from")
+    args = parser.parse_args()
 
-    default_tr_dir = r"C:\Xylem Project\SpotCheck\Input\Translated"
-    TRANSLATED_TARGET = default_tr_dir
+    run_margins = None
+    if args.template:
+        from core import templates as templates_store
+        tpl = templates_store.load_template(args.template)
+        if tpl is None:
+            print(f"ERROR: No such stylesheet template: {args.template}")
+            sys.exit(1)
+        run_margins = tpl.get("margins")
 
-    default_out_dir = r"C:\Xylem Project\SpotCheck\Output"
-    OUTPUT_DIRECTORY = default_out_dir
+    source_pdf = args.english
+    if os.path.isdir(source_pdf):
+        pdfs = sorted(f for f in os.listdir(source_pdf) if f.lower().endswith(".pdf"))
+        if not pdfs:
+            print(f"ERROR: No PDF found in English source folder: {source_pdf}")
+            sys.exit(1)
+        if len(pdfs) > 1:
+            print(f"ERROR: Expected one master PDF in {source_pdf}, found {len(pdfs)}.")
+            print("       Pass the master explicitly with --english <file.pdf>.")
+            sys.exit(1)
+        source_pdf = os.path.join(source_pdf, pdfs[0])
 
     run_quality_inspection(
-        source_pdf_path=SOURCE_ENGLISH_PDF,
-        translated_path_or_folder=TRANSLATED_TARGET,
-        output_dir=OUTPUT_DIRECTORY
+        source_pdf_path=source_pdf,
+        translated_path_or_folder=args.translated,
+        output_dir=args.output,
+        margins=run_margins,
     )
 

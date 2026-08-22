@@ -1,26 +1,30 @@
 """
-app_gui.py
+gui/app_window.py
 
-Interactive Desktop GUI for SpotCheck PDF Quality & Visual Inspection Engine.
-Fully styled according to official Xylem Brand Identity Guidelines:
-  - Primary Palette  : Xylem Blue (#007DA3), Dependable Blue (#003E51), Clarity Blue (#67DFFF), Dynamic Green (#61D604)
-  - Secondary Palette: Inspired Teal (#20846F), Uplifting Aqua (#29CCBB), Resilient Purple (#6600C5), Vivid Magenta (#D300F2), Radiant Orange (#F96C00)
-  - Neutral Palette  : Dark Gray (#555555), Medium Gray (#A8A8A8), Light Gray (#DBDBDB), White (#FFFFFF), Black (#000000)
-  - Typography       : Arial (Xylem-approved desktop system font), with Roboto preferred if installed
+Main SpotCheck desktop window.
+
+Presentation layer only: the inspection itself is executed by core.pipeline on a
+worker thread, and the Region Inspector lives in gui.region_dialog. All colors
+and fonts come from gui.theme, so the two windows can no longer drift apart.
 """
 
 import os
 import sys
+import shutil
 import threading
 import queue
 import traceback
 
 # ──────────────────────────────────────────────────────────────
-# Fix 1: Initialize Runtime Logger & Windows DLL Search Paths
+# Runtime logger & native DLL search paths.
 # MUST run before any third-party or sub-module imports.
 # ──────────────────────────────────────────────────────────────
 import logger_config
 logger_config.init_logging()
+
+import settings
+from core import templates as templates_store
+from core import margins as page_margins
 
 
 def _ensure_utf8_console():
@@ -33,6 +37,7 @@ def _ensure_utf8_console():
             except Exception:
                 pass
 
+
 _ensure_utf8_console()
 
 
@@ -41,82 +46,49 @@ try:
     HAS_CTK = True
 except ImportError:
     HAS_CTK = False
-    import tkinter as tk
-    from tkinter import ttk, filedialog, messagebox
+
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
 
 if HAS_CTK:
-    import tkinter as tk
-    import tkinter.font as tkfont
-    from tkinter import filedialog, messagebox
     ctk.set_appearance_mode("Light")
     ctk.set_default_color_theme("blue")
-else:
-    import tkinter.font as tkfont
 
-import main as spotcheck_engine
+from core import pipeline as spotcheck_engine
 
-# ==============================================================================
-# OFFICIAL XYLEM BRAND PALETTE
-# ==============================================================================
-# Primary Palette
-XYLEM_BLUE      = "#007DA3"   # PMS 7704C - Dominant Primary Color
-DEPENDABLE_BLUE = "#003E51"   # PMS 3035C - Second Dominant (Headings, Heavy Cards, Strong UI)
-CLARITY_BLUE    = "#67DFFF"   # PMS 2197C - Vibrant Energy Accent
-DYNAMIC_GREEN   = "#61D604"   # PMS 2287C - Energy, Success & Action Accent
+from gui import theme
+from gui.theme import (
+    XYLEM_BLUE,
+    DEPENDABLE_BLUE,
+    CLARITY_BLUE,
+    DYNAMIC_GREEN,
+    INSPIRED_TEAL,
+    UPLIFTING_AQUA,
+    RESILIENT_PURPLE,
+    VIVID_MAGENTA,
+    RADIANT_ORANGE,
+    NEUTRAL_BLACK,
+    NEUTRAL_DARK_GR,
+    NEUTRAL_MED_GR,
+    NEUTRAL_LIGHT_GR,
+    NEUTRAL_WHITE,
+    UI_BG_CANVAS,
+    UI_CARD_BG,
+    UI_CARD_WELL,
+    UI_BORDER,
+    UI_HOVER_BLUE,
+    UI_DARK_HOVER,
+)
 
-# Secondary Palette (Specialized Functional & Visual Accents)
-INSPIRED_TEAL   = "#20846F"   # PMS 569C
-UPLIFTING_AQUA  = "#29CCBB"   # PMS 3255C
-RESILIENT_PURPLE= "#6600C5"   # PMS 2091C
-VIVID_MAGENTA   = "#D300F2"   # PMS Purple C
-RADIANT_ORANGE  = "#F96C00"   # PMS 1505C - Warnings / Processing
+from gui.theme import FONT_FAMILY_PREFERRED, FONT_FAMILY_FALLBACK
 
-# Neutral Palette
-NEUTRAL_BLACK   = "#000000"
-NEUTRAL_DARK_GR = "#555555"   # PMS 425 - Secondary Muted Text
-NEUTRAL_MED_GR  = "#A8A8A8"   # PMS Cool Gray 6 - Dividers
-NEUTRAL_LIGHT_GR= "#DBDBDB"   # PMS Cool Gray 1 - Borders / Containers
-NEUTRAL_WHITE   = "#FFFFFF"
+# Resolved once, shared with the Region Inspector.
+FONT_FAMILY = theme.resolve_font_family()
 
-# Functional UI Surface Colors
-UI_BG_CANVAS    = "#EEF5FA"   # Soft cool neutral background
-UI_CARD_BG      = "#FFFFFF"   # Card surface
-UI_CARD_WELL    = "#E2EDF7"   # Secondary container well
-UI_BORDER       = "#D0DFEB"   # Soft blue-gray divider border
-UI_HOVER_BLUE   = "#0095C2"   # Interactive button hover blue
-UI_DARK_HOVER   = "#002834"   # Dependable blue hover
-
-# ──────────────────────────────────────────────────────────────
-# Fix 2: Typography — resolve font at runtime
-# Xylem standard: Roboto preferred, Arial as desktop system fallback.
-# ──────────────────────────────────────────────────────────────
-FONT_FAMILY_PREFERRED = "Roboto"
-FONT_FAMILY_FALLBACK  = "Arial"
-
-
-def _resolve_font_family():
-    """
-    Check if Roboto is installed on this system.
-    If yes → use Roboto (Xylem primary typeface).
-    If no  → fall back to Arial (Xylem approved desktop system font).
-    """
-    try:
-        probe = tk.Tk()
-        probe.withdraw()
-        available = set(tkfont.families())
-        probe.destroy()
-        if FONT_FAMILY_PREFERRED in available:
-            print(f"[Typography] Using Roboto (Xylem primary typeface)")
-            return FONT_FAMILY_PREFERRED
-        else:
-            print(f"[Typography] Roboto not installed — using Arial (Xylem desktop system font)")
-            return FONT_FAMILY_FALLBACK
-    except Exception:
-        return FONT_FAMILY_FALLBACK
-
-
-# Resolved at module load time (before any widget creation)
-FONT_FAMILY = _resolve_font_family()
+# Tab labels (also used as CTkTabview keys)
+TAB_INSPECTION = "  Inspection  "
+TAB_REGION = "  Region Inspector  "
+TAB_COMPARISONS = "  Comparisons  "
 
 
 # ──────────────────────────────────────────────────────────────
@@ -158,8 +130,8 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         super().__init__()
 
         self.title("SpotCheck - Xylem PDF Quality & Visual Inspection Engine")
-        self.geometry("1020x760")
-        self.minsize(880, 640)
+        self.geometry("1320x900")
+        self.minsize(1100, 740)
 
         if HAS_CTK:
             self.configure(fg_color=UI_BG_CANVAS)
@@ -174,14 +146,70 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         # Fix 6: Track browse buttons for disable/enable during inspection
         self._browse_buttons = []
 
+        # Whatever was configured last time, so the user does not re-pick the
+        # same three paths on every launch. Stale entries are dropped by
+        # load_paths(), so a deleted folder falls back to the built-in default.
+        self._remembered = settings.load_paths()
+        if self._remembered:
+            print(f"[Settings] Restored {len(self._remembered)} path(s) from "
+                  f"{settings.get_settings_path()}")
+
+        self.region_inspector = None
+        self.comparison_gallery = None
+        self.tabview = None
+        self.last_run_results = None
+
+        # With CustomTkinter present, the application is a two-tab window:
+        # "Inspection" (this file) and "Region Inspector" (gui.region_dialog),
+        # both children of the same window rather than separate top-levels.
+        # The plain-Tk fallback has no tabs and no inspector, since the
+        # inspector itself requires CustomTkinter.
+        if HAS_CTK:
+            self.tabview = ctk.CTkTabview(
+                self,
+                fg_color=UI_BG_CANVAS,
+                segmented_button_fg_color=UI_CARD_WELL,
+                segmented_button_selected_color=XYLEM_BLUE,
+                segmented_button_selected_hover_color=UI_HOVER_BLUE,
+                segmented_button_unselected_color=UI_CARD_WELL,
+                segmented_button_unselected_hover_color=UI_BORDER,
+                text_color=NEUTRAL_WHITE,
+                anchor="w",
+            )
+            self.tabview.pack(fill="both", expand=True, padx=10, pady=(8, 10))
+            self._tab_inspection = self.tabview.add(TAB_INSPECTION)
+            self._tab_region = self.tabview.add(TAB_REGION)
+            self._tab_comparisons = self.tabview.add(TAB_COMPARISONS)
+            self._body = self._tab_inspection
+        else:
+            self._body = self
+
         self._build_ui()
+
+        if HAS_CTK:
+            self._build_region_tab()
+            self._build_comparisons_tab()
+            self._watch_paths()
+            names = self.refresh_template_dropdown(
+                select=self._remembered.get("template"))
+            if self._remembered.get("template") in names:
+                self.after(900, self._on_template_selected)
+        else:
+            # No inspector tab in the fallback UI, but paths are still remembered.
+            for var in (self.eng_pdf_var, self.tr_dir_var, self.out_dir_var):
+                var.trace_add("write", lambda *_a: self._persist_paths())
+
+        # Backstop: a path typed and left unsaved is still captured on close.
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         self._check_queue()
 
     def _get_font(self, size=12, weight="normal", family=None):
-        fam = family or FONT_FAMILY
+        """Xylem-branded font; CTkFont when CustomTkinter is present, else a Tk tuple."""
+        fam = family or theme.resolve_font_family()
         if HAS_CTK:
             return ctk.CTkFont(family=fam, size=size, weight=weight)
-        return (fam, size, weight)
+        return theme.get_font(size, weight, fam)
 
     def _build_ui(self):
         if HAS_CTK:
@@ -189,13 +217,13 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             # 1. Header Banner (Dependable Blue #003E51 with Clarity Blue Accent)
             # ------------------------------------------------------------------
             header_frame = ctk.CTkFrame(
-                self,
+                self._body,
                 corner_radius=12,
                 fg_color=DEPENDABLE_BLUE,
                 border_width=1,
                 border_color=XYLEM_BLUE
             )
-            header_frame.pack(fill="x", padx=18, pady=(16, 12))
+            header_frame.pack(fill="x", padx=10, pady=(10, 10))
 
             top_row = ctk.CTkFrame(header_frame, fg_color="transparent")
             top_row.pack(fill="x", padx=20, pady=(14, 2))
@@ -232,7 +260,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             # 2. Input Configuration Card (White Card with Xylem Blue Accents)
             # ------------------------------------------------------------------
             config_card = ctk.CTkFrame(
-                self,
+                self._body,
                 corner_radius=10,
                 fg_color=UI_CARD_BG,
                 border_width=1,
@@ -256,7 +284,9 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 text_color=DEPENDABLE_BLUE
             ).grid(row=1, column=0, sticky="w", padx=16, pady=6)
 
-            default_eng = os.path.abspath(r"Input\English\894387_5.0_en-US_2026-04_IOM.Start350.pdf") if os.path.exists(r"Input\English\894387_5.0_en-US_2026-04_IOM.Start350.pdf") else ""
+            default_eng = self._remembered.get("english_pdf") or (
+                os.path.abspath(r"Input\English\894387_5.0_en-US_2026-04_IOM.Start350.pdf")
+                if os.path.exists(r"Input\English\894387_5.0_en-US_2026-04_IOM.Start350.pdf") else "")
             self.eng_pdf_var = ctk.StringVar(value=default_eng)
             self.eng_entry = ctk.CTkEntry(
                 config_card,
@@ -291,7 +321,8 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 text_color=DEPENDABLE_BLUE
             ).grid(row=2, column=0, sticky="w", padx=16, pady=6)
 
-            default_tr = os.path.abspath(r"Input\Translated") if os.path.exists(r"Input\Translated") else ""
+            default_tr = self._remembered.get("translated_dir") or (
+                os.path.abspath(r"Input\Translated") if os.path.exists(r"Input\Translated") else "")
             self.tr_dir_var = ctk.StringVar(value=default_tr)
             self.tr_entry = ctk.CTkEntry(
                 config_card,
@@ -326,7 +357,9 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 text_color=DEPENDABLE_BLUE
             ).grid(row=3, column=0, sticky="w", padx=16, pady=(6, 14))
 
-            self.out_dir_var = ctk.StringVar(value=os.path.abspath(r"Output"))
+            self.template_var = ctk.StringVar(value=self._remembered.get("template") or "")
+            self.out_dir_var = ctk.StringVar(
+                value=self._remembered.get("output_dir") or os.path.abspath(r"Output"))
             self.out_entry = ctk.CTkEntry(
                 config_card,
                 textvariable=self.out_dir_var,
@@ -357,7 +390,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             # ------------------------------------------------------------------
             # 3. Action Toolbar & Status Card
             # ------------------------------------------------------------------
-            action_frame = ctk.CTkFrame(self, fg_color="transparent")
+            action_frame = ctk.CTkFrame(self._body, fg_color="transparent")
             action_frame.pack(fill="x", padx=18, pady=8)
 
             self.start_btn = ctk.CTkButton(
@@ -401,17 +434,37 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             )
             self.open_folder_btn.pack(side="left", padx=6)
 
-            self.region_btn = ctk.CTkButton(
-                action_frame,
-                text="\U0001f4d0 Custom Region Inspector",
+            ctk.CTkLabel(
+                config_card,
+                text="Stylesheet Template:",
                 font=self._get_font(12, "bold"),
-                fg_color=XYLEM_BLUE,
-                hover_color=UI_HOVER_BLUE,
+                text_color=DEPENDABLE_BLUE
+            ).grid(row=4, column=0, sticky="w", padx=16, pady=(0, 14))
+
+            tmpl_cell = ctk.CTkFrame(config_card, fg_color="transparent")
+            tmpl_cell.grid(row=4, column=1, columnspan=2, sticky="ew", padx=(0, 16), pady=(0, 14))
+            self.template_menu = ctk.CTkOptionMenu(
+                tmpl_cell, variable=self.template_var, values=["(none)"], width=300, height=34,
+                font=self._get_font(11), fg_color=UI_CARD_BG, button_color=XYLEM_BLUE,
+                text_color=DEPENDABLE_BLUE, command=self._on_template_selected)
+            self.template_menu.pack(side="left")
+            ctk.CTkLabel(
+                tmpl_cell,
+                text="regions load into the Region Inspector automatically",
+                font=self._get_font(10), text_color=NEUTRAL_DARK_GR
+            ).pack(side="left", padx=10)
+
+            self.clear_output_btn = ctk.CTkButton(
+                action_frame,
+                text="\U0001f9f9 Clear Output Folder",
+                font=self._get_font(12, "bold"),
+                fg_color=RADIANT_ORANGE,
+                hover_color="#C85800",
                 text_color=NEUTRAL_WHITE,
                 height=40,
-                command=self._open_region_inspector
+                command=self._clear_output_folder
             )
-            self.region_btn.pack(side="left", padx=6)
+            self.clear_output_btn.pack(side="left", padx=6)
 
             self.status_lbl = ctk.CTkLabel(
                 action_frame,
@@ -423,7 +476,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
 
             # Progress Bar (Xylem Blue)
             self.progress_bar = ctk.CTkProgressBar(
-                self,
+                self._body,
                 progress_color=XYLEM_BLUE,
                 fg_color=UI_CARD_WELL,
                 height=8
@@ -435,7 +488,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             # 4. Live Console & Detailed Execution Log
             # ------------------------------------------------------------------
             log_frame = ctk.CTkFrame(
-                self,
+                self._body,
                 corner_radius=10,
                 fg_color=UI_CARD_BG,
                 border_width=1,
@@ -518,7 +571,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             config_frame.pack(fill="x", padx=12, pady=6)
 
             tk.Label(config_frame, text="English Master PDF:", font=(FONT_FAMILY_FALLBACK, 10, "bold"), fg=DEPENDABLE_BLUE, bg=UI_CARD_BG).grid(row=0, column=0, sticky="w", pady=5)
-            self.eng_pdf_var = tk.StringVar(value=os.path.abspath(r"Input\English\894387_5.0_en-US_2026-04_IOM.Start350.pdf") if os.path.exists(r"Input\English\894387_5.0_en-US_2026-04_IOM.Start350.pdf") else "")
+            self.eng_pdf_var = tk.StringVar(value=self._remembered.get("english_pdf") or (os.path.abspath(r"Input\English\894387_5.0_en-US_2026-04_IOM.Start350.pdf") if os.path.exists(r"Input\English\894387_5.0_en-US_2026-04_IOM.Start350.pdf") else ""))
             self.eng_entry = tk.Entry(config_frame, textvariable=self.eng_pdf_var, font=(FONT_FAMILY_FALLBACK, 10), width=70)
             self.eng_entry.grid(row=0, column=1, sticky="ew", padx=8, pady=5)
             btn_eng_tk = tk.Button(config_frame, text="Browse...", bg=XYLEM_BLUE, fg=NEUTRAL_WHITE, command=self._browse_eng_pdf)
@@ -526,7 +579,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             self._browse_buttons.append(btn_eng_tk)
 
             tk.Label(config_frame, text="Translated Folder:", font=(FONT_FAMILY_FALLBACK, 10, "bold"), fg=DEPENDABLE_BLUE, bg=UI_CARD_BG).grid(row=1, column=0, sticky="w", pady=5)
-            self.tr_dir_var = tk.StringVar(value=os.path.abspath(r"Input\Translated") if os.path.exists(r"Input\Translated") else "")
+            self.tr_dir_var = tk.StringVar(value=self._remembered.get("translated_dir") or (os.path.abspath(r"Input\Translated") if os.path.exists(r"Input\Translated") else ""))
             self.tr_entry = tk.Entry(config_frame, textvariable=self.tr_dir_var, font=(FONT_FAMILY_FALLBACK, 10), width=70)
             self.tr_entry.grid(row=1, column=1, sticky="ew", padx=8, pady=5)
             btn_tr_tk = tk.Button(config_frame, text="Browse...", bg=XYLEM_BLUE, fg=NEUTRAL_WHITE, command=self._browse_tr_dir)
@@ -534,7 +587,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             self._browse_buttons.append(btn_tr_tk)
 
             tk.Label(config_frame, text="Output Directory:", font=(FONT_FAMILY_FALLBACK, 10, "bold"), fg=DEPENDABLE_BLUE, bg=UI_CARD_BG).grid(row=2, column=0, sticky="w", pady=5)
-            self.out_dir_var = tk.StringVar(value=os.path.abspath(r"Output"))
+            self.out_dir_var = tk.StringVar(value=self._remembered.get("output_dir") or os.path.abspath(r"Output"))
             self.out_entry = tk.Entry(config_frame, textvariable=self.out_dir_var, font=(FONT_FAMILY_FALLBACK, 10), width=70)
             self.out_entry.grid(row=2, column=1, sticky="ew", padx=8, pady=5)
             btn_out_tk = tk.Button(config_frame, text="Browse...", bg=XYLEM_BLUE, fg=NEUTRAL_WHITE, command=self._browse_out_dir)
@@ -554,8 +607,8 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             self.open_folder_btn = tk.Button(btn_frame, text="Open Output Folder", font=(FONT_FAMILY_FALLBACK, 10), state="disabled", command=self._open_output_folder)
             self.open_folder_btn.pack(side="left", padx=5)
 
-            self.region_btn = tk.Button(btn_frame, text="\U0001f4d0 Custom Region Inspector", font=(FONT_FAMILY_FALLBACK, 10, "bold"), bg=XYLEM_BLUE, fg=NEUTRAL_WHITE, command=self._open_region_inspector)
-            self.region_btn.pack(side="left", padx=5)
+            self.clear_output_btn = tk.Button(btn_frame, text="Clear Output Folder", font=(FONT_FAMILY_FALLBACK, 10, "bold"), bg=RADIANT_ORANGE, fg=NEUTRAL_WHITE, command=self._clear_output_folder)
+            self.clear_output_btn.pack(side="left", padx=5)
 
             self.status_lbl = tk.Label(btn_frame, text="\u25cf Ready", font=(FONT_FAMILY_FALLBACK, 10, "bold"), fg=XYLEM_BLUE, bg=UI_BG_CANVAS)
             self.status_lbl.pack(side="right", padx=10)
@@ -625,6 +678,10 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         self.eng_entry.configure(state="disabled")
         self.tr_entry.configure(state="disabled")
         self.out_entry.configure(state="disabled")
+        try:
+            self.clear_output_btn.configure(state="disabled")
+        except Exception:
+            pass
 
     def _unlock_inputs(self):
         """Re-enable all entries and browse buttons after inspection completes."""
@@ -633,6 +690,10 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         self.eng_entry.configure(state="normal")
         self.tr_entry.configure(state="normal")
         self.out_entry.configure(state="normal")
+        try:
+            self.clear_output_btn.configure(state="normal")
+        except Exception:
+            pass
 
     # ──────────────────────────────────────────────────────────
     # Inspection Launch (with Fix 3 + Fix 4)
@@ -693,13 +754,20 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         self.output_dir_path = os.path.abspath(out_dir)
         self.output_excel_path = os.path.join(self.output_dir_path, "PDF_Quality_Inspection_Report.xlsx")
 
-        t = threading.Thread(target=self._run_inspection_thread, args=(eng_pdf, tr_target, out_dir), daemon=True)
+        # The ignored margins decide what image extraction even sees, so the
+        # run has to use the ones the user set in the Region Inspector - the
+        # same ones the template was saved with.
+        run_margins = self._active_margins()
+        self._append_log(f"Ignored Margins       : {page_margins.describe(run_margins)}\n")
+
+        t = threading.Thread(target=self._run_inspection_thread,
+                             args=(eng_pdf, tr_target, out_dir, run_margins), daemon=True)
         t.start()
 
     # ──────────────────────────────────────────────────────────
     # Worker Thread (with Fix 5: full traceback on errors)
     # ──────────────────────────────────────────────────────────
-    def _run_inspection_thread(self, eng_pdf, tr_target, out_dir):
+    def _run_inspection_thread(self, eng_pdf, tr_target, out_dir, run_margins=None):
         old_stdout = sys.stdout
         old_stderr = sys.stderr
         redirector = TextRedirector(self.text_queue)
@@ -707,7 +775,8 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         sys.stderr = redirector
 
         try:
-            spotcheck_engine.run_quality_inspection(eng_pdf, tr_target, out_dir)
+            self.last_run_results = spotcheck_engine.run_quality_inspection(
+                eng_pdf, tr_target, out_dir, margins=run_margins)
             success = True
         except Exception as e:
             # Fix 5: Full traceback in error console for production debugging
@@ -724,6 +793,16 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
 
     def _on_inspection_finished(self, success):
         self.is_running = False
+
+        # Publish the crop comparisons into the gallery so they can be reviewed
+        # in-app instead of only on disk.
+        if success and self.comparison_gallery is not None and self.last_run_results:
+            try:
+                self.comparison_gallery.load_crop_details(
+                    self.last_run_results.get("img_crop_details", []))
+            except Exception as e:
+                print(f"[WARN] Could not publish crop results to the gallery: {e}")
+
         self.start_btn.configure(state="normal")
         self.open_folder_btn.configure(state="normal")
         self._unlock_inputs()  # Fix 6
@@ -762,6 +841,133 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         else:
             messagebox.showwarning("Folder Not Found", "Output folder does not exist.")
 
+    # ──────────────────────────────────────────────────────────
+    # Clearing the output folder
+    # ──────────────────────────────────────────────────────────
+    @staticmethod
+    def _is_inside(child, parent):
+        """True if `child` resolves to somewhere at or under `parent`."""
+        try:
+            c = os.path.realpath(child)
+            pa = os.path.realpath(parent)
+            return os.path.commonpath([c, pa]) == pa
+        except Exception:
+            return False        # different drives, or an unresolvable path
+
+    def _clear_output_folder(self):
+        """
+        Empty the configured output directory, after an explicit confirmation.
+
+        Refuses outright when the output folder would take the inputs with it -
+        if someone points Output at the same folder as their PDFs, clearing it
+        would destroy the source documents. That is checked before anything is
+        counted, let alone deleted.
+        """
+        if self.is_running:
+            messagebox.showinfo("Inspection Running",
+                                "Wait for the current inspection to finish before clearing the output folder.")
+            return
+
+        out_dir = self.out_dir_var.get().strip().strip('"').strip("'")
+        if not out_dir:
+            messagebox.showerror("No Output Directory", "Choose an output directory first.")
+            return
+        if not os.path.isdir(out_dir):
+            messagebox.showerror("Not Found", f"Output directory does not exist:\n{out_dir}")
+            return
+
+        real_out = os.path.realpath(out_dir)
+        if os.path.dirname(real_out) == real_out:
+            messagebox.showerror("Refused",
+                                 f"{real_out} is a filesystem root. Refusing to clear it.")
+            return
+
+        eng = self.eng_pdf_var.get().strip().strip('"').strip("'")
+        tr = self.tr_dir_var.get().strip().strip('"').strip("'")
+        clashes = []
+        if eng and self._is_inside(eng, real_out):
+            clashes.append(f"the English master PDF ({os.path.basename(eng)})")
+        if tr and (self._is_inside(tr, real_out) or self._is_inside(real_out, tr)):
+            clashes.append("the translated PDFs folder")
+        if clashes:
+            messagebox.showerror(
+                "Refused - Inputs Would Be Deleted",
+                "The output folder contains " + " and ".join(clashes) + ".\n\n"
+                f"{real_out}\n\nClearing it would delete your source documents. "
+                "Point Output at a separate folder first.")
+            return
+
+        entries = os.listdir(real_out)
+        if not entries:
+            messagebox.showinfo("Already Empty", f"The output folder is already empty:\n{real_out}")
+            return
+
+        n_files = 0
+        total = 0
+        for root, _dirs, files in os.walk(real_out):
+            for f in files:
+                n_files += 1
+                try:
+                    total += os.path.getsize(os.path.join(root, f))
+                except OSError:
+                    pass
+        n_dirs = sum(1 for e in entries if os.path.isdir(os.path.join(real_out, e)))
+
+        if not messagebox.askyesno(
+            "Clear Output Folder?",
+            f"Delete everything inside:\n{real_out}\n\n"
+            f"{n_files} file(s) in {n_dirs} sub-folder(s), {total / (1024 * 1024):.1f} MB.\n\n"
+            "This includes the Excel report and all cropped and comparison images. "
+            "Your PDFs are not touched.\n\nThis cannot be undone.",
+            icon="warning", default="no"
+        ):
+            return
+
+        removed, failed = 0, []
+        for name in entries:
+            target = os.path.join(real_out, name)
+            try:
+                if os.path.isdir(target) and not os.path.islink(target):
+                    shutil.rmtree(target)
+                else:
+                    os.remove(target)
+                removed += 1
+            except OSError as e:
+                failed.append(f"{name}: {e}")
+
+        # Anything the app was pointing at at is gone now.
+        self.output_excel_path = None
+        try:
+            self.open_excel_btn.configure(state="disabled")
+        except Exception:
+            pass
+        if self.comparison_gallery is not None:
+            try:
+                self.comparison_gallery._all_rows = []
+                self.comparison_gallery._selected = None
+                self.comparison_gallery._refresh_list()
+            except Exception:
+                pass
+
+        print(f"[Output] Cleared {removed} item(s) from {real_out}")
+        msg = f"Removed {removed} item(s) from:\n{real_out}"
+        if failed:
+            msg += "\n\nCould not remove:\n" + "\n".join(failed[:6])
+            if len(failed) > 6:
+                msg += f"\n...and {len(failed) - 6} more"
+            msg += "\n\nA file may be open in another program (the Excel report, for instance)."
+            messagebox.showwarning("Cleared With Errors", msg)
+        else:
+            messagebox.showinfo("Output Folder Cleared", msg)
+
+    def _on_close(self):
+        """Save the configured paths, then close."""
+        try:
+            self._persist_paths()
+        except Exception as e:
+            print(f"[Settings] Could not save on close: {e}")
+        self.destroy()
+
     def _open_log_file(self):
         log_path = logger_config.get_current_log_path()
         if not logger_config.open_current_log():
@@ -772,46 +978,222 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         if not logger_config.open_log_folder():
             messagebox.showinfo("Log Folder", f"Logs folder:\n{log_dir}")
 
-    def _open_region_inspector(self):
+    # ──────────────────────────────────────────────────────────
+    # Region Inspector Tab
+    # ──────────────────────────────────────────────────────────
+    def _build_region_tab(self):
+        """
+        Embed the Region Inspector as a tab of this window.
+
+        Created empty: the user picks the PDFs on the Inspection tab, and
+        _sync_region_inspector() hands the configured paths over via load().
+        """
         try:
-            eng_pdf = self.eng_pdf_var.get().strip().strip('"').strip("'")
-            tr_target = self.tr_dir_var.get().strip().strip('"').strip("'")
-
-            if not eng_pdf:
-                messagebox.showerror(
-                    "English PDF Required",
-                    "Please select an English Master PDF file first using 'Browse PDF'."
-                )
-                return
-
-            if not os.path.exists(eng_pdf):
-                messagebox.showerror(
-                    "File Not Found",
-                    f"English Master PDF file does not exist:\n{eng_pdf}\n\nPlease check the file path."
-                )
-                return
-
-            import region_inspector
-            region_inspector.open_region_inspector(
-                parent=self,
-                eng_pdf_path=eng_pdf,
-                tr_target_path=tr_target
-            )
+            from gui.region_dialog import RegionInspectorFrame
+            self.region_inspector = RegionInspectorFrame(
+                self._tab_region, on_results=self._on_region_results,
+                on_templates_changed=self._on_templates_changed,
+                on_margins_changed=self._on_margins_changed)
+            self.region_inspector.pack(fill="both", expand=True)
+            # Restore last session's margins. A template selected a moment
+            # later overwrites them with its own, which is the right order.
+            if self._remembered.get("margins"):
+                self.region_inspector.set_margins(self._remembered["margins"])
         except Exception as e:
-            import traceback
             tb = traceback.format_exc()
-            print(f"[ERROR] Failed to open region inspector: {e}\n{tb}")
-            messagebox.showerror(
-                "Error Opening Region Inspector",
-                f"An unexpected error occurred while launching the Region Inspector:\n{e}\n\nDetails:\n{tb}"
-            )
+            print(f"[ERROR] Failed to build Region Inspector tab: {e}\n{tb}")
+            self.region_inspector = None
+            ctk.CTkLabel(
+                self._tab_region,
+                text=f"Region Inspector unavailable:\n{e}",
+                font=self._get_font(12),
+                text_color=VIVID_MAGENTA,
+                justify="left",
+            ).pack(padx=20, pady=20, anchor="w")
 
+    # ──────────────────────────────────────────────────────────
+    # Keep the Region Inspector in step with the Inspection tab
+    # ──────────────────────────────────────────────────────────
+    def _watch_paths(self):
+        """
+        Load the configured master into the Region Inspector automatically.
+
+        There is no longer a button to press: whatever is selected on the
+        Inspection tab is what the inspector shows. The fields are watched
+        rather than only the Browse buttons so a typed or pasted path works
+        too, and the reload is debounced so typing does not re-open the PDF on
+        every keystroke.
+        """
+        self._path_reload_job = None
+        for var in (self.eng_pdf_var, self.tr_dir_var, self.out_dir_var):
+            var.trace_add("write", self._on_path_changed)
+        self.after(300, self._sync_region_inspector)
+
+    def _on_path_changed(self, *_args):
+        if getattr(self, "_path_reload_job", None) is not None:
+            try:
+                self.after_cancel(self._path_reload_job)
+            except Exception:
+                pass
+        self._path_reload_job = self.after(400, self._sync_region_inspector)
+
+    def _persist_paths(self):
+        """
+        Remember whatever is currently configured, so the next launch starts here.
+
+        Each field is stored independently and only when it points at something
+        real, so a half-typed path never overwrites a good remembered one.
+        """
+        eng = self.eng_pdf_var.get().strip().strip('"').strip("'")
+        tr = self.tr_dir_var.get().strip().strip('"').strip("'")
+        out = self.out_dir_var.get().strip().strip('"').strip("'")
+        settings.save_paths(
+            english_pdf=eng if eng and os.path.isfile(eng) else None,
+            translated_dir=tr if tr and os.path.exists(tr) else None,
+            output_dir=out if out and os.path.isdir(out) else None,
+        )
+        try:
+            tmpl = (self.template_var.get() or "").strip()
+            if tmpl and tmpl != "(none)":
+                settings.save({"template": tmpl})
+        except Exception:
+            pass
+
+        # Margins are remembered separately from the template, so a user who
+        # tunes them without saving a template still finds them next launch.
+        try:
+            if self.region_inspector is not None:
+                settings.save({"margins": page_margins.to_storage(
+                    self.region_inspector.get_margins())})
+        except Exception:
+            pass
+
+    def _sync_region_inspector(self):
+        """Point the inspector at the currently configured paths, if usable."""
+        self._path_reload_job = None
+
+        # Persist first: the output folder is worth remembering even when no
+        # master has been chosen yet, and the reload below returns early then.
+        self._persist_paths()
+
+        if self.region_inspector is None:
+            return
+        eng = self.eng_pdf_var.get().strip().strip('"').strip("'")
+        tr = self.tr_dir_var.get().strip().strip('"').strip("'")
+        out = self.out_dir_var.get().strip().strip('"').strip("'")
+
+        if not eng or not os.path.isfile(eng):
+            return
+        if os.path.abspath(eng) == getattr(self, "_loaded_master", None) and \
+           os.path.abspath(tr or "") == getattr(self, "_loaded_target", "") and \
+           os.path.abspath(out or "") == getattr(self, "_loaded_out", ""):
+            return
+        try:
+            self.region_inspector.load(eng_pdf_path=eng, tr_target_path=tr,
+                                       output_dir=out or None)
+            self._loaded_master = os.path.abspath(eng)
+            self._loaded_target = os.path.abspath(tr or "")
+            self._loaded_out = os.path.abspath(out or "")
+            print(f"[Region Inspector] Loaded {os.path.basename(eng)}")
+        except Exception as e:
+            print(f"[WARN] Could not load master into the Region Inspector: {e}")
+
+    def _build_comparisons_tab(self):
+        """Embed the comparison-image gallery as a third tab."""
+        try:
+            from gui.comparison_gallery import ComparisonGalleryFrame
+            self.comparison_gallery = ComparisonGalleryFrame(
+                self._tab_comparisons,
+                is_active=lambda: self.tabview is not None
+                and self.tabview.get() == TAB_COMPARISONS,
+            )
+            self.comparison_gallery.pack(fill="both", expand=True)
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[ERROR] Failed to build Comparisons tab: {e}\n{tb}")
+            self.comparison_gallery = None
+            ctk.CTkLabel(
+                self._tab_comparisons,
+                text=f"Comparison gallery unavailable:\n{e}",
+                font=self._get_font(12), text_color=VIVID_MAGENTA, justify="left",
+            ).pack(padx=20, pady=20, anchor="w")
+
+    # ──────────────────────────────────────────────────────────
+    # Stylesheet templates
+    # ──────────────────────────────────────────────────────────
+    def _on_margins_changed(self, margins):
+        """The Region Inspector's margins were edited; remember them."""
+        try:
+            settings.save({"margins": page_margins.to_storage(margins)})
+        except Exception as e:
+            print(f"[Settings] Could not remember the margins: {e}")
+
+    def _active_margins(self):
+        """
+        The margins a run should use.
+
+        The Region Inspector holds the live value - it is where they are edited
+        and it is loaded from the selected template - so it wins. Without it
+        (the plain-Tk fallback UI), fall back to the selected template on disk,
+        then to what was remembered last session.
+        """
+        if self.region_inspector is not None:
+            try:
+                return self.region_inspector.get_margins()
+            except Exception:
+                pass
+        tmpl = (self.template_var.get() or "").strip() if hasattr(self, "template_var") else ""
+        if tmpl and tmpl != "(none)":
+            try:
+                return templates_store.margins_for_template(tmpl)
+            except Exception:
+                pass
+        return page_margins.normalize(self._remembered.get("margins"))
+
+    def refresh_template_dropdown(self, select=None):
+        """Reload the template list into the Inspection tab's dropdown."""
+        try:
+            names = templates_store.list_templates()
+            self.template_menu.configure(values=names or ["(none)"])
+            if select and select in names:
+                self.template_var.set(select)
+            elif self.template_var.get() not in names:
+                self.template_var.set(names[0] if names else "(none)")
+            return names
+        except Exception as e:
+            print(f"[Templates] Could not refresh the dropdown: {e}")
+            return []
+
+    def _on_templates_changed(self, name):
+        """The Region Inspector saved or deleted a template."""
+        self.refresh_template_dropdown(select=name)
+        self._persist_paths()
+
+    def _on_template_selected(self, name=None):
+        """Load the chosen template's regions into the Region Inspector."""
+        name = (name or self.template_var.get() or "").strip()
+        if not name or name == "(none)" or self.region_inspector is None:
+            return
+        if name == getattr(self, "_loaded_template", None):
+            return
+        if self.region_inspector.apply_template(name, announce=False):
+            self._loaded_template = name
+            try:
+                self.region_inspector.refresh_template_list(select=name)
+            except Exception:
+                pass
+            self._persist_paths()
+
+    def _on_region_results(self, results):
+        """Called by the Region Inspector when a batch check finishes."""
+        if self.comparison_gallery is not None:
+            try:
+                self.comparison_gallery.load_region_results(results)
+            except Exception as e:
+                print(f"[WARN] Could not publish region results to the gallery: {e}")
 
 def main():
+    """Launch the SpotCheck desktop application."""
     _ensure_utf8_console()
     app = SpotCheckApp()
     app.mainloop()
-
-
-if __name__ == "__main__":
-    main()

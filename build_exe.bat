@@ -50,15 +50,23 @@ if %ERRORLEVEL% NEQ 0 (
         --hidden-import "pyzbar" ^
         --hidden-import "openpyxl" ^
         --hidden-import "customtkinter" ^
-        --hidden-import "FirstPage" ^
-        --hidden-import "LastPage" ^
-        --hidden-import "Barcode_QR_Check" ^
-        --hidden-import "Toc" ^
-        --hidden-import "crop_pdf_images" ^
-        --hidden-import "Compare_cropped_images" ^
-        --hidden-import "main" ^
         --hidden-import "logger_config" ^
-        app_gui.py
+        --hidden-import "settings" ^
+        --hidden-import "core" ^
+        --hidden-import "core.pipeline" ^
+        --hidden-import "core.toc" ^
+        --hidden-import "core.barcode_qr" ^
+        --hidden-import "core.crop_images" ^
+        --hidden-import "core.compare_crops" ^
+        --hidden-import "core.image_counts" ^
+        --hidden-import "core.templates" ^
+        --hidden-import "core.region_engine" ^
+        --hidden-import "gui" ^
+        --hidden-import "gui.theme" ^
+        --hidden-import "gui.app_window" ^
+        --hidden-import "gui.region_dialog" ^
+        --hidden-import "gui.comparison_gallery" ^
+        run_gui.py
 )
 
 :: 4. Verify Output and DLLs

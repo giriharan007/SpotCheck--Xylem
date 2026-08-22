@@ -1,0 +1,12 @@
+{
+  "english_pdf": "D:\\Spot check\\Input\\English\\894387_5.0_en-US_2026-04_IOM.Start350.pdf",
+  "translated_dir": "D:\\Spot check\\Input\\Translated",
+  "output_dir": "D:\\Spot check\\Output",
+  "template": "12",
+  "margins": {
+    "header": 40.0,
+    "footer": 40.0,
+    "left": 35.0,
+    "right": 35.0
+  }
+}

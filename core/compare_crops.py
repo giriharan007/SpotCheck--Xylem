@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import argparse
 import pymupdf as fitz  # PyMuPDF (aliased as fitz for API compat)
@@ -51,6 +52,45 @@ def render_translated_pdf_pages_pure_graphics(trans_pdf_path, dpi=DPI):
     finally:
         doc.close()
     return bgr_imgs, gray_imgs
+
+_PAGE_IN_NAME = re.compile(r"^p(\d{3,4})_", re.IGNORECASE)
+_PAGE_IN_FOLDER = re.compile(r"^page_(\d+)$", re.IGNORECASE)
+
+
+def _iter_english_crops(eng_crop_dir):
+    """
+    Walk the master's crop tree, whichever layout it uses.
+
+    crop_images writes topic folders when the PDF has a TOC and page folders when
+    it does not, so the page number is recovered from the filename prefix first
+    (topic layout) and from the folder name otherwise. Yields
+    (folder, page_number, topic_name, filename), ordered by page then filename so
+    the comparison sequence does not depend on the layout.
+    """
+    rows = []
+    for root, _dirs, files in os.walk(eng_crop_dir):
+        folder = os.path.basename(root)
+        if os.path.abspath(root) == os.path.abspath(eng_crop_dir):
+            continue
+        m_folder = _PAGE_IN_FOLDER.match(folder)
+        for f in files:
+            if not f.lower().endswith(".png"):
+                continue
+            # Barcodes and QR codes are excluded: their contents legitimately
+            # differ between documents, so a visual diff is meaningless.
+            if any(k in f.lower() for k in ("barcode", "qr", "qrcode")):
+                continue
+            m_name = _PAGE_IN_NAME.match(f)
+            if m_name:
+                page, topic = int(m_name.group(1)), folder
+            elif m_folder:
+                page, topic = int(m_folder.group(1)), ""
+            else:
+                continue        # unrecognised layout, skip rather than guess
+            rows.append((root, page, topic, f))
+    rows.sort(key=lambda r: (r[1], r[3]))
+    return rows
+
 
 def create_crop_match_image(crop_img_gray, target_page_bgr, max_loc, max_val, eng_page, trans_page):
     """
@@ -106,100 +146,86 @@ def compare_english_crops_with_translated_pdf(eng_crop_dir, trans_pdf_path, outp
     total_matches_found = 0
     crop_details = []
 
-    for page_folder in sorted(os.listdir(eng_crop_dir)):
-        folder_path = os.path.join(eng_crop_dir, page_folder)
-        if not os.path.isdir(folder_path):
-            continue
-
-        try:
-            eng_page_num = int(page_folder.replace("page_", ""))
-        except ValueError:
-            continue
-
-        # Pure visual graphics only: exclude Barcode and QR code crops from CV/SSIM comparison
-        crop_files = [
-            f for f in sorted(os.listdir(folder_path))
-            if f.lower().endswith(".png") and not any(k in f.lower() for k in ("barcode", "qr", "qrcode"))
-        ]
-
+    for folder_path, eng_page_num, topic_name, crop_file in _iter_english_crops(eng_crop_dir):
         page_out_dir = os.path.join(diff_out_dir, f"page_{eng_page_num:03d}")
+        crop_path = os.path.join(folder_path, crop_file)
+        crop_img = cv2.imread(crop_path, cv2.IMREAD_GRAYSCALE)
 
-        for crop_file in crop_files:
-            crop_path = os.path.join(folder_path, crop_file)
-            crop_img = cv2.imread(crop_path, cv2.IMREAD_GRAYSCALE)
+        if crop_img is None or crop_img.shape[0] < 8 or crop_img.shape[1] < 8:
+            continue
 
-            if crop_img is None or crop_img.shape[0] < 8 or crop_img.shape[1] < 8:
-                continue
+        total_crops_checked += 1
 
-            total_crops_checked += 1
+        # Priority 1: Check Same Page first (eng_page_num - 1)
+        same_p_idx = eng_page_num - 1
+        best_score = 0.0
+        best_page = -1
+        best_loc = (0, 0)
 
-            # Priority 1: Check Same Page first (eng_page_num - 1)
-            same_p_idx = eng_page_num - 1
-            best_score = 0.0
-            best_page = -1
-            best_loc = (0, 0)
+        if 0 <= same_p_idx < total_trans_pages:
+            target_gray = trans_gray_imgs[same_p_idx]
+            if crop_img.shape[0] <= target_gray.shape[0] and crop_img.shape[1] <= target_gray.shape[1]:
+                res = cv2.matchTemplate(target_gray, crop_img, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, max_loc = cv2.minMaxLoc(res)
+                best_score = max_val
+                best_page = eng_page_num
+                best_loc = max_loc
 
-            if 0 <= same_p_idx < total_trans_pages:
-                target_gray = trans_gray_imgs[same_p_idx]
-                if crop_img.shape[0] <= target_gray.shape[0] and crop_img.shape[1] <= target_gray.shape[1]:
-                    res = cv2.matchTemplate(target_gray, crop_img, cv2.TM_CCOEFF_NORMED)
-                    _, max_val, _, max_loc = cv2.minMaxLoc(res)
+        # Priority 2: Only if same-page score is below threshold, search adjacent pages sorted by distance
+        if best_score * 100 < threshold:
+            search_start = max(0, eng_page_num - 4)
+            search_end = min(total_trans_pages, eng_page_num + 3)
+            all_search_pages = list(range(search_start, search_end))
+            all_search_pages.sort(key=lambda p_idx: abs(p_idx - same_p_idx))
+
+            for search_p_idx in all_search_pages:
+                if search_p_idx == same_p_idx:
+                    continue
+                target_gray = trans_gray_imgs[search_p_idx]
+                if crop_img.shape[0] > target_gray.shape[0] or crop_img.shape[1] > target_gray.shape[1]:
+                    continue
+
+                res = cv2.matchTemplate(target_gray, crop_img, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, max_loc = cv2.minMaxLoc(res)
+
+                if max_val > best_score:
                     best_score = max_val
-                    best_page = eng_page_num
+                    best_page = search_p_idx + 1
                     best_loc = max_loc
 
-            # Priority 2: Only if same-page score is below threshold, search adjacent pages sorted by distance
-            if best_score * 100 < threshold:
-                search_start = max(0, eng_page_num - 4)
-                search_end = min(total_trans_pages, eng_page_num + 3)
-                all_search_pages = list(range(search_start, search_end))
-                all_search_pages.sort(key=lambda p_idx: abs(p_idx - same_p_idx))
+        match_pct = best_score * 100
+        is_match = match_pct >= threshold
 
-                for search_p_idx in all_search_pages:
-                    if search_p_idx == same_p_idx:
-                        continue
-                    target_gray = trans_gray_imgs[search_p_idx]
-                    if crop_img.shape[0] > target_gray.shape[0] or crop_img.shape[1] > target_gray.shape[1]:
-                        continue
+        if is_match:
+            total_matches_found += 1
 
-                    res = cv2.matchTemplate(target_gray, crop_img, cv2.TM_CCOEFF_NORMED)
-                    _, max_val, _, max_loc = cv2.minMaxLoc(res)
+        status = "MATCH (PASS)" if is_match else "CHECK"
+        shift_info = "Same Page" if best_page == eng_page_num else f"Moved to Page {best_page}"
+        if best_page == -1:
+            shift_info = "Not Found"
 
-                    if max_val > best_score:
-                        best_score = max_val
-                        best_page = search_p_idx + 1
-                        best_loc = max_loc
+        # Save visual match diff image
+        match_save_path = ""
+        if best_page != -1:
+            target_bgr = trans_bgr_imgs[best_page - 1]
+            match_img = create_crop_match_image(crop_img, target_bgr, best_loc, best_score, eng_page_num, best_page)
+            os.makedirs(page_out_dir, exist_ok=True)
+            match_filename = f"match_{crop_file}"
+            match_save_path = os.path.join(page_out_dir, match_filename)
+            cv2.imwrite(match_save_path, match_img)
 
-            match_pct = best_score * 100
-            is_match = match_pct >= threshold
+        crop_details.append({
+            "eng_page": eng_page_num,
+            "topic": topic_name,
+            "crop_file": crop_file,
+            "trans_page": best_page,
+            "shift_info": shift_info,
+            "match_pct": match_pct,
+            "status": status,
+            "match_img": match_save_path,
+        })
 
-            if is_match:
-                total_matches_found += 1
-
-            status = "MATCH (PASS)" if is_match else "CHECK"
-            shift_info = "Same Page" if best_page == eng_page_num else f"Moved to Page {best_page}"
-            if best_page == -1:
-                shift_info = "Not Found"
-
-            # Save visual match diff image
-            if best_page != -1:
-                target_bgr = trans_bgr_imgs[best_page - 1]
-                match_img = create_crop_match_image(crop_img, target_bgr, best_loc, best_score, eng_page_num, best_page)
-                os.makedirs(page_out_dir, exist_ok=True)
-                match_filename = f"match_{crop_file}"
-                match_save_path = os.path.join(page_out_dir, match_filename)
-                cv2.imwrite(match_save_path, match_img)
-
-            crop_details.append({
-                "eng_page": eng_page_num,
-                "crop_file": crop_file,
-                "trans_page": best_page,
-                "shift_info": shift_info,
-                "match_pct": match_pct,
-                "status": status
-            })
-
-            print(f"  Eng Pg {eng_page_num:2d} | {crop_file:24s} -> Trans Pg {best_page:2d} ({shift_info:16s}) | Match: {match_pct:6.2f}% | {status}")
+        print(f"  Eng Pg {eng_page_num:2d} | {crop_file:24s} -> Trans Pg {best_page:2d} ({shift_info:16s}) | Match: {match_pct:6.2f}% | {status}")
 
     overall_pct = (total_matches_found / total_crops_checked * 100) if total_crops_checked > 0 else 0
     overall_status = "PASS" if overall_pct >= threshold else "CHECK"

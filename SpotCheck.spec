@@ -23,14 +23,23 @@ all_hiddenimports = [
     'PIL',
     'PIL.Image',
     'PIL.ImageTk',
-    'FirstPage',
-    'LastPage',
-    'Barcode_QR_Check',
-    'Toc',
-    'crop_pdf_images',
-    'Compare_cropped_images',
-    'main',
     'logger_config',
+    'settings',
+    'core',
+    'core.pipeline',
+    'core.toc',
+    'core.barcode_qr',
+    'core.crop_images',
+    'core.compare_crops',
+    'core.image_counts',
+    'core.margins',
+    'core.templates',
+    'core.region_engine',
+    'gui',
+    'gui.theme',
+    'gui.app_window',
+    'gui.region_dialog',
+    'gui.comparison_gallery',
 ]
 
 all_datas = []
@@ -111,7 +120,7 @@ all_binaries = deduplicate_list_of_tuples(all_binaries)
 all_hiddenimports = list(dict.fromkeys(all_hiddenimports))
 
 a = Analysis(
-    ['app_gui.py'],
+    ['run_gui.py'],
     pathex=['.'],
     binaries=all_binaries,
     datas=all_datas,

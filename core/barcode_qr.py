@@ -23,7 +23,140 @@ try:
     HAS_PYZBAR = True
 except Exception as e:
     HAS_PYZBAR = False
-    print(f"[Warning] pyzbar dynamic library could not be loaded: {e}. OpenCV fallback will be used.")
+    print(f"[Warning] pyzbar could not be loaded: {e}")
+    print("[Warning] Barcode DECODING is unavailable. Codes will still be located "
+          "structurally, but install pyzbar to read their contents:  pip install pyzbar")
+
+
+# ==============================================================================
+# STRUCTURAL (DECODE-FREE) CODE DETECTION
+# ==============================================================================
+# Locating a code must not depend on being able to decode it. When pyzbar is
+# missing the decoders find nothing, and "found nothing" used to be
+# indistinguishable from "there is nothing here" - which produced two silent
+# failures at once: the barcode count check passed vacuously at 0/0, and the
+# undetected barcode was handed to the visual crop comparison, where the bars
+# legitimately differ between documents and it failed at ~74% in every language.
+#
+# These tests look at the rendered pixels, so they work whether a code is drawn
+# as vector paths, a raster image or a pattern fill. Validated on the Start 350
+# manual: exactly one barcode and one QR found in the master and all eleven
+# translations, and no false positives on logos, hazard icons, the product
+# photo, the wiring diagram or the page banner.
+
+STRUCTURAL_DPI = 200
+
+
+def _binarise(page, rect, dpi=STRUCTURAL_DPI):
+    pix = page.get_pixmap(dpi=dpi, clip=pymupdf.Rect(rect))
+    a = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    if pix.n == 1:
+        gray = a[:, :, 0].astype(float)
+    else:
+        gray = 0.299 * a[:, :, 0] + 0.587 * a[:, :, 1] + 0.114 * a[:, :, 2]
+    return gray < 128
+
+
+def code_features(page, rect, dpi=STRUCTURAL_DPI):
+    """Shape statistics used to recognise a code without decoding it."""
+    b = _binarise(page, rect, dpi=dpi)
+    if b.shape[0] < 8 or b.shape[1] < 8:
+        return None
+    col = b.mean(axis=0)
+    return {
+        "ink": float(b.mean()),
+        # ~0 when every column is entirely ink or entirely blank, as in a 1D barcode
+        "col_uniform": float(np.mean(np.minimum(col, 1.0 - col))),
+        "x_runs": int(np.count_nonzero(np.diff((col > 0.5).astype(int)))),
+        "tx": float((b[:, 1:] != b[:, :-1]).mean()),
+        "ty": float((b[1:, :] != b[:-1, :]).mean()),
+        "aspect": b.shape[1] / b.shape[0],
+    }
+
+
+def classify_code_shape(f):
+    """Return "BARCODE", "QRCODE" or None for a region's shape statistics."""
+    if not f:
+        return None
+    # 1D barcode: uniform columns, many vertical stripes, wide, no vertical detail.
+    if (f["col_uniform"] < 0.06 and f["x_runs"] >= 20
+            and 0.15 < f["ink"] < 0.85 and f["aspect"] > 1.5 and f["ty"] < 0.10):
+        return "BARCODE"
+    # QR: square, about half ink by construction, fine detail on both axes.
+    # Ink coverage is what separates it from icons and line art, which run 6-25%.
+    if (0.75 <= f["aspect"] <= 1.33 and 0.35 <= f["ink"] <= 0.68
+            and f["tx"] >= 0.05 and f["ty"] >= 0.05):
+        return "QRCODE"
+    return None
+
+
+def _proposal_rects(page, gap=2.0):
+    """
+    Compact self-contained region proposals.
+
+    Deliberately not shared with crop_images.get_all_image_candidates: that
+    module imports this one, and codes are isolated blocks that a simple
+    overlap merge finds perfectly well.
+    """
+    rects = []
+    try:
+        for d in page.get_drawings():
+            r = pymupdf.Rect(d["rect"])
+            if r.width > 4 and r.height > 4:
+                rects.append(r)
+    except Exception:
+        pass
+    try:
+        for info in page.get_image_info():
+            r = pymupdf.Rect(info["bbox"]) & page.rect
+            if r.width > 4 and r.height > 4:
+                rects.append(r)
+    except Exception:
+        pass
+
+    merged, changed = rects, True
+    while changed and merged:
+        changed = False
+        out, used = [], [False] * len(merged)
+        for i, a in enumerate(merged):
+            if used[i]:
+                continue
+            cur = pymupdf.Rect(a)
+            used[i] = True
+            for j in range(i + 1, len(merged)):
+                if used[j]:
+                    continue
+                grown = pymupdf.Rect(cur.x0 - gap, cur.y0 - gap, cur.x1 + gap, cur.y1 + gap)
+                if grown.intersects(merged[j]):
+                    cur.include_rect(merged[j])
+                    used[j] = True
+                    changed = True
+            out.append(cur)
+        merged = out
+    return [r for r in merged if r.width >= 10 and r.height >= 10]
+
+
+def detect_code_like_regions(page, dpi=STRUCTURAL_DPI):
+    """Locate barcode- and QR-shaped regions on a page without decoding them."""
+    found = []
+    for r in _proposal_rects(page):
+        clipped = r & page.rect
+        if clipped.is_empty or clipped.width < 10 or clipped.height < 10:
+            continue
+        try:
+            kind = classify_code_shape(code_features(page, clipped, dpi=dpi))
+        except Exception:
+            kind = None
+        if kind:
+            found.append({
+                "type": kind,
+                "raw_type": f"{kind}(structural)",
+                "data": "",
+                "rect": clipped,
+                "page_num": page.number + 1,
+                "decoded": False,
+            })
+    return found
 
 
 # -----------------------------------------------------------
@@ -90,7 +223,8 @@ def detect_barcodes_and_qr_codes(page, dpi=200):
                     "raw_type": str(obj.type),
                     "data": b_data,
                     "rect": pdf_rect,
-                    "page_num": page.number + 1
+                    "page_num": page.number + 1,
+                    "decoded": True,
                 })
         except Exception:
             pass
@@ -114,7 +248,8 @@ def detect_barcodes_and_qr_codes(page, dpi=200):
                     "raw_type": "QRCODE",
                     "data": str(res_qr).strip(),
                     "rect": pdf_rect,
-                    "page_num": page.number + 1
+                    "page_num": page.number + 1,
+                    "decoded": True,
                 })
     except Exception:
         pass
@@ -141,10 +276,20 @@ def detect_barcodes_and_qr_codes(page, dpi=200):
                         "raw_type": "BARCODE",
                         "data": str(data_str).strip(),
                         "rect": pdf_rect,
-                        "page_num": page.number + 1
+                        "page_num": page.number + 1,
+                        "decoded": True,
                     })
     except Exception:
         pass
+
+    # 4. Structural sweep: catches codes no decoder could read. Anything already
+    #    decoded wins, so this only ever ADDS regions the decoders missed.
+    try:
+        for cand in detect_code_like_regions(page):
+            if not any(d["rect"].intersects(cand["rect"]) for d in detected):
+                detected.append(cand)
+    except Exception as e:
+        print(f"[Warning] Structural code detection failed on page {page.number + 1}: {e}")
 
     return detected
 
@@ -163,6 +308,7 @@ def extract_barcode_qr_model(pdf_path, dpi=200):
     all_codes = []
     barcode_count = 0
     qr_count = 0
+    decoded_count = 0
     pages_with_barcode = set()
     pages_with_qr = set()
 
@@ -172,6 +318,8 @@ def extract_barcode_qr_model(pdf_path, dpi=200):
             codes = detect_barcodes_and_qr_codes(page, dpi=dpi)
             for c in codes:
                 all_codes.append(c)
+                if c.get("decoded"):
+                    decoded_count += 1
                 if c["type"] == "BARCODE":
                     barcode_count += 1
                     pages_with_barcode.add(c["page_num"])
@@ -188,6 +336,8 @@ def extract_barcode_qr_model(pdf_path, dpi=200):
         "total_qr_codes": qr_count,
         "has_barcode": barcode_count > 0,
         "has_qr": qr_count > 0,
+        "decoded_count": decoded_count,
+        "structural_count": len(all_codes) - decoded_count,
         "pages_with_barcode": sorted(list(pages_with_barcode)),
         "pages_with_qr": sorted(list(pages_with_qr)),
         "all_codes": all_codes,
@@ -221,8 +371,26 @@ def compare_barcode_qr_models(source_model, target_model):
 
     overall_pass = bc_pass and qr_pass
 
-    bc_status = f"PASS (Count {tgt_bc_count}/{src_bc_count})" if bc_pass else f"FAIL (Count {tgt_bc_count}/{src_bc_count})"
-    qr_status = f"PASS (Count {tgt_qr_count}/{src_qr_count})" if qr_pass else f"FAIL (Count {tgt_qr_count}/{src_qr_count})"
+    # Say how the codes were found. A count derived without a working decoder is
+    # still a valid count, but the reader should know the contents were never
+    # read - and a 0/0 with no decoder at all must never look like a clean pass.
+    used_structural = bool(source_model.get("structural_count") or target_model.get("structural_count"))
+    note = " structural" if used_structural else ""
+
+    no_codes_at_all = (src_bc_count + tgt_bc_count + src_qr_count + tgt_qr_count) == 0
+    if no_codes_at_all and not HAS_PYZBAR:
+        bc_status = "CHECK (No Detector)"
+        qr_status = "CHECK (No Detector)"
+        overall_pass = False
+        detection_note = ("pyzbar unavailable and nothing found structurally - "
+                          "cannot distinguish 'no codes' from 'not detected'")
+    else:
+        bc_status = (f"PASS (Count {tgt_bc_count}/{src_bc_count}{note})" if bc_pass
+                     else f"FAIL (Count {tgt_bc_count}/{src_bc_count}{note})")
+        qr_status = (f"PASS (Count {tgt_qr_count}/{src_qr_count}{note})" if qr_pass
+                     else f"FAIL (Count {tgt_qr_count}/{src_qr_count}{note})")
+        detection_note = ("located structurally; install pyzbar to verify contents"
+                          if used_structural else "decoded")
 
     return {
         "english_pdf": source_model["filename"],
@@ -239,6 +407,7 @@ def compare_barcode_qr_models(source_model, target_model):
         "target_pages_qr": tgt_pages_qr,
         "qr_status": qr_status,
         "qr_pass": qr_pass,
+        "detection_note": detection_note,
         "overall_verdict": "PASS" if overall_pass else "FAIL",
     }
 
