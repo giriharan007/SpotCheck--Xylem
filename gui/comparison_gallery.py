@@ -20,7 +20,10 @@ count is now constant no matter how large the run.
 
 Two sources feed it:
   - Region checks : results from the Region Inspector's batch run
-  - Graphic crops : per-crop results from a full pipeline inspection
+  - Images        : per-crop results from a full pipeline inspection
+
+A result that needs a closer look opens both whole pages side by side through
+gui/page_diff_view.py, which is where "what actually differs" gets answered.
 """
 
 import os
@@ -48,7 +51,7 @@ from gui.theme import (
 )
 
 SOURCE_REGIONS = "Region Checks"
-SOURCE_CROPS = "Graphic Crops"
+SOURCE_CROPS = "Images"
 
 FILTER_ALL = "All"
 FILTER_PASS = "Passed"
@@ -128,6 +131,9 @@ def cards_from_region_results(results):
                        else r.get("match_desc", "")),
             "shift": r.get("shift_y", 0.0) or 0.0,
             "image": r.get("comparison_img_path", ""),
+            # Where on the master page this check was looking, so the page view
+            # can point straight at it.
+            "roi_rect": r.get("roi_rect"),
         })
     return rows
 
@@ -156,8 +162,13 @@ def cards_from_crop_details(details):
 class ComparisonGalleryFrame(ctk.CTkFrame):
     """Verdict-segregated list of comparisons with a single-image preview."""
 
-    def __init__(self, parent, is_active=None):
+    def __init__(self, parent, is_active=None, resolve_paths=None, get_margins=None):
         super().__init__(parent, fg_color=UI_BG_CANVAS)
+
+        # The rows carry file NAMES, because that is all the engine reports. To
+        # open the documents themselves the host has to say where they live.
+        self._resolve_paths = resolve_paths
+        self._get_margins = get_margins
 
         # CTkTabview stacks its tabs rather than unmapping them, so winfo_ismapped()
         # is True even for the hidden ones and cannot tell us whether this tab is on
@@ -186,7 +197,7 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         bar = ctk.CTkFrame(self, fg_color=DEPENDABLE_BLUE, corner_radius=8)
         bar.pack(fill="x", padx=14, pady=(12, 8))
         self.summary_lbl = ctk.CTkLabel(
-            bar, text="No comparisons yet", anchor="w", justify="left",
+            bar, text="Nothing to review yet", anchor="w", justify="left",
             font=self._f(12, "bold"), text_color=NEUTRAL_WHITE)
         self.summary_lbl.pack(side="left", padx=16, pady=10)
         ctk.CTkButton(bar, text="Open Output Folder", width=140, height=26,
@@ -196,7 +207,7 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         self.clear_btn = ctk.CTkButton(
             bar, text="Clear Images", width=120, height=26,
             fg_color=RADIANT_ORANGE, hover_color="#C85800",
-            text_color=NEUTRAL_WHITE, font=self._f(10, "bold"),
+            text_color=theme.TEXT_ON_ORANGE, font=self._f(10, "bold"),
             command=self._clear_images)
         self.clear_btn.pack(side="right", padx=6, pady=8)
 
@@ -206,8 +217,7 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
                      text_color=DEPENDABLE_BLUE).pack(side="left", padx=(12, 4), pady=8)
         self.source_sel = ctk.CTkSegmentedButton(
             controls, values=[SOURCE_REGIONS, SOURCE_CROPS], font=self._f(10),
-            command=self._on_source_change, selected_color=XYLEM_BLUE,
-            unselected_color=UI_CARD_BG)
+            command=self._on_source_change, **theme.segmented_button_colors())
         self.source_sel.set(SOURCE_REGIONS)
         self.source_sel.pack(side="left", padx=4, pady=8)
 
@@ -215,8 +225,7 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
                      text_color=DEPENDABLE_BLUE).pack(side="left", padx=(18, 4), pady=8)
         self.filter_sel = ctk.CTkSegmentedButton(
             controls, values=[FILTER_ALL, FILTER_PASS, FILTER_FAIL], font=self._f(10),
-            command=self._on_filter_change, selected_color=XYLEM_BLUE,
-            unselected_color=UI_CARD_BG)
+            command=self._on_filter_change, **theme.segmented_button_colors())
         self.filter_sel.set(FILTER_ALL)
         self.filter_sel.pack(side="left", padx=4, pady=8)
 
@@ -245,8 +254,8 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
             ("verdict", "Verdict", 66, "center"),
             ("item", "Item", 168, "w"),
             ("target", "Translated", 96, "w"),
-            ("mpage", "Master Pg", 68, "center"),
-            ("tpage", "Trans Pg", 66, "center"),
+            ("mpage", "Master Pg", 80, "center"),
+            ("tpage", "Trans Pg", 76, "center"),
             ("score", "Score", 72, "center"),
         ):
             self.tree.heading(cid, text=text)
@@ -272,6 +281,16 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         self.det_status = ctk.CTkLabel(head, text="", font=self._f(11, "bold"))
         self.det_status.pack(side="right", padx=(8, 0))
 
+        # The crop comparison answers "does this one graphic match". When it
+        # says no, the next question is always "what else is wrong on that
+        # page" - which needs both pages, whole, side by side.
+        self.compare_btn = ctk.CTkButton(
+            head, text="⇔  Compare Pages", width=132, height=26,
+            fg_color=DYNAMIC_GREEN, hover_color="#4FB003",
+            text_color=DEPENDABLE_BLUE, font=self._f(10, "bold"),
+            command=self._open_page_diff)
+        self.compare_btn.pack(side="right", padx=(8, 6))
+
         nav = ctk.CTkFrame(head, fg_color="transparent")
         nav.pack(side="right", padx=(0, 14))
         ctk.CTkButton(nav, text="\u25b2", width=30, height=24, fg_color=UI_CARD_WELL,
@@ -289,7 +308,7 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         lft = ctk.CTkFrame(meta, fg_color="transparent")
         lft.pack(side="left", fill="x", expand=True, padx=10, pady=6)
         ctk.CTkLabel(lft, text="MASTER", font=self._f(9, "bold"),
-                     text_color=XYLEM_BLUE, anchor="w").pack(anchor="w")
+                     text_color=theme.TEXT_ON_LIGHT, anchor="w").pack(anchor="w")
         self.det_master = ctk.CTkLabel(lft, text="-", font=self._f(10),
                                        text_color=NEUTRAL_DARK_GR, anchor="w", justify="left")
         self.det_master.pack(anchor="w")
@@ -572,6 +591,55 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         if self._selected and self._selected.get("image") and os.path.exists(self._selected["image"]):
             _open_externally(self._selected["image"])
 
+    def _open_page_diff(self):
+        """Open the selected result's two pages side by side."""
+        row = self._selected
+        if not row:
+            messagebox.showinfo("Nothing Selected",
+                                "Pick a result in the list first.")
+            return
+        if not callable(self._resolve_paths):
+            messagebox.showinfo(
+                "Documents Not Available",
+                "This view was opened without access to the source PDFs, so the "
+                "pages cannot be shown side by side.")
+            return
+
+        master_pdf, trans_pdf = self._resolve_paths(row)
+        if not master_pdf or not trans_pdf:
+            messagebox.showwarning(
+                "Documents Not Found",
+                "Could not locate both documents for this result.\n\n"
+                f"Master: {master_pdf or '(not found)'}\n"
+                f"Translated: {trans_pdf or row.get('tr_name') or '(not found)'}\n\n"
+                "Check the paths configured on the Inspection tab.")
+            return
+
+        def _page(value, default=1):
+            try:
+                n = int(value)
+                return n if n > 0 else default
+            except (TypeError, ValueError):
+                return default
+
+        margins = None
+        if callable(self._get_margins):
+            try:
+                margins = self._get_margins()
+            except Exception:
+                margins = None
+
+        from gui.page_diff_view import open_page_diff
+        _win, err = open_page_diff(
+            self.winfo_toplevel(),
+            master_pdf, _page(row.get("eng_page")),
+            trans_pdf, _page(row.get("tr_page"), _page(row.get("eng_page"))),
+            focus_rect=row.get("roi_rect"),
+            margins=margins,
+            title_hint=f"{row.get('title', '')}  •  {row.get('status', '')}")
+        if err:
+            messagebox.showerror("Could Not Compare", err)
+
     def _open_folder(self):
         for r in self._all_rows:
             if r.get("image") and os.path.exists(r["image"]):
@@ -589,8 +657,8 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         self.count_lbl.configure(
             text=f"{n_pass} passed   ·   {n_fail} need review   ·   {len(rows)} total")
         self.summary_lbl.configure(
-            text=(f"Comparison images  —  {len(self._all_rows)} across all sources"
-                  if self._all_rows else "No comparisons yet"))
+            text=(f"{len(self._all_rows)} result(s) to review across all sources"
+                  if self._all_rows else "Nothing to review yet"))
 
         self.tree.delete(*self.tree.get_children())
         self._visible_rows = self._apply_filter(rows)

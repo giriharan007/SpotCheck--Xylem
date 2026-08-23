@@ -40,6 +40,7 @@ from gui.theme import (
     UI_CARD_BG,
     UI_CARD_WELL,
     UI_BORDER,
+    UI_HOVER_BLUE,
     NEUTRAL_WHITE,
     NEUTRAL_DARK_GR,
     REGION_COLORS,
@@ -120,7 +121,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
         super().__init__(parent, fg_color=UI_BG_CANVAS)
 
         # Optional callback so the host window can publish results elsewhere
-        # (the Comparisons gallery tab).
+        # (the Review gallery tab).
         self._on_results = on_results
         # Lets the host refresh its own template dropdown when one is saved/deleted.
         self._on_templates_changed = on_templates_changed
@@ -424,6 +425,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
             text="Exact Match (100%)",
             variable=self.exact_match_var,
             font=_font(size=10, weight="bold"),
+            fg_color=XYLEM_BLUE, hover_color=UI_HOVER_BLUE,
             text_color=DEPENDABLE_BLUE,
             command=self._on_exact_match_toggle
         )
@@ -435,6 +437,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
             text="Don't Compare (Scope Only)",
             variable=self.scope_only_var,
             font=_font(size=10, weight="bold"),
+            fg_color=XYLEM_BLUE, hover_color=UI_HOVER_BLUE,
             text_color=DEPENDABLE_BLUE,
             command=self._on_scope_only_toggle
         )
@@ -446,6 +449,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
             text="Don't Compare Text (Visual Match)",
             variable=self.dont_compare_text_var,
             font=_font(size=10, weight="bold"),
+            fg_color=XYLEM_BLUE, hover_color=UI_HOVER_BLUE,
             text_color=DEPENDABLE_BLUE,
             command=self._on_dont_compare_text_toggle
         )
@@ -495,7 +499,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
         content_hdr = ctk.CTkFrame(editor_card, fg_color="transparent")
         content_hdr.pack(fill="x", padx=8, pady=(2, 1))
         ctk.CTkLabel(content_hdr, text="Extracted English Master Content:", font=_font(size=10, weight="bold"), text_color=DEPENDABLE_BLUE).pack(side="left")
-        self.coords_lbl = ctk.CTkLabel(content_hdr, text="No region selected", font=_font(family="Consolas", size=9), text_color=XYLEM_BLUE)
+        self.coords_lbl = ctk.CTkLabel(content_hdr, text="No region selected", font=_font(family="Consolas", size=9), text_color=theme.TEXT_ON_LIGHT)
         self.coords_lbl.pack(side="right")
         self.eng_text_box = ctk.CTkTextbox(editor_card, height=40, font=_font(size=10), fg_color=UI_CARD_BG, text_color=DEPENDABLE_BLUE)
         self.eng_text_box.pack(fill="x", padx=8, pady=(0, 6))
@@ -508,7 +512,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
         ctk.CTkLabel(prev_hdr, text="Selected Region Preview:", font=_font(size=10, weight="bold"),
                      text_color=DEPENDABLE_BLUE).pack(side="left")
         self.preview_size_lbl = ctk.CTkLabel(prev_hdr, text="", font=_font(family="Consolas", size=9),
-                                             text_color=XYLEM_BLUE)
+                                             text_color=theme.TEXT_ON_LIGHT)
         self.preview_size_lbl.pack(side="right")
 
         # tk.Label, not CTkLabel: CTkLabel.configure() re-applies the currently
@@ -576,7 +580,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
         self.progress_bar.set(0.0)
         self.progress_bar.pack(fill="x", padx=10, pady=(2, 2))
 
-        self.status_lbl = ctk.CTkLabel(right_card, text="Ready \u2022 Draw regions on page or edit labels above", font=_font(size=10, weight="bold"), text_color=XYLEM_BLUE)
+        self.status_lbl = ctk.CTkLabel(right_card, text="Ready \u2022 Draw regions on page or edit labels above", font=_font(size=10, weight="bold"), text_color=theme.TEXT_ON_LIGHT)
         self.status_lbl.pack(anchor="w", padx=10, pady=(0, 2))
 
         # 5. Results Table & Cropped Comparison Preview
@@ -779,6 +783,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
         ctk.CTkCheckBox(row, text="Show on page", variable=self.show_margins_var,
                         font=_font(size=10, weight="bold"), text_color=DEPENDABLE_BLUE,
                         checkbox_width=16, checkbox_height=16,
+                        fg_color=XYLEM_BLUE, hover_color=UI_HOVER_BLUE,
                         command=self._on_show_margins_toggle).pack(side="right", padx=6)
 
         self.margin_hint_lbl = ctk.CTkLabel(

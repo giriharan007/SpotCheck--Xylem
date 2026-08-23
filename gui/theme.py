@@ -67,6 +67,65 @@ REGION_COLORS = [
 ]
 
 
+# Small text on a tinted surface. Xylem Blue on the pale wells measures 4.0:1
+# and on the canvas 4.3:1 - under the 4.5:1 floor at the 9-11px sizes this app
+# uses it for. Dependable Blue clears 10:1 on both, so captions and status text
+# use this rather than the accent.
+TEXT_ON_LIGHT = DEPENDABLE_BLUE
+
+# White is unreadable on Radiant Orange (2.9:1) - it is a light colour. Near
+# black gives 7.0:1 and is what the destructive buttons use.
+TEXT_ON_ORANGE = NEUTRAL_BLACK
+
+# CTk's stock disabled grey is #bdbdbd, which on a white button is 1.9:1 -
+# effectively invisible, and the reason "Open Output Folder" could not be read
+# before a run had produced anything.
+TEXT_DISABLED = NEUTRAL_DARK_GR
+
+
+# ==============================================================================
+# SEGMENTED CONTROLS
+# ==============================================================================
+# CustomTkinter's CTkSegmentedButton - and the tab strip of CTkTabview, which is
+# one - has a SINGLE text_color shared by every segment, selected or not. So the
+# selected and unselected fills cannot be one light and one dark: whichever
+# text colour is chosen, it disappears against one of them. That is exactly what
+# had happened here, with white text sitting on a near-white unselected fill.
+#
+# The fix is to keep both fills dark enough for white text and let brightness
+# carry the selection instead:
+#
+#     unselected  #003E51  white text, contrast 11.6:1
+#     selected    #007DA3  white text, contrast  4.7:1   (AA for normal text)
+#
+# Anything changed here must keep both states above 4.5:1 against the text.
+
+def segmented_button_colors():
+    """Colour arguments for a CTkSegmentedButton, legible in every state."""
+    return {
+        "fg_color": UI_BORDER,                      # the gap between segments
+        "selected_color": XYLEM_BLUE,
+        "selected_hover_color": UI_HOVER_BLUE,
+        "unselected_color": DEPENDABLE_BLUE,
+        "unselected_hover_color": UI_DARK_HOVER,
+        "text_color": NEUTRAL_WHITE,
+        "text_color_disabled": NEUTRAL_MED_GR,
+    }
+
+
+def tabview_colors():
+    """The same scheme, under the names CTkTabview gives its tab strip."""
+    seg = segmented_button_colors()
+    return {
+        "segmented_button_fg_color": seg["fg_color"],
+        "segmented_button_selected_color": seg["selected_color"],
+        "segmented_button_selected_hover_color": seg["selected_hover_color"],
+        "segmented_button_unselected_color": seg["unselected_color"],
+        "segmented_button_unselected_hover_color": seg["unselected_hover_color"],
+        "text_color": seg["text_color"],
+    }
+
+
 # ==============================================================================
 # TYPOGRAPHY
 # ==============================================================================

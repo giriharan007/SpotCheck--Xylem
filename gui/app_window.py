@@ -88,7 +88,7 @@ FONT_FAMILY = theme.resolve_font_family()
 # Tab labels (also used as CTkTabview keys)
 TAB_INSPECTION = "  Inspection  "
 TAB_REGION = "  Region Inspector  "
-TAB_COMPARISONS = "  Comparisons  "
+TAB_COMPARISONS = "  Review  "
 
 
 # ──────────────────────────────────────────────────────────────
@@ -165,16 +165,14 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         # The plain-Tk fallback has no tabs and no inspector, since the
         # inspector itself requires CustomTkinter.
         if HAS_CTK:
+            # Colours come from theme.tabview_colors(): the tab strip shares one
+            # text colour across selected and unselected tabs, so both fills have
+            # to carry it. They used to be white-on-near-white.
             self.tabview = ctk.CTkTabview(
                 self,
                 fg_color=UI_BG_CANVAS,
-                segmented_button_fg_color=UI_CARD_WELL,
-                segmented_button_selected_color=XYLEM_BLUE,
-                segmented_button_selected_hover_color=UI_HOVER_BLUE,
-                segmented_button_unselected_color=UI_CARD_WELL,
-                segmented_button_unselected_hover_color=UI_BORDER,
-                text_color=NEUTRAL_WHITE,
                 anchor="w",
+                **theme.tabview_colors(),
             )
             self.tabview.pack(fill="both", expand=True, padx=10, pady=(8, 10))
             self._tab_inspection = self.tabview.add(TAB_INSPECTION)
@@ -428,6 +426,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 text_color=DEPENDABLE_BLUE,
                 border_width=1,
                 border_color=UI_BORDER,
+                text_color_disabled=theme.TEXT_DISABLED,
                 state="disabled",
                 height=40,
                 command=self._open_output_folder
@@ -460,7 +459,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 font=self._get_font(12, "bold"),
                 fg_color=RADIANT_ORANGE,
                 hover_color="#C85800",
-                text_color=NEUTRAL_WHITE,
+                text_color=theme.TEXT_ON_ORANGE,
                 height=40,
                 command=self._clear_output_folder
             )
@@ -470,7 +469,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 action_frame,
                 text="\u25cf Ready to inspect",
                 font=self._get_font(12, "bold"),
-                text_color=XYLEM_BLUE
+                text_color=theme.TEXT_ON_LIGHT
             )
             self.status_lbl.pack(side="right", padx=10)
 
@@ -1106,17 +1105,59 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 self._tab_comparisons,
                 is_active=lambda: self.tabview is not None
                 and self.tabview.get() == TAB_COMPARISONS,
+                resolve_paths=self._resolve_result_pdfs,
+                get_margins=self._active_margins,
             )
             self.comparison_gallery.pack(fill="both", expand=True)
         except Exception as e:
             tb = traceback.format_exc()
-            print(f"[ERROR] Failed to build Comparisons tab: {e}\n{tb}")
+            print(f"[ERROR] Failed to build Review tab: {e}\n{tb}")
             self.comparison_gallery = None
             ctk.CTkLabel(
                 self._tab_comparisons,
                 text=f"Comparison gallery unavailable:\n{e}",
                 font=self._get_font(12), text_color=VIVID_MAGENTA, justify="left",
             ).pack(padx=20, pady=20, anchor="w")
+
+    def _resolve_result_pdfs(self, row):
+        """
+        Turn a gallery row's file names back into paths on disk.
+
+        The engine reports basenames, because that is what belongs in a report.
+        The side-by-side view needs the documents themselves, and this window is
+        the only place that knows where the user pointed it.
+        """
+        eng = (self.eng_pdf_var.get() or "").strip().strip('"').strip("'")
+        master = eng if eng and os.path.isfile(eng) else None
+        if master and row.get("eng_name") and \
+                os.path.basename(master) != row["eng_name"]:
+            # The configured master has changed since the run that produced this
+            # row. Say nothing and use it anyway - it is the only one we have,
+            # and the header names the file being shown.
+            pass
+
+        wanted = os.path.basename(row.get("tr_name") or "")
+        target = (self.tr_dir_var.get() or "").strip().strip('"').strip("'")
+        translated = None
+        if wanted and target:
+            if os.path.isfile(target) and os.path.basename(target) == wanted:
+                translated = target
+            elif os.path.isdir(target):
+                exact = os.path.join(target, wanted)
+                if os.path.isfile(exact):
+                    translated = exact
+                else:
+                    # Rows carry a shortened name for some sources, so fall back
+                    # to a unique prefix match rather than giving up.
+                    stem = os.path.splitext(wanted)[0]
+                    hits = [f for f in os.listdir(target)
+                            if f.lower().endswith(".pdf") and f.startswith(stem)]
+                    if len(hits) == 1:
+                        translated = os.path.join(target, hits[0])
+        elif target and os.path.isfile(target):
+            translated = target
+
+        return master, translated
 
     # ──────────────────────────────────────────────────────────
     # Stylesheet templates

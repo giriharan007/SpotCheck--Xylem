@@ -135,7 +135,7 @@ SpotCheck features a modern desktop graphical interface styled according to **Xy
   - `Clarity Blue` (`#67DFFF`) — Accent highlights and subtitle styling
   - `Dynamic Green` (`#61D604`) — Action buttons and passing indicators
 - **Typography Hierarchy**: **Roboto** (`Roboto Bold`, `Roboto Regular`) with native **Arial** desktop fallback.
-- **Three-Tab Layout**: **Inspection** (paths, run control, live console), **Region Inspector** (ROI workbench) and **Comparisons** (in-app image review) in a single window.
+- **Three-Tab Layout**: **Inspection** (paths, run control, live console), **Region Inspector** (ROI workbench) and **Review** (in-app comparison and side-by-side page diff) in a single window.
 - **Live Streamed Console**: Thread-safe redirection of inspection execution logs to a built-in terminal box.
 - **One-Click Post-Action Workflow**: Direct buttons to open the generated Excel QA report or the output folder.
 
@@ -189,16 +189,17 @@ and restored next launch; loading a template replaces them with its own. A templ
 before margins existed loads with the built-in defaults, which is exactly the behaviour it
 was saved under.
 
-### Comparisons (`gui/comparison_gallery.py`)
+### Review (`gui/comparison_gallery.py`)
 
 Every comparison image the engine writes to disk is also browsable in-app, so reviewing
 a run no longer means digging through nested output folders:
 
-- **Two sources**: *Region Checks* (from a Region Inspector batch) and *Graphic Crops* (from a full pipeline inspection).
+- **Two sources**: *Region Checks* (from a Region Inspector batch) and *Images* (from a full pipeline inspection).
 - **Segregated by verdict**: *All* / *Passed* / *Needs Review*, with live counts.
 - **Both sides labelled**: the detail pane names the master PDF and its page, and the translated PDF and its page, plus any vertical shift; the list carries the language tag so rows stay distinguishable across all eleven translations.
 - **Keyboard navigation**: `↑` / `↓` step through results and swap the preview, `PgUp` / `PgDn` jump ten, `Home` / `End` go to the ends. The keys work anywhere on the tab, not only when the list has focus, and stand down on the other tabs and inside text fields. `▲` `▼` buttons and an "n of N" readout sit beside the verdict.
 - **Click the image** to open it full size in the system viewer.
+- **Compare Pages** opens both whole pages side by side — see below.
 - **Clear Images** deletes the comparison images from disk after a confirmation that names the folder, the file count and the size. It only ever removes PNGs whose resolved path contains a `Cropped_Comparison` component, so source PDFs, the Excel report and the master crops under `Cropped_Images` cannot be touched; empty sub-folders are pruned and the results list is reset.
 
 Laid out as list-plus-preview rather than a scrolling wall of cards. A full run
@@ -207,6 +208,54 @@ manual); a card per result built over 10,000 CustomTkinter widgets and pushed Tk
 past the point where it paints reliably. The list is a single native
 `ttk.Treeview` and exactly one image is decoded at a time, so widget count stays
 constant — 299 widgets whether the run produced 3 results or 341.
+
+### Side-by-side page comparison (`core/page_diff.py` & `gui/page_diff_view.py`)
+
+The crop comparison answers "does this one graphic match". When it says no, the next
+question is always "what else is wrong on that page" — which needs both pages, whole.
+**Compare Pages** on the Review tab opens the master page and its translation with the
+differences boxed on both, scrolling as one.
+
+**Why it does not diff pixels.** The prose has been rewritten in another language, so
+every text block differs by design and a raw diff lights the page up. Translated text
+is also a different length, so paragraphs reflow and push artwork down. Both are
+handled before anything is compared:
+
+- every text span on both pages is painted white, in memory, so only artwork is left;
+- each master graphic is then hunted for **anywhere** on the translated page by
+  normalised cross-correlation, rather than checked in place.
+
+A first attempt subtracted the two masked renders and reported 17–22 differences per
+page on a de-DE translation that is entirely correct — each shifted graphic appearing
+twice, as a hole and as a surprise. Matching instead brings it to a handful, and the
+handful is labelled:
+
+| | |
+|---|---|
+| **Missing from the translation** | not found anywhere on the page |
+| **Extra in the translation** | on the translation, claimed by nothing on the master |
+| **Moved** | found, but more than 3 pt away — the shift is printed beside it |
+
+A matched graphic is painted out of the working copy before the next is hunted, so a
+page carrying several identical hazard icons cannot match them all to the one survivor
+— the same trap `image_counts.py` exists to close. Barcodes and QR codes are excluded,
+because each language legitimately carries its own part number.
+
+What counts as a graphic is `crop_images.get_all_image_candidates`, the same detector
+the crop comparison and the count check use, with the template's ignored margins
+applied — so this view cannot disagree with the rest of the tool about what is on the
+page.
+
+Every difference is drawn **twice**: solid on the side it is on, dashed at the same
+coordinates on the other, so the eye lands on the same spot in both panes. The region
+that was under review is outlined in green. **Previous / Next** step through the
+findings and scroll both panes to each one. **Ignore translated text** is on by
+default; clearing it compares the text too, which is only useful on a page that was
+not supposed to be translated at all.
+
+Verified against a planted defect: erasing one hazard icon from page 7 of the German
+copy is reported as `1 missing from the translation` at the right coordinates, with the
+two genuine reflow shifts on that page correctly separated out as `moved`.
 
 Cards are fed from results already in memory — `run_quality_inspection` returns its
 results, and the Region Inspector publishes its batch through an `on_results` callback.
@@ -238,6 +287,7 @@ SpotCheck/
 │   ├── compare_crops.py           # Cross-page pure graphic template comparison
 │   ├── image_counts.py            # Symmetric image-count check (topic or total)
 │   ├── margins.py                 # Ignored page margins: header/footer/left/right bands
+│   ├── page_diff.py               # What differs between a master page and its translation
 │   ├── templates.py               # Stylesheet templates: margins, page scope & variants
 │   └── region_engine.py           # ROI extraction, scoped exact match & comparison
 │
@@ -246,7 +296,8 @@ SpotCheck/
 │   ├── theme.py                   # Xylem palette, typography & ttk styling (shared)
 │   ├── app_window.py              # Main window & tab host: pickers, live log, run control
 │   ├── region_dialog.py           # Region Inspector ROI selector (embedded tab)
-│   └── comparison_gallery.py      # Comparisons tab: pass/fail image review
+│   ├── comparison_gallery.py      # Review tab: pass/fail image review
+│   └── page_diff_view.py          # Side-by-side page comparison window
 │
 ├── Tables/                        # Standalone table structure comparison utilities
 │   ├── Compare_Tables.py
@@ -310,7 +361,7 @@ than pre-filled, so a stale entry cannot fail at Run time.
 4. Click **"Run Full Inspection"**.
 5. Once complete, click **"Open Excel Report"** to view results.
 
-Comparison images appear on the **Comparisons** tab once a run finishes, split into
+Comparison images appear on the **Review** tab once a run finishes, split into
 Passed and Needs Review.
 
 The Region Inspector loads the configured master **automatically** — there is no button
@@ -384,7 +435,7 @@ To build a portable, standalone Windows application:
 
 - **TOC**: Topic sequence matching (`PASS`), missing / extra topic flagging (`FAIL`).
 - **Barcode & QR**: Exact count and page match (`PASS (Count N/N)`).
-- **Pure Graphic Crops**: Image similarity ≥ 80.0% (`MATCH (PASS)`).
+- **Images**: Image similarity ≥ 80.0% (`MATCH (PASS)`).
 - **Master Verdict**: `PASS` only when TOC, Barcode & QR, and Images all evaluate to `PASS`.
 
 ### Region Inspector verdicts

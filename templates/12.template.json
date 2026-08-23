@@ -1,18 +1,145 @@
 {
   "schema": 1,
   "name": "12",
-  "saved_at": "2026-08-22T22:15:35",
+  "saved_at": "2026-08-23T13:26:02",
   "source_pdf": "894387_5.0_en-US_2026-04_IOM.Start350.pdf",
   "notes": "",
   "margins": {
     "header": 40.0,
     "footer": 40.0,
     "left": 35.0,
-    "right": 35.0
+    "right": 0.0
   },
   "page_size": [
     419.5,
     595.3
   ],
-  "regions": []
+  "regions": [
+    {
+      "id": 1,
+      "label": "Region 1",
+      "page_num": 1,
+      "is_last_page": false,
+      "roi_rect": [
+        221.6,
+        28.8,
+        416.8,
+        100.8
+      ],
+      "parent_id": null,
+      "exact_match": false,
+      "dont_compare_text": false,
+      "scope_only": true,
+      "page_scope": {
+        "type": "single",
+        "page": 1
+      },
+      "variant_group": null
+    },
+    {
+      "id": 2,
+      "label": "Region 1.1",
+      "page_num": 1,
+      "is_last_page": false,
+      "roi_rect": [
+        237.6,
+        32.8,
+        411.2,
+        54.4
+      ],
+      "parent_id": 1,
+      "exact_match": false,
+      "dont_compare_text": true,
+      "scope_only": false,
+      "page_scope": {
+        "type": "single",
+        "page": 1
+      },
+      "variant_group": null
+    },
+    {
+      "id": 3,
+      "label": "Region 1.2",
+      "page_num": 1,
+      "is_last_page": false,
+      "roi_rect": [
+        348.0,
+        53.6,
+        409.6,
+        66.4
+      ],
+      "parent_id": 1,
+      "exact_match": false,
+      "dont_compare_text": false,
+      "scope_only": true,
+      "page_scope": {
+        "type": "single",
+        "page": 1
+      },
+      "variant_group": null
+    },
+    {
+      "id": 4,
+      "label": "Region 1.3",
+      "page_num": 1,
+      "is_last_page": false,
+      "roi_rect": [
+        352.0,
+        54.4,
+        384.0,
+        64.8
+      ],
+      "parent_id": 1,
+      "exact_match": false,
+      "dont_compare_text": true,
+      "scope_only": false,
+      "page_scope": {
+        "type": "single",
+        "page": 1
+      },
+      "variant_group": null
+    },
+    {
+      "id": 5,
+      "label": "Region 1.4",
+      "page_num": 1,
+      "is_last_page": false,
+      "roi_rect": [
+        380.8,
+        53.6,
+        398.4,
+        64.0
+      ],
+      "parent_id": 1,
+      "exact_match": true,
+      "dont_compare_text": false,
+      "scope_only": false,
+      "page_scope": {
+        "type": "single",
+        "page": 1
+      },
+      "variant_group": null
+    },
+    {
+      "id": 6,
+      "label": "Region 1.5",
+      "page_num": 1,
+      "is_last_page": false,
+      "roi_rect": [
+        373.6,
+        66.4,
+        408.0,
+        89.6
+      ],
+      "parent_id": 1,
+      "exact_match": false,
+      "dont_compare_text": true,
+      "scope_only": false,
+      "page_scope": {
+        "type": "single",
+        "page": 1
+      },
+      "variant_group": null
+    }
+  ]
 }

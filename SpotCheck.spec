@@ -34,12 +34,14 @@ all_hiddenimports = [
     'core.image_counts',
     'core.margins',
     'core.templates',
+    'core.page_diff',
     'core.region_engine',
     'gui',
     'gui.theme',
     'gui.app_window',
     'gui.region_dialog',
     'gui.comparison_gallery',
+    'gui.page_diff_view',
 ]
 
 all_datas = []
