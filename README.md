@@ -78,8 +78,8 @@ filename prefix in the topic layout and from the folder name otherwise. The topi
 is carried into the Excel **Images** tab as its own column.
 
 **Ignored margins come from the stylesheet** (`core/margins.py`). Extraction skips
-anything lying entirely inside a margin band, measured inwards from each page edge in
-points — `header`, `footer`, and now `left` and `right` as well. These were two
+anything **most of which** lies inside a margin band, measured inwards from each page
+edge in points — `header`, `footer`, and now `left` and `right` as well. These were two
 constants in the source, measured off one stylesheet; a manual built from a different
 one puts its running header lower or its thumb tabs further in, and a fixed number then
 either clips real artwork out of the run or lets page furniture in as content. Both
@@ -87,10 +87,47 @@ failures are silent. The four values are now set per stylesheet in the Region In
 margin editor, saved into the template, and recorded on the Excel **Overview** sheet so a
 report says what it was run with. The count check in `image_counts.py` uses the same
 values, because the count and the crop have to agree about what is furniture.
+
+Two details of that rule were learned the hard way, both from the cover masthead:
+
+*Clusters are judged, not fragments.* The masthead is a logo plus the long rule sweeping
+out of it, which cluster into one element running from the top of the page down to
+y=82.7. Filtering ran on the raw fragments **before** clustering, so only the pieces
+wholly inside the band went — the survivors then merged into a graphic that had never
+been asked the question, and the whole masthead was cropped and compared as artwork. It
+also left a stray 32×12pt shard of the same masthead as a graphic in its own right,
+because removing its neighbours changed what was left to cluster with. Clustering now
+happens first and the finished cluster is what gets judged, which is the right question
+anyway: the cluster is what becomes a crop.
+
+*"Most of it", not "all of it".* Against a 50pt header band the masthead is 60% furniture
+and 40% hangs below the line, so strict containment kept it. Deepening the band to 85pt
+to swallow it would have deleted a real hazard icon at y=54.6 on page 12. Measured across
+the master and all eleven translations, the masthead is the **only** element that overlaps
+a 50pt band at all — every genuine graphic starts below the line and overlaps by 0% — so
+`MARGIN_COVERAGE = 0.5` separates them with enormous headroom where no band depth could.
+Raise it to 1.0 for the old strict behaviour.
+
+Net effect on the Start 350 set: 30 master crops become 29, the masthead drops out of
+every language identically, and all eleven still report 29/29 PASS.
 - **Transitive Connected-Component Clustering**: Merges fragmented vector drawing paths (`fitz.get_drawings()`) and raster images into complete diagrams and schematics.
 - **Text Masking for Pure Visual Comparison**: Overlays solid white masks across text spans inside crops to isolate graphical logos, icons, and diagrams from translated text.
 - **Multi-Page Layout Shift Search**: Searches candidate regions across adjacent pages (priority on same page, expanding to adjacent pages) using normalized cross-correlation template matching (`cv2.matchTemplate`).
 - **Visual Match Artifacts**: Generates side-by-side comparison images with similarity percentage scores.
+
+**The comparison follows the TOC, not the page number.** Crops were always filed by
+topic when the document has an outline, but the *search* was still "the same page number,
+give or take three". A page number does not survive translation: the Swedish rendering of
+this manual is 18 pages against the master's 20, and from topic 3.3 onward every page is
+off by one. A topic number does survive — 3.2 is 3.2 in every language — so the search is
+now scoped to wherever that topic actually landed, matched on the numeric code
+(`core/toc.py: topic_page_spans`). Without an outline it falls back to the page window, so
+both layouts still follow the same order. The comparison output mirrors the crop layout
+too — topic folders in, topic folders out.
+
+Verified on the Swedish copy: master page 20 is found at translated page 18 via topic 4.3,
+page 16 at 15 via topic 4.1, and all 29 crops match. A topic-scoped search that finds
+nothing widens to the whole document rather than reporting a false deletion.
 
 ### 4. Symmetric Image Count Check (`core/image_counts.py`)
 
@@ -135,7 +172,9 @@ SpotCheck features a modern desktop graphical interface styled according to **Xy
   - `Clarity Blue` (`#67DFFF`) — Accent highlights and subtitle styling
   - `Dynamic Green` (`#61D604`) — Action buttons and passing indicators
 - **Typography Hierarchy**: **Roboto** (`Roboto Bold`, `Roboto Regular`) with native **Arial** desktop fallback.
-- **Three-Tab Layout**: **Inspection** (paths, run control, live console), **Region Inspector** (ROI workbench) and **Review** (in-app comparison and side-by-side page diff) in a single window.
+- **One button runs everything.** TOC, barcode/QR, images, symmetric counts, stylesheet regions and metadata all run from the Inspection tab and land in one Excel report plus the tabs that show them. The other tabs are for setting things up and reading results, not for running separate jobs.
+- **Four-Tab Layout**: **Inspection** (paths, run control, live console) and **Review** (comparison plus side-by-side page diff) sit together as the run-and-read pair; **Region Inspector** (ROI workbench) and **Meta Data** (file size, page count, sheet size, column layout — also usable standalone on any folder) are the set-up tabs behind them.
+- **Fits the screen it is on.** The window is sized from the display rather than a fixed 1320×900, widget scale steps down below 800px of screen height, and the panes are proportional. Checked on 1366×768 and 1920×1080: nothing clipped on either.
 - **Live Streamed Console**: Thread-safe redirection of inspection execution logs to a built-in terminal box.
 - **One-Click Post-Action Workflow**: Direct buttons to open the generated Excel QA report or the output folder.
 
@@ -161,16 +200,31 @@ regions into the Region Inspector automatically; the last used template is remem
 between sessions. Templates are JSON, one file per template, in `templates/` beside the
 application (falling back to `~/.spotcheck/templates/`).
 
-**Page scope.** A region is not tied to the page it was drawn on. Each carries a scope —
-`This page only`, `First page`, `Last page`, `All pages`, `Odd pages`, `Even pages`,
-`Page range`, `Specific pages` — resolved against the document in hand, so `Last page`
-means page 22 in a 22-page translation even though it was drawn on page 20 of the master.
+**Check this region on.** A region is not tied to the page it was drawn on. Each carries a
+scope — `First page`, `Last page`, `All pages`, `Odd pages`, `Even pages` — resolved
+against the document in hand, so `Last page` means page 18 in an 18-page translation even
+though it was drawn on page 20 of the master.
 
-**Variant groups.** A mirrored layout puts the same header at the left edge on one page
+`This page only`, `Page range` and `Specific pages` were **removed**. They pin a region to
+a page *number*, and a page number does not survive translation: three of the eleven
+languages here are 18 pages, so from topic 3.3 onward a region marked "page 16" would be
+checked against the wrong content and would look like a defect in the translation rather
+than a mistake in the setup. Templates saved with one still load — the scope is left
+untouched and flagged `(retired)` in the table so it can be re-picked deliberately. The
+unlabelled box that fed those two options is gone with them.
+
+**Alternatives group** (was "variant group"). A mirrored layout puts the same header at the left edge on one page
 and the right edge on the next, which no single rectangle can express. Regions sharing a
 `variant_group` are alternatives: the page passes if **any** of them matches. The usual
 mirrored header is two regions in one group, one scoped `Odd pages` and one `Even pages`.
 Results collapse to one verdict per group per page, naming which variant matched.
+
+**Pages exempt from the margins.** A `skip pages:` box beside the four figures takes any
+mix of pages, ranges and the words `first` and `last` — `first, last, 3-5, 9` resolves to
+pages 1, 3, 4, 5, 9 and 20 on a 20-page master and to 1, 3, 4, 5, 9 and 18 on an 18-page
+translation, because the words resolve per document. Useful where a cover is deliberately all
+furniture and you want it extracted anyway. The overlay says so on an exempt page rather
+than drawing bands that are not in force.
 
 **Ignored page margins.** Saved with the template alongside the regions, because where
 the header, footer and side furniture end is a property of the stylesheet. Four fields
@@ -188,6 +242,45 @@ Margins the user tunes without saving a template are still remembered in `settin
 and restored next launch; loading a template replaces them with its own. A template saved
 before margins existed loads with the built-in defaults, which is exactly the behaviour it
 was saved under.
+
+### Meta Data (`core/metadata.py` & `gui/metadata_tab.py`)
+
+One row per document — the English master first, then every translation — carrying
+**file size**, **page count**, **sheet size** (A0–A8, plus Letter / Legal / Tabloid and a
+`Custom W×H mm` fallback), **orientation**, **dimensions in mm**, **column layout** and
+**TOC entry count**. Selecting a row breaks it down page by page.
+
+Rows that disagree with the master on sheet size, page count or column layout are tinted,
+because with twelve near-identical rows the odd one out is the only thing worth reading.
+On the Start 350 set that immediately surfaces the Finnish, Norwegian and Swedish copies
+at 18 pages against the master's 20.
+
+**Column detection** is the only figure here that is inferred rather than read. With the
+ignored margins, headers, footers and tables removed, a real gutter is a vertical strip no
+body line writes into — wide enough to be deliberate, with substantial text on both sides.
+Two specific traps had to be closed first, both of which turned a plainly single-column
+page into a two-column one:
+
+- a **two-column spec table** has a gap down the middle that reads exactly like a gutter,
+  so table regions come out before the page is measured (this is the slow part of a scan,
+  and there is a checkbox to turn it off);
+- a **short right-aligned run of text** near the outer edge leaves a sliver of whitespace
+  that also reads as a gutter, so a band only counts as a column when it holds at least
+  four lines, 12% of the page's text and 15% of the text width, and few lines cross it.
+
+Every page's row carries a **How it was measured** note — line count, tables excluded,
+gutters found, candidates rejected and why — so a surprising number is checkable rather
+than merely surprising. Verified against synthetic 1-, 2-, 3-, 4- and 5-column pages, a
+two-column page carrying a three-wide table, and all twelve real manuals.
+
+**Pages per document** samples the first N pages instead of reading all of them; the page
+count and file size stay exact either way. On the twelve-manual set a full scan is ~19s
+and a three-page sample is under a second.
+
+**Adding a field.** `core/metadata.py` ends with two lists, `SUMMARY_COLUMNS` and
+`PAGE_COLUMNS`. Put a value into the dict `pdf_metadata()` or `page_metadata()` returns,
+add one entry to the matching list, and the tab grows a column — `gui/metadata_tab.py`
+builds both tables from those specifications and needs no edit.
 
 ### Review (`gui/comparison_gallery.py`)
 
@@ -287,6 +380,7 @@ SpotCheck/
 │   ├── compare_crops.py           # Cross-page pure graphic template comparison
 │   ├── image_counts.py            # Symmetric image-count check (topic or total)
 │   ├── margins.py                 # Ignored page margins: header/footer/left/right bands
+│   ├── metadata.py                # File size, page count, sheet size, column layout
 │   ├── page_diff.py               # What differs between a master page and its translation
 │   ├── templates.py               # Stylesheet templates: margins, page scope & variants
 │   └── region_engine.py           # ROI extraction, scoped exact match & comparison
@@ -296,6 +390,7 @@ SpotCheck/
 │   ├── theme.py                   # Xylem palette, typography & ttk styling (shared)
 │   ├── app_window.py              # Main window & tab host: pickers, live log, run control
 │   ├── region_dialog.py           # Region Inspector ROI selector (embedded tab)
+│   ├── metadata_tab.py            # Meta Data tab: per-document and per-page facts
 │   ├── comparison_gallery.py      # Review tab: pass/fail image review
 │   └── page_diff_view.py          # Side-by-side page comparison window
 │

@@ -31,6 +31,8 @@ from core import crop_images as crop_pdf_images
 from core import compare_crops as Compare_cropped_images
 from core import image_counts as ImageCounts
 from core import margins as PageMargins
+from core import metadata as MetaData
+from core import region_engine as RegionEngine
 
 
 # ============================================================
@@ -44,7 +46,10 @@ def generate_unified_excel_report(
     img_crop_details_list,
     count_results,
     output_excel_path,
-    run_margins=None
+    run_margins=None,
+    metadata_rows=None,
+    region_results=None,
+    region_note=""
 ):
     """
     Generate ONE single unified Excel report containing 5 worksheets:
@@ -250,6 +255,58 @@ def generate_unified_excel_report(
                 row["master_count"], row["target_count"], row["status"],
             ])
 
+    # --------------------------------------------------------
+    # TAB 6: META DATA
+    # --------------------------------------------------------
+    ws_meta = wb.create_sheet(title="Meta Data")
+    ws_meta.append([h for _k, h, _w, _a in MetaData.SUMMARY_COLUMNS] + ["Notes"])
+    if metadata_rows:
+        master = metadata_rows[0]
+        for i, r in enumerate(metadata_rows):
+            note = "English master" if i == 0 else ""
+            if i and r.get("pages") != master.get("pages"):
+                note = f"page count differs from the master ({master.get('pages')})"
+            if i and r.get("sheet") != master.get("sheet"):
+                note = (note + "; " if note else "") + "sheet size differs from the master"
+            if r.get("error"):
+                note = (note + "; " if note else "") + r["error"]
+            ws_meta.append([r.get(k, "-") for k, _h, _w, _a in MetaData.SUMMARY_COLUMNS]
+                           + [note])
+    else:
+        ws_meta.append(["(metadata was not collected for this run)"])
+
+    # --------------------------------------------------------
+    # TAB 7: STYLESHEET RESULT  (the Region Inspector's checks)
+    # --------------------------------------------------------
+    ws_style = wb.create_sheet(title="Stylesheet Result")
+    ws_style.append([
+        "English Master PDF", "Translated PDF", "Region", "Applies To",
+        "Variant Group", "Master Page", "Translated Page", "Match Type",
+        "Similarity / Found", "Shift (pt)", "Status",
+    ])
+    if region_results:
+        from core.templates import describe_scope
+        for r in region_results:
+            scoped = r.get("scoped")
+            match_type = ("Scoped exact match" if scoped
+                          else "Visual (no text)" if r.get("dont_compare_text")
+                          else "Exact match" if r.get("exact_required")
+                          else "Text + visual")
+            score = (f"found {r.get('needle_count')}x" if scoped
+                     else f"{r.get('similarity', 0):.1f}%")
+            ws_style.append([
+                r.get("eng_name", ""), r.get("tr_name", ""),
+                r.get("region_label", ""),
+                describe_scope(r.get("page_scope")),
+                r.get("variant_group") or "-",
+                r.get("eng_page", "-"), r.get("target_page", "-"),
+                match_type, score,
+                f"{r.get('shift_y', 0.0):+.1f}",
+                r.get("status", ""),
+            ])
+    else:
+        ws_style.append([region_note or "No stylesheet regions were checked."])
+
     # Format all sheets with headers, borders, and PASS/Present/Equal/Matched fills
     for ws in wb.worksheets:
         # Style Header Row
@@ -298,11 +355,43 @@ def generate_unified_excel_report(
         print(f"  [Unified Inspection Excel Report Saved]: {os.path.abspath(alt_path)} (locked file fallback)")
 
 
+def resolve_master_pdf(path):
+    """
+    The single master PDF behind an English path, which may be a file or folder.
+
+    Returns (pdf_path, error). A folder holding more than one PDF is an error
+    rather than a guess: picking one silently would mean a whole run - crops,
+    counts, regions, the report - was measured against a document the user did
+    not choose, and nothing downstream would say so.
+    """
+    if not path:
+        return None, "No English master configured."
+    if os.path.isfile(path):
+        if not path.lower().endswith(".pdf"):
+            return None, f"The English master is not a PDF: {os.path.basename(path)}"
+        return path, None
+    if not os.path.isdir(path):
+        return None, f"English path not found: {path}"
+
+    pdfs = sorted(f for f in os.listdir(path) if f.lower().endswith(".pdf"))
+    if not pdfs:
+        return None, f"No PDF found in the English folder:\n{path}"
+    if len(pdfs) > 1:
+        listing = "\n".join(f"  - {f}" for f in pdfs[:8])
+        more = f"\n  ...and {len(pdfs) - 8} more" if len(pdfs) > 8 else ""
+        return None, (f"The English folder has more than one PDF ({len(pdfs)}).\n"
+                      f"Leave exactly one master in the folder and run again.\n\n"
+                      f"{listing}{more}")
+    return os.path.join(path, pdfs[0]), None
+
+
 # ============================================================
 # MASTER BATCH RUNNER
 # ============================================================
 
-def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_dir, margins=None):
+def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_dir,
+                           margins=None, regions=None, collect_metadata=True,
+                           progress=None):
     """
     Run unified TOC, Barcode/QR and Images inspection across all translated PDFs.
 
@@ -311,9 +400,10 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     and the symmetric count step, which have to agree about what counts as page
     furniture. Omitted, the built-in defaults apply.
     """
-    if not os.path.exists(source_pdf_path):
-        print(f"ERROR: Source English PDF not found: {source_pdf_path}")
-        return
+    source_pdf_path, err = resolve_master_pdf(source_pdf_path)
+    if err:
+        print(f"ERROR: {err}")
+        return {"error": err}
 
     active_margins = PageMargins.normalize(margins)
 
@@ -455,7 +545,46 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     print()
     print("-" * 80)
 
-    # 4. Generate ONE single Excel report with 6 worksheets
+    # 4. Stylesheet regions, from the template or whatever is on screen.
+    #    Skipped rather than failed when there are none: the other four checks
+    #    are still worth having, and the report says the section was skipped so
+    #    a clean run cannot be mistaken for a complete one.
+    region_results = []
+    region_note = ""
+    if regions:
+        print(f"Checking {len(regions)} stylesheet region(s) across the translated set...")
+        try:
+            region_results = RegionEngine.run_batch_multiple_regions_check(
+                eng_pdf_path=source_pdf_path,
+                tr_target=translated_path_or_folder,
+                regions=regions,
+                output_crops_dir=os.path.join(diff_crops_out_dir, "Region_Inspector"),
+            ) or []
+            passed = sum(1 for r in region_results if r.get("is_match"))
+            region_note = f"{passed}/{len(region_results)} region checks passed"
+            print(f"  {region_note}")
+        except Exception as e:
+            region_note = f"stylesheet check failed: {e}"
+            print(f"  ERROR: {region_note}")
+    else:
+        region_note = ("No stylesheet template selected and no regions marked - "
+                       "the stylesheet check was skipped.")
+        print(region_note)
+    print()
+
+    # 5. Document metadata for the master and every translation.
+    metadata_rows = []
+    if collect_metadata:
+        print("Collecting document metadata...")
+        try:
+            metadata_rows = MetaData.collect(
+                [source_pdf_path] + translated_files, margins=active_margins)
+            print(f"  {len(metadata_rows)} document(s) measured")
+        except Exception as e:
+            print(f"  ERROR: metadata scan failed: {e}")
+        print()
+
+    # 6. Generate ONE single Excel report
     unified_report_path = os.path.join(output_dir, "PDF_Quality_Inspection_Report.xlsx")
     generate_unified_excel_report(
         toc_results,
@@ -464,7 +593,10 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
         img_crop_details_list,
         count_results,
         unified_report_path,
-        run_margins=active_margins
+        run_margins=active_margins,
+        metadata_rows=metadata_rows,
+        region_results=region_results,
+        region_note=region_note,
     )
 
     print("=" * 80)
@@ -481,6 +613,9 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
         "img_results_summary": img_results_summary,
         "img_crop_details": img_crop_details_list,
         "count_results": count_results,
+        "region_results": region_results,
+        "region_note": region_note,
+        "metadata_rows": metadata_rows,
     }
 
 

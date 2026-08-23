@@ -187,6 +187,26 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         self._bind_keys()
         self._refresh_list()
 
+    @staticmethod
+    def _screen_width(widget=None):
+        try:
+            return (widget or tk._default_root).winfo_screenwidth()
+        except Exception:
+            return 1366
+
+    def _list_width(self):
+        """A share of the display, so the list is not 580px on every screen."""
+        return max(380, min(700, int(self._screen_width(self) * 0.36)))
+
+    def _on_resize(self, event=None):
+        """Keep the list pane at about a third of whatever width we now have."""
+        try:
+            w = self.winfo_width()
+            if w > 400:
+                self._list_card.configure(width=max(360, min(720, int(w * 0.38))))
+        except Exception:
+            pass
+
     def _f(self, size=11, weight="normal"):
         return ctk.CTkFont(family=theme.resolve_font_family(), size=size, weight=weight)
 
@@ -238,9 +258,12 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
 
         # ---- left: the result list (native widget, cheap at any row count) ----
         list_card = ctk.CTkFrame(split, fg_color=UI_CARD_BG, corner_radius=8,
-                                 border_width=1, border_color=UI_BORDER, width=580)
+                                 border_width=1, border_color=UI_BORDER,
+                                 width=self._list_width())
         list_card.pack(side="left", fill="both", padx=(0, 6))
         list_card.pack_propagate(False)
+        self._list_card = list_card
+        self.bind("<Configure>", self._on_resize, add="+")
 
         ctk.CTkLabel(list_card, text="Results", font=self._f(11, "bold"),
                      text_color=DEPENDABLE_BLUE).pack(anchor="w", padx=10, pady=(8, 2))

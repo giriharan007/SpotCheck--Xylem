@@ -214,14 +214,28 @@ def get_all_image_candidates(fitz_page, header_margin=None, footer_margin=None,
     """
     Bounding boxes of all raster images, logos, and vector icons/diagrams/figures.
 
-    Anything lying entirely inside one of the four ignored margin bands is
-    dropped, along with divider rules, full-page tints and sub-pixel noise.
+    Elements are clustered into whole graphics FIRST, and only then judged
+    against the ignored margin bands and the edge-artifact rule. The order
+    matters and used to be the other way round, which broke in two ways at once
+    on the cover of these manuals:
+
+      - the masthead is a logo plus a long sweeping rule that clusters into one
+        element crossing the header line. Its fragments were each judged alone,
+        so only the ones wholly inside the band went, and the survivors merged
+        into a graphic that had never been asked the question - the whole
+        masthead was then cropped and compared as artwork.
+      - worse, removing those fragments changed what was left to cluster with,
+        so a stray 32x12pt piece of the same masthead came out as a graphic in
+        its own right.
+
+    Judging the finished cluster answers both, and is also simply the right
+    question: it is the cluster that becomes a crop.
 
     With include_ignored=True the return value becomes a list of
-    (rect, ignored_by) pairs instead of bare rects, where ignored_by is the name
-    of the margin that removed the element or None if it was kept. The margin
-    editor uses that to show, live on the page, exactly which graphics the
-    numbers currently being typed would throw away.
+    (rect, ignored_by) pairs instead of bare rects, where ignored_by names what
+    removed the element, or None if it was kept. The margin editor uses that to
+    show, live on the page, exactly which graphics the numbers currently being
+    typed would throw away.
     """
     page_rect = fitz_page.rect
     m = resolve_margins(margins, header_margin, footer_margin, page=fitz_page)
@@ -233,30 +247,18 @@ def get_all_image_candidates(fitz_page, header_margin=None, footer_margin=None,
     # Kept separate from the margin test: this is the narrow-artifact heuristic
     # that removes language thumb tabs and edge crop marks, and it is not the
     # same rule as "sits inside the side margin". Both run.
-    def is_edge_artifact(r, reach):
+    def is_edge_artifact(r, reach=36):
         return ((r.x0 < reach and r.width < 40)
                 or (r.x1 > pw - reach and r.width < 40))
 
-    raw_elements = []          # survivors, fed to the merge step
-    ignored = []               # (rect, side) - only collected when asked for
-
-    def consider(r, side_reach):
-        side = dropped_by(r)
-        if side is not None:
-            if include_ignored:
-                ignored.append((r, side))
-            return
-        if is_edge_artifact(r, side_reach):
-            if include_ignored:
-                ignored.append((r, "edge artifact"))
-            return
-        raw_elements.append(r)
+    raw_elements = []          # everything drawn, before clustering
+    ignored = []               # (rect, reason) - only collected when asked for
 
     # 1. Raster images & logos
     try:
         for img in fitz_page.get_image_info():
             if 'bbox' in img:
-                consider(fitz.Rect(img['bbox']), 35)
+                raw_elements.append(fitz.Rect(img['bbox']))
     except Exception:
         pass
 
@@ -265,11 +267,13 @@ def get_all_image_candidates(fitz_page, header_margin=None, footer_margin=None,
         text_dict = fitz_page.get_text("dict")
         for b in text_dict.get("blocks", []):
             if b.get("type") == 1:
-                consider(fitz.Rect(b["bbox"]), 35)
+                raw_elements.append(fitz.Rect(b["bbox"]))
     except Exception:
         pass
 
-    # 3. Vector drawings, schematics, hazard icons, figures
+    # 3. Vector drawings, schematics, hazard icons, figures. These three
+    #    exclusions are intrinsic to the element - a hairline rule is never a
+    #    graphic whatever else is on the page - so they apply before clustering.
     try:
         drawings = fitz_page.get_drawings()
         for d in drawings:
@@ -281,7 +285,7 @@ def get_all_image_candidates(fitz_page, header_margin=None, footer_margin=None,
             if r.width * r.height > (pw * ph * 0.4):
                 continue
             if r.width > 1 and r.height > 1:
-                consider(r, 38)
+                raw_elements.append(r)
     except Exception:
         pass
 
@@ -301,10 +305,23 @@ def get_all_image_candidates(fitz_page, header_margin=None, footer_margin=None,
                 min(pw, r.x1),
                 min(ph, r.y1)
             )
-            if clamped.width > 5 and clamped.height > 5:
-                final_candidates.append(clamped)
-            elif include_ignored:
-                ignored.append((clamped, "too small"))
+            if clamped.width <= 5 or clamped.height <= 5:
+                if include_ignored:
+                    ignored.append((clamped, "too small"))
+                continue
+
+            # The finished cluster, not its fragments, is what gets judged.
+            side = dropped_by(clamped)
+            if side is not None:
+                if include_ignored:
+                    ignored.append((clamped, side))
+                continue
+            if is_edge_artifact(clamped):
+                if include_ignored:
+                    ignored.append((clamped, "edge artifact"))
+                continue
+
+            final_candidates.append(clamped)
         elif include_ignored:
             ignored.append((r, "too small"))
 
@@ -414,8 +431,11 @@ def crop_pdf_elements(pdf_path, output_dir, dpi=DPI, header_margin=None, footer_
             detected_codes = detect_barcodes_and_qr_codes(page, dpi=dpi)
             code_rects = [c["rect"] for c in detected_codes]
 
-            # Get all image/icon/diagram candidates
-            image_rects = get_all_image_candidates(page, margins=active_margins)
+            # Margins can be switched off on named pages (a cover that is
+            # deliberately all furniture, say), so they are resolved per page.
+            page_margins_here = page_margins.margins_for_page(
+                active_margins, page_num, len(doc))
+            image_rects = get_all_image_candidates(page, margins=page_margins_here)
 
             crops_on_page = []
             for img_rect in image_rects:

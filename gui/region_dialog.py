@@ -49,8 +49,9 @@ from gui.theme import (
 from core import margins as page_margins
 from core import templates as templates_store
 from core.templates import (
-    SCOPE_LABELS, SCOPE_PAGES, SCOPE_RANGE, SCOPE_SINGLE, SCOPE_TYPES,
-    default_scope, describe_scope, parse_pages_expression,
+    SCOPE_ALL, SCOPE_EVEN, SCOPE_FIRST, SCOPE_LAST, SCOPE_ODD,
+    SCOPE_LABELS, SCOPE_TYPES_OFFERED,
+    default_scope, describe_scope, is_legacy_scope,
 )
 from core.region_engine import (
     DEFAULT_CROPS_OUTPUT_DIR,
@@ -73,7 +74,8 @@ DEFAULT_PASS_THRESHOLD = 75
 # The tab scrolls, and its two columns are never shorter than this. Chosen to
 # be taller than a laptop window on purpose: the space below the fold is what
 # gives the results table enough rows to be worth reading.
-MIN_CONTENT_HEIGHT = 1100
+MIN_CONTENT_HEIGHT = 1100        # a comfortable floor on a large display
+MIN_CONTENT_HEIGHT_FLOOR = 720   # ...but never taller than a small laptop can use
 
 # One wheel notch moves the page viewer this far, in canvas pixels.
 PAGE_WHEEL_STEP = 60
@@ -348,7 +350,8 @@ class RegionInspectorFrame(ctk.CTkFrame):
         ).pack(side="left", padx=8, pady=4)
 
         # Right Pane: Multi-Region Management & Results
-        right_card = ctk.CTkFrame(content_frame, fg_color=UI_CARD_BG, corner_radius=8, border_width=1, border_color=UI_BORDER, width=560)
+        right_card = ctk.CTkFrame(content_frame, fg_color=UI_CARD_BG, corner_radius=8,
+                                  border_width=1, border_color=UI_BORDER)
         right_card.pack(side="right", fill="both", expand=True, padx=(6, 0))
 
         # 1. Multi-Region Management Card
@@ -390,7 +393,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
         r_cols = ("label", "page", "type", "coords")
         self.region_tree = ttk.Treeview(r_table_frame, columns=r_cols, show="headings", height=6, style=_TREE_STYLE)
         self.region_tree.heading("label", text="Custom Label / Name")
-        self.region_tree.heading("page", text="Applies To")
+        self.region_tree.heading("page", text="Checked On")
         self.region_tree.heading("type", text="Match Type")
         self.region_tree.heading("coords", text="Coordinates (x0, y0, x1, y1)")
 
@@ -422,7 +425,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
         self.exact_match_var = ctk.BooleanVar(value=False)
         self.exact_match_chk = ctk.CTkCheckBox(
             edit_row,
-            text="Exact Match (100%)",
+            text="Exact match",
             variable=self.exact_match_var,
             font=_font(size=10, weight="bold"),
             fg_color=XYLEM_BLUE, hover_color=UI_HOVER_BLUE,
@@ -434,7 +437,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
         self.scope_only_var = ctk.BooleanVar(value=False)
         self.scope_only_chk = ctk.CTkCheckBox(
             edit_row,
-            text="Don't Compare (Scope Only)",
+            text="Scope only",
             variable=self.scope_only_var,
             font=_font(size=10, weight="bold"),
             fg_color=XYLEM_BLUE, hover_color=UI_HOVER_BLUE,
@@ -446,7 +449,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
         self.dont_compare_text_var = ctk.BooleanVar(value=False)
         self.dont_compare_text_chk = ctk.CTkCheckBox(
             edit_row,
-            text="Don't Compare Text (Visual Match)",
+            text="Visual only",
             variable=self.dont_compare_text_var,
             font=_font(size=10, weight="bold"),
             fg_color=XYLEM_BLUE, hover_color=UI_HOVER_BLUE,
@@ -461,40 +464,50 @@ class RegionInspectorFrame(ctk.CTkFrame):
         scope_row = ctk.CTkFrame(editor_card, fg_color="transparent")
         scope_row.pack(fill="x", padx=8, pady=(0, 4))
 
-        ctk.CTkLabel(scope_row, text="Applies to:", font=_font(size=10, weight="bold"),
+        ctk.CTkLabel(scope_row, text="Check this region on:",
+                     font=_font(size=10, weight="bold"),
                      text_color=DEPENDABLE_BLUE).pack(side="left")
-        self.scope_var = tk.StringVar(value=SCOPE_LABELS[SCOPE_SINGLE])
+        self.scope_var = tk.StringVar(value=SCOPE_LABELS[SCOPE_ALL])
         self.scope_menu = ctk.CTkOptionMenu(
             scope_row, variable=self.scope_var,
-            values=[SCOPE_LABELS[t] for t in SCOPE_TYPES],
-            width=140, height=26, font=_font(size=10),
+            values=[SCOPE_LABELS[t] for t in SCOPE_TYPES_OFFERED],
+            width=132, height=26, font=_font(size=10),
             fg_color=UI_CARD_BG, button_color=XYLEM_BLUE,
             text_color=DEPENDABLE_BLUE, command=self._on_scope_change)
-        self.scope_menu.pack(side="left", padx=4)
+        self.scope_menu.pack(side="left", padx=(4, 2))
+        self.scope_hint = ctk.CTkLabel(scope_row, text="", font=_font(size=9),
+                                       text_color=NEUTRAL_DARK_GR)
+        self.scope_hint.pack(side="left", padx=(2, 0))
 
-        self.scope_pages_var = tk.StringVar()
-        self.scope_pages_entry = ctk.CTkEntry(
-            scope_row, textvariable=self.scope_pages_var, width=110, height=26,
-            font=_font(size=10), placeholder_text="e.g. 3-8 or 1,5,9")
-        self.scope_pages_entry.pack(side="left", padx=4)
-        self.scope_pages_entry.bind("<KeyRelease>", lambda _e: self._on_scope_change())
-
-        ctk.CTkLabel(scope_row, text="Variant group:", font=_font(size=10, weight="bold"),
-                     text_color=DEPENDABLE_BLUE).pack(side="left", padx=(14, 2))
+        # Its own row. Five controls on one line fitted a 1920 display and
+        # squeezed this entry to nothing on a 1366 laptop.
+        variant_row = ctk.CTkFrame(editor_card, fg_color="transparent")
+        variant_row.pack(fill="x", padx=8, pady=(0, 2))
+        ctk.CTkLabel(variant_row, text="Alternatives group:",
+                     font=_font(size=10, weight="bold"),
+                     text_color=DEPENDABLE_BLUE).pack(side="left")
         self.variant_var = tk.StringVar()
         self.variant_entry = ctk.CTkEntry(
-            scope_row, textvariable=self.variant_var, width=130, height=26,
-            font=_font(size=10), placeholder_text="e.g. Page Header")
-        self.variant_entry.pack(side="left", padx=4)
+            variant_row, textvariable=self.variant_var, width=150, height=26,
+            font=_font(size=10), placeholder_text="blank = not an alternative")
+        self.variant_entry.pack(side="left", padx=6)
         self.variant_entry.bind("<KeyRelease>", lambda _e: self._on_variant_change())
+        ctk.CTkLabel(variant_row, text="same name on two regions = either one passes",
+                     font=_font(size=9), text_color=NEUTRAL_DARK_GR).pack(side="left", padx=4)
 
-        # On its own line rather than trailing the row: the row is already five
-        # controls wide, and an explanation that gets clipped explains nothing.
-        ctk.CTkLabel(editor_card,
-                     text="Page range / Specific pages use the box beside the menu (3-8 or 1,5,9) "
-                          "• regions sharing a variant group pass if ANY of them matches",
-                     font=_font(size=9), text_color=NEUTRAL_DARK_GR,
-                     anchor="w", justify="left").pack(fill="x", padx=10, pady=(0, 4))
+        # One line. The long explanation belonged in the README, not on screen.
+        self.editor_help = ctk.CTkLabel(
+            editor_card,
+            text=("Exact match = text must be identical  ·  Scope only = container, not scored  ·  "
+                  "Visual only = ignore text, compare the picture"),
+            font=_font(size=9), text_color=NEUTRAL_DARK_GR,
+            anchor="w", justify="left", wraplength=520)
+        self.editor_help.pack(fill="x", padx=10, pady=(0, 4))
+        # Wrap to whatever width the card actually has, on any screen.
+        editor_card.bind(
+            "<Configure>",
+            lambda e: self.editor_help.configure(wraplength=max(240, e.width - 28)),
+            add="+")
 
         content_hdr = ctk.CTkFrame(editor_card, fg_color="transparent")
         content_hdr.pack(fill="x", padx=8, pady=(2, 1))
@@ -694,7 +707,12 @@ class RegionInspectorFrame(ctk.CTkFrame):
         try:
             avail = self._scroll._parent_canvas.winfo_height()
             head = self._header_frame.winfo_height() or 60
-            want = max(MIN_CONTENT_HEIGHT, avail - head - 30)
+            # On a 1366x768 laptop a hard 1100pt floor means everything is below
+            # the fold and the page viewer is a letterbox. Scale the floor to the
+            # screen so a small display scrolls a little and a large one not at all.
+            screen_h = self.winfo_screenheight() or 1080
+            floor = max(MIN_CONTENT_HEIGHT_FLOOR, min(MIN_CONTENT_HEIGHT, int(screen_h * 0.95)))
+            want = max(floor, avail - head - 30)
             if abs(want - self._content_height) > 4:
                 self._content_height = want
                 self._content_frame.configure(height=want)
@@ -775,6 +793,16 @@ class RegionInspectorFrame(ctk.CTkFrame):
         ctk.CTkLabel(row, text="pt", font=_font(size=10),
                      text_color=NEUTRAL_DARK_GR).pack(side="left", padx=(3, 0))
 
+        ctk.CTkLabel(row, text="  skip pages:", font=_font(size=10, weight="bold"),
+                     text_color=DEPENDABLE_BLUE).pack(side="left", padx=(10, 2))
+        self.margin_skip_var = tk.StringVar()
+        self.margin_skip_entry = ctk.CTkEntry(
+            row, textvariable=self.margin_skip_var, width=170, height=24,
+            font=_font(size=10), placeholder_text="e.g. first, last, 3-5, 9")
+        self.margin_skip_entry.pack(side="left")
+        self.margin_skip_entry.bind("<KeyRelease>", lambda _e: self._on_skip_change())
+        self.margin_skip_entry.bind("<FocusOut>", lambda _e: self._on_skip_change())
+
         ctk.CTkButton(row, text="Reset", width=52, height=24, fg_color=UI_CARD_BG,
                       text_color=DEPENDABLE_BLUE, border_width=1, border_color=UI_BORDER,
                       font=_font(size=10), command=self._reset_margins).pack(side="right", padx=2)
@@ -793,15 +821,31 @@ class RegionInspectorFrame(ctk.CTkFrame):
 
     def get_margins(self):
         """The margins currently set, for the run and for saving."""
-        return page_margins.normalize(self.margins,
-                                      self.page_width_pt, self.page_height_pt)
+        m = page_margins.normalize(self.margins,
+                                   self.page_width_pt, self.page_height_pt)
+        skip = (self.margin_skip_var.get() or "").strip()
+        if skip:
+            m[page_margins.SKIP_KEY] = skip
+        else:
+            m.pop(page_margins.SKIP_KEY, None)
+        return m
 
     def set_margins(self, margins, redraw=True):
         """Adopt a margins dict (from a template, or remembered settings)."""
         self.margins = page_margins.normalize(margins)
+        try:
+            self.margin_skip_var.set(self.margins.get(page_margins.SKIP_KEY, "") or "")
+        except Exception:
+            pass
         self._sync_margin_spins()
         if redraw:
             self._refresh_margin_overlay()
+
+    def _on_skip_change(self):
+        """The exempt-page list changed; the overlay must follow."""
+        self.margins = self.get_margins()
+        self._refresh_margin_overlay()
+        self._schedule_margin_save()
 
     def _reset_margins(self):
         self.set_margins(page_margins.DEFAULT_MARGINS)
@@ -875,7 +919,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
 
     def _guide_positions(self):
         """Canvas coordinate of each guide line, by side."""
-        m = self.get_margins()
+        m = self._effective_margins()
         return {
             "header": self._page_to_canvas(m["header"], "y"),
             "footer": self._page_to_canvas(self.page_height_pt - m["footer"], "y"),
@@ -920,12 +964,23 @@ class RegionInspectorFrame(ctk.CTkFrame):
         self._draw_margin_overlay()
         self._update_margin_hint()
 
+    def _effective_margins(self):
+        """The bands in force on the page currently being viewed."""
+        return page_margins.margins_for_page(
+            self.get_margins(), self.current_page, self.total_pages)
+
     def _draw_margin_overlay(self):
         self.canvas.delete("margin")
         if not self.show_margins_var.get() or not self.eng_pdf_path or self.total_pages == 0:
             return
 
-        m = self.get_margins()
+        m = self._effective_margins()
+        if all(m.get(s, 0) <= 0 for s in page_margins.SIDES):
+            self.canvas.create_text(
+                14, 14, anchor="nw", tags="margin",
+                text=f"margins switched off on page {self.current_page}",
+                font=theme.get_font(9, "bold"), fill=MARGIN_BAND_COLOR)
+            return
         pw, ph = self.page_width_pt, self.page_height_pt
 
         # 1. The ignored bands. tk.Canvas has no alpha, so a stipple pattern is
@@ -1037,10 +1092,13 @@ class RegionInspectorFrame(ctk.CTkFrame):
             self.margin_hint_lbl.configure(text=sizes)
             return
 
+        # The sizes above are what is configured; the count below is what those
+        # sizes actually do on THIS page, which differs when the page is exempt.
+        eff = self._effective_margins()
         pw, ph = self.page_width_pt, self.page_height_pt
         kept, dropped = 0, {}
         for rect, was_edge_artifact in self._margin_elements():
-            side = page_margins.which_margin(rect, pw, ph, m)
+            side = page_margins.which_margin(rect, pw, ph, eff)
             if side:
                 dropped[side] = dropped.get(side, 0) + 1
             elif not was_edge_artifact:
@@ -1054,15 +1112,18 @@ class RegionInspectorFrame(ctk.CTkFrame):
         else:
             effect = f"page {self.current_page}: {kept} graphic(s) kept, none ignored"
 
+        skip = (self.margin_skip_var.get() or "").strip()
+        skip_txt = (f" · not applied on: {skip}" if skip
+                    else " · applied to every page")
         self.margin_hint_lbl.configure(
-            text=f"{sizes}\nDrag the orange guides on the page to set these · {effect}")
+            text=f"{sizes}{skip_txt}\nDrag the orange guides on the page to set these · {effect}")
 
     # ── dragging a guide ──────────────────────────────────────
     def _guide_at(self, cx, cy):
         """Which guide, if any, the pointer is close enough to grab."""
         if not self.show_margins_var.get() or self.total_pages == 0:
             return None
-        m = self.get_margins()
+        m = self._effective_margins()
         for side, pos in self._guide_positions().items():
             if m[side] <= 0:
                 continue
@@ -1405,33 +1466,31 @@ class RegionInspectorFrame(ctk.CTkFrame):
     # ──────────────────────────────────────────────────────────
     _LABEL_TO_SCOPE = {v: k for k, v in SCOPE_LABELS.items()}
 
+    # A one-line reminder of what each choice actually resolves to, shown beside
+    # the menu. "Last page" being page 20 here and page 18 in Swedish is the
+    # whole reason the absolute-page scopes were retired, so the interface says
+    # it rather than leaving it to be discovered.
+    _SCOPE_HINTS = {
+        SCOPE_FIRST: "page 1 of every document",
+        SCOPE_LAST: "the final page, whatever its number",
+        SCOPE_ALL: "every page",
+        SCOPE_ODD: "pages 1, 3, 5 …",
+        SCOPE_EVEN: "pages 2, 4, 6 …",
+    }
+
     def _on_scope_change(self, _value=None):
         """Store the chosen page scope on the active region."""
-        active_r = self._get_active_region()
-        stype = self._LABEL_TO_SCOPE.get(self.scope_var.get(), SCOPE_SINGLE)
-
-        needs_pages = stype in (SCOPE_RANGE, SCOPE_PAGES)
+        stype = self._LABEL_TO_SCOPE.get(self.scope_var.get(), SCOPE_ALL)
         try:
-            self.scope_pages_entry.configure(state="normal" if needs_pages else "disabled")
+            self.scope_hint.configure(text=self._SCOPE_HINTS.get(stype, ""))
         except Exception:
             pass
+
+        active_r = self._get_active_region()
         if not active_r:
             return
-
-        if stype == SCOPE_RANGE:
-            pages = parse_pages_expression(self.scope_pages_var.get(), self.total_pages)
-            scope = ({"type": SCOPE_RANGE, "from": pages[0], "to": pages[-1]} if pages
-                     else {"type": SCOPE_RANGE, "from": 1, "to": max(1, self.total_pages)})
-        elif stype == SCOPE_PAGES:
-            scope = {"type": SCOPE_PAGES,
-                     "pages": parse_pages_expression(self.scope_pages_var.get(), self.total_pages)}
-        elif stype == SCOPE_SINGLE:
-            scope = {"type": SCOPE_SINGLE, "page": active_r["page_num"]}
-        else:
-            scope = {"type": stype}
-
-        active_r["page_scope"] = scope
-        active_r["is_last_page"] = (stype == "last") or active_r.get("is_last_page", False)
+        active_r["page_scope"] = {"type": stype}
+        active_r["is_last_page"] = (stype == SCOPE_LAST)
         self._refresh_region_row(active_r)
 
     def _on_variant_change(self):
@@ -1443,19 +1502,25 @@ class RegionInspectorFrame(ctk.CTkFrame):
     def _sync_scope_controls(self, r):
         """Reflect a region's scope and variant group back into the controls."""
         scope = (r or {}).get("page_scope") or default_scope((r or {}).get("page_num"))
-        stype = scope.get("type", SCOPE_SINGLE)
-        self.scope_var.set(SCOPE_LABELS.get(stype, SCOPE_LABELS[SCOPE_SINGLE]))
-        if stype == SCOPE_RANGE:
-            self.scope_pages_var.set(f"{scope.get('from', 1)}-{scope.get('to', 1)}")
-        elif stype == SCOPE_PAGES:
-            self.scope_pages_var.set(", ".join(str(p) for p in scope.get("pages", [])))
+        stype = scope.get("type", SCOPE_ALL)
+
+        if is_legacy_scope(scope):
+            # A template from before the change. Leave the stored scope alone -
+            # silently rewriting it would change what the run checks - but show
+            # the menu at the nearest safe option and say so.
+            self.scope_var.set(SCOPE_LABELS[SCOPE_ALL])
+            try:
+                self.scope_hint.configure(
+                    text=f"was {describe_scope(scope)} — re-pick")
+            except Exception:
+                pass
         else:
-            self.scope_pages_var.set("")
-        try:
-            self.scope_pages_entry.configure(
-                state="normal" if stype in (SCOPE_RANGE, SCOPE_PAGES) else "disabled")
-        except Exception:
-            pass
+            self.scope_var.set(SCOPE_LABELS.get(stype, SCOPE_LABELS[SCOPE_ALL]))
+            try:
+                self.scope_hint.configure(text=self._SCOPE_HINTS.get(stype, ""))
+            except Exception:
+                pass
+
         self.variant_var.set((r or {}).get("variant_group") or "")
 
     def _refresh_region_row(self, r):
@@ -2052,7 +2117,7 @@ class RegionInspectorDialog(ctk.CTkToplevel):
         super().__init__(parent)
         self.title("Xylem SpotCheck - Custom Region Inspector & Layout Comparison")
         self.geometry("1280x880")
-        self.minsize(1040, 680)
+        self.minsize(900, 600)
         self.resizable(True, True)
         self.configure(fg_color=UI_BG_CANVAS)
 

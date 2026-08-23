@@ -88,6 +88,7 @@ FONT_FAMILY = theme.resolve_font_family()
 # Tab labels (also used as CTkTabview keys)
 TAB_INSPECTION = "  Inspection  "
 TAB_REGION = "  Region Inspector  "
+TAB_METADATA = "  Meta Data  "
 TAB_COMPARISONS = "  Review  "
 
 
@@ -130,8 +131,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         super().__init__()
 
         self.title("SpotCheck - Xylem PDF Quality & Visual Inspection Engine")
-        self.geometry("1320x900")
-        self.minsize(1100, 740)
+        self._fit_to_screen()
 
         if HAS_CTK:
             self.configure(fg_color=UI_BG_CANVAS)
@@ -139,6 +139,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             self.configure(bg=UI_BG_CANVAS)
 
         self.text_queue = queue.Queue()
+        self.done_queue = queue.Queue()
         self.is_running = False
         self.output_excel_path = None
         self.output_dir_path = None
@@ -155,6 +156,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                   f"{settings.get_settings_path()}")
 
         self.region_inspector = None
+        self.metadata_tab = None
         self.comparison_gallery = None
         self.tabview = None
         self.last_run_results = None
@@ -175,9 +177,13 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 **theme.tabview_colors(),
             )
             self.tabview.pack(fill="both", expand=True, padx=10, pady=(8, 10))
+            # Review sits next to Inspection: those two are the run-and-read
+            # pair a reviewer lives in, while the Region Inspector and Meta Data
+            # are set-up tabs visited far less often.
             self._tab_inspection = self.tabview.add(TAB_INSPECTION)
-            self._tab_region = self.tabview.add(TAB_REGION)
             self._tab_comparisons = self.tabview.add(TAB_COMPARISONS)
+            self._tab_region = self.tabview.add(TAB_REGION)
+            self._tab_metadata = self.tabview.add(TAB_METADATA)
             self._body = self._tab_inspection
         else:
             self._body = self
@@ -186,6 +192,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
 
         if HAS_CTK:
             self._build_region_tab()
+            self._build_metadata_tab()
             self._build_comparisons_tab()
             self._watch_paths()
             names = self.refresh_template_dropdown(
@@ -201,6 +208,39 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._check_queue()
+
+    # Screens this has to work on range from a 1366x768 laptop to a 4K desktop.
+    # A hard 1320x900 window opened larger than the screen on the first and
+    # wasted most of the second, so the window is sized from the display and the
+    # widget scale is nudged down when the screen is genuinely small.
+    PREFERRED_SIZE = (1560, 1000)
+    ABSOLUTE_MIN = (900, 620)
+
+    def _fit_to_screen(self):
+        try:
+            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        except Exception:
+            sw, sh = 1366, 768
+
+        want_w, want_h = self.PREFERRED_SIZE
+        w = max(self.ABSOLUTE_MIN[0], min(want_w, int(sw * 0.92)))
+        h = max(self.ABSOLUTE_MIN[1], min(want_h, int(sh * 0.90)))
+        x = max(0, (sw - w) // 2)
+        y = max(0, (sh - h) // 3)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.minsize(min(self.ABSOLUTE_MIN[0], w), min(self.ABSOLUTE_MIN[1], h))
+
+        # Below roughly 900 usable pixels the fixed row heights stop fitting, so
+        # shrink everything a little rather than clipping it.
+        if HAS_CTK:
+            try:
+                if sh < 800:
+                    ctk.set_widget_scaling(0.85)
+                elif sh < 900:
+                    ctk.set_widget_scaling(0.92)
+            except Exception:
+                pass
+        print(f"[Layout] Screen {sw}x{sh} -> window {w}x{h}")
 
     def _get_font(self, size=12, weight="normal", family=None):
         """Xylem-branded font; CTkFont when CustomTkinter is present, else a Tk tuple."""
@@ -277,7 +317,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             # Row 1: English Master PDF
             ctk.CTkLabel(
                 config_card,
-                text="English Master PDF:",
+                text="English Master Folder:",
                 font=self._get_font(12, "bold"),
                 text_color=DEPENDABLE_BLUE
             ).grid(row=1, column=0, sticky="w", padx=16, pady=6)
@@ -299,7 +339,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
 
             btn_eng = ctk.CTkButton(
                 config_card,
-                text="Browse PDF",
+                text="Browse Folder",
                 font=self._get_font(11, "bold"),
                 fg_color=XYLEM_BLUE,
                 hover_color=UI_HOVER_BLUE,
@@ -311,13 +351,21 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             btn_eng.grid(row=1, column=2, padx=(0, 16), pady=6)
             self._browse_buttons.append(btn_eng)
 
+            # Which PDF in that folder will actually be used, said before the
+            # run rather than discovered afterwards in the report.
+            self.master_lbl = ctk.CTkLabel(
+                config_card, text="", font=self._get_font(10),
+                text_color=NEUTRAL_DARK_GR, anchor="w", justify="left")
+            self.master_lbl.grid(row=2, column=1, columnspan=2, sticky="w",
+                                 padx=(0, 16), pady=(0, 4))
+
             # Row 2: Translated Target Folder
             ctk.CTkLabel(
                 config_card,
                 text="Translated PDFs Folder:",
                 font=self._get_font(12, "bold"),
                 text_color=DEPENDABLE_BLUE
-            ).grid(row=2, column=0, sticky="w", padx=16, pady=6)
+            ).grid(row=3, column=0, sticky="w", padx=16, pady=6)
 
             default_tr = self._remembered.get("translated_dir") or (
                 os.path.abspath(r"Input\Translated") if os.path.exists(r"Input\Translated") else "")
@@ -331,7 +379,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 text_color=DEPENDABLE_BLUE,
                 height=34
             )
-            self.tr_entry.grid(row=2, column=1, sticky="ew", padx=(0, 10), pady=6)
+            self.tr_entry.grid(row=3, column=1, sticky="ew", padx=(0, 10), pady=6)
 
             btn_tr = ctk.CTkButton(
                 config_card,
@@ -344,7 +392,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 height=34,
                 command=self._browse_tr_dir
             )
-            btn_tr.grid(row=2, column=2, padx=(0, 16), pady=6)
+            btn_tr.grid(row=3, column=2, padx=(0, 16), pady=6)
             self._browse_buttons.append(btn_tr)
 
             # Row 3: Output Directory
@@ -353,7 +401,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 text="Output Directory:",
                 font=self._get_font(12, "bold"),
                 text_color=DEPENDABLE_BLUE
-            ).grid(row=3, column=0, sticky="w", padx=16, pady=(6, 14))
+            ).grid(row=4, column=0, sticky="w", padx=16, pady=(6, 14))
 
             self.template_var = ctk.StringVar(value=self._remembered.get("template") or "")
             self.out_dir_var = ctk.StringVar(
@@ -367,7 +415,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 text_color=DEPENDABLE_BLUE,
                 height=34
             )
-            self.out_entry.grid(row=3, column=1, sticky="ew", padx=(0, 10), pady=(6, 14))
+            self.out_entry.grid(row=4, column=1, sticky="ew", padx=(0, 10), pady=(6, 14))
 
             btn_out = ctk.CTkButton(
                 config_card,
@@ -380,7 +428,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 height=34,
                 command=self._browse_out_dir
             )
-            btn_out.grid(row=3, column=2, padx=(0, 16), pady=(6, 14))
+            btn_out.grid(row=4, column=2, padx=(0, 16), pady=(6, 14))
             self._browse_buttons.append(btn_out)
 
             config_card.columnconfigure(1, weight=1)
@@ -438,10 +486,10 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 text="Stylesheet Template:",
                 font=self._get_font(12, "bold"),
                 text_color=DEPENDABLE_BLUE
-            ).grid(row=4, column=0, sticky="w", padx=16, pady=(0, 14))
+            ).grid(row=5, column=0, sticky="w", padx=16, pady=(0, 14))
 
             tmpl_cell = ctk.CTkFrame(config_card, fg_color="transparent")
-            tmpl_cell.grid(row=4, column=1, columnspan=2, sticky="ew", padx=(0, 16), pady=(0, 14))
+            tmpl_cell.grid(row=5, column=1, columnspan=2, sticky="ew", padx=(0, 16), pady=(0, 14))
             self.template_menu = ctk.CTkOptionMenu(
                 tmpl_cell, variable=self.template_var, values=["(none)"], width=300, height=34,
                 font=self._get_font(11), fg_color=UI_CARD_BG, button_color=XYLEM_BLUE,
@@ -630,12 +678,33 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
     # File / Directory Pickers
     # ──────────────────────────────────────────────────────────
     def _browse_eng_pdf(self):
-        f = filedialog.askopenfilename(
-            title="Select English Master PDF",
-            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")]
-        )
-        if f:
-            self.eng_pdf_var.set(os.path.abspath(f))
+        """
+        Pick the folder holding the master.
+
+        A folder rather than a file, to match the translated side. Exactly one
+        PDF must be in it - resolve_master_pdf refuses the ambiguity rather than
+        picking one, because a whole run measured against the wrong master would
+        look completely normal in the report.
+        """
+        d = filedialog.askdirectory(title="Select the folder holding the English master PDF")
+        if d:
+            self.eng_pdf_var.set(os.path.abspath(d))
+            self._describe_master()
+
+    def _describe_master(self):
+        """Say which PDF the English folder resolves to, before anything runs."""
+        if not hasattr(self, "master_lbl"):
+            return
+        path = (self.eng_pdf_var.get() or "").strip().strip('"').strip("'")
+        if not path:
+            self.master_lbl.configure(text="")
+            return
+        pdf, err = spotcheck_engine.resolve_master_pdf(path)
+        if pdf:
+            self.master_lbl.configure(
+                text=f"master: {os.path.basename(pdf)}", text_color=NEUTRAL_DARK_GR)
+        else:
+            self.master_lbl.configure(text=err.split("\n")[0], text_color=RADIANT_ORANGE)
 
     def _browse_tr_dir(self):
         d = filedialog.askdirectory(title="Select Translated PDFs Directory")
@@ -663,6 +732,17 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             try:
                 msg = self.text_queue.get_nowait()
                 self._append_log(msg)
+            except queue.Empty:
+                break
+
+        # Completion is delivered the same way the log is, on the main thread.
+        # The worker used to call self.after() directly, which registers a
+        # command on the Tk interpreter from the wrong thread and raises
+        # "main thread is not in main loop" - the run would finish, the report
+        # would be written, and none of the tabs would ever be told.
+        while not self.done_queue.empty():
+            try:
+                self._on_inspection_finished(self.done_queue.get_nowait())
             except queue.Empty:
                 break
         self.after(100, self._check_queue)
@@ -707,7 +787,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
 
         # Fix 4: Validate empty/whitespace inputs with clear messages
         if not eng_pdf:
-            messagebox.showerror("Input Required", "Please select an English Master PDF file.\nUse the 'Browse PDF' button to select a file.")
+            messagebox.showerror("Input Required", "Please select the English master folder.\nUse the 'Browse Folder' button to choose it.")
             return
         if not tr_target:
             messagebox.showerror("Input Required", "Please select a Translated PDFs folder.\nUse the 'Browse Folder' button to select a directory.")
@@ -716,8 +796,9 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             messagebox.showerror("Input Required", "Please specify an Output Directory.\nUse the 'Browse Output' button to select a directory.")
             return
 
-        if not os.path.exists(eng_pdf):
-            messagebox.showerror("File Not Found", f"English Master PDF does not exist:\n{eng_pdf}\n\nPlease verify the path and try again.")
+        master_pdf, master_err = spotcheck_engine.resolve_master_pdf(eng_pdf)
+        if master_err:
+            messagebox.showerror("English Master", master_err)
             return
         if not os.path.exists(tr_target):
             messagebox.showerror("Path Not Found", f"Translated target path does not exist:\n{tr_target}\n\nPlease verify the path and try again.")
@@ -757,16 +838,21 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         # run has to use the ones the user set in the Region Inspector - the
         # same ones the template was saved with.
         run_margins = self._active_margins()
+        run_regions, region_src = self._regions_for_run()
         self._append_log(f"Ignored Margins       : {page_margins.describe(run_margins)}\n")
+        self._append_log(f"Stylesheet Regions    : {len(run_regions)} from {region_src}\n")
+        self._append_log("Meta Data             : collected for the master and every translation\n")
 
         t = threading.Thread(target=self._run_inspection_thread,
-                             args=(eng_pdf, tr_target, out_dir, run_margins), daemon=True)
+                             args=(eng_pdf, tr_target, out_dir, run_margins, run_regions),
+                             daemon=True)
         t.start()
 
     # ──────────────────────────────────────────────────────────
     # Worker Thread (with Fix 5: full traceback on errors)
     # ──────────────────────────────────────────────────────────
-    def _run_inspection_thread(self, eng_pdf, tr_target, out_dir, run_margins=None):
+    def _run_inspection_thread(self, eng_pdf, tr_target, out_dir, run_margins=None,
+                               run_regions=None):
         old_stdout = sys.stdout
         old_stderr = sys.stderr
         redirector = TextRedirector(self.text_queue)
@@ -775,7 +861,8 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
 
         try:
             self.last_run_results = spotcheck_engine.run_quality_inspection(
-                eng_pdf, tr_target, out_dir, margins=run_margins)
+                eng_pdf, tr_target, out_dir, margins=run_margins,
+                regions=run_regions or None)
             success = True
         except Exception as e:
             # Fix 5: Full traceback in error console for production debugging
@@ -788,7 +875,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         finally:
             sys.stdout = old_stdout
             sys.stderr = old_stderr
-            self.after(0, self._on_inspection_finished, success)
+            self.done_queue.put(success)
 
     def _on_inspection_finished(self, success):
         self.is_running = False
@@ -801,6 +888,22 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                     self.last_run_results.get("img_crop_details", []))
             except Exception as e:
                 print(f"[WARN] Could not publish crop results to the gallery: {e}")
+
+        # One run now feeds every tab, so the results land where the user will
+        # look for them rather than only in the Excel file.
+        if success and self.last_run_results:
+            regions = self.last_run_results.get("region_results") or []
+            if regions and self.comparison_gallery is not None:
+                try:
+                    self.comparison_gallery.load_region_results(regions)
+                except Exception as e:
+                    print(f"[WARN] Could not publish region results: {e}")
+            rows = self.last_run_results.get("metadata_rows") or []
+            if rows and self.metadata_tab is not None:
+                try:
+                    self.metadata_tab.show_rows(rows)
+                except Exception as e:
+                    print(f"[WARN] Could not publish metadata: {e}")
 
         self.start_btn.configure(state="normal")
         self.open_folder_btn.configure(state="normal")
@@ -818,7 +921,11 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 self.status_lbl.configure(text="\u25cf Inspection Complete (Report Ready)", text_color=DYNAMIC_GREEN)
             else:
                 self.status_lbl.config(text="\u25cf Inspection Complete", fg=DYNAMIC_GREEN)
-            messagebox.showinfo("Success", f"Inspection Complete!\nExcel Report saved to:\n{self.output_excel_path}")
+            note = (self.last_run_results or {}).get("region_note") or ""
+            messagebox.showinfo(
+                "Success",
+                f"Inspection Complete!\n\n{note}\n\nExcel Report saved to:\n"
+                f"{self.output_excel_path}")
         else:
             if HAS_CTK:
                 self.status_lbl.configure(text="\u25cf Inspection Finished with Warnings/Errors", text_color=VIVID_MAGENTA)
@@ -1075,9 +1182,22 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         # master has been chosen yet, and the reload below returns early then.
         self._persist_paths()
 
+        # The metadata figures belong to whichever documents were configured
+        # when the scan ran, so say so rather than leaving stale numbers looking
+        # current.
+        self._describe_master()
+
+        if self.metadata_tab is not None:
+            try:
+                self.metadata_tab.documents_changed()
+            except Exception:
+                pass
+
         if self.region_inspector is None:
             return
-        eng = self.eng_pdf_var.get().strip().strip('"').strip("'")
+        eng_path = self.eng_pdf_var.get().strip().strip('"').strip("'")
+        eng, _err = (spotcheck_engine.resolve_master_pdf(eng_path)
+                     if eng_path else (None, None))
         tr = self.tr_dir_var.get().strip().strip('"').strip("'")
         out = self.out_dir_var.get().strip().strip('"').strip("'")
 
@@ -1096,6 +1216,58 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             print(f"[Region Inspector] Loaded {os.path.basename(eng)}")
         except Exception as e:
             print(f"[WARN] Could not load master into the Region Inspector: {e}")
+
+    def _build_metadata_tab(self):
+        """Embed the document metadata tab beside the Region Inspector."""
+        try:
+            from gui.metadata_tab import MetadataFrame
+            self.metadata_tab = MetadataFrame(
+                self._tab_metadata,
+                get_documents=self._documents_in_scope,
+                get_margins=self._active_margins,
+            )
+            self.metadata_tab.pack(fill="both", expand=True)
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[ERROR] Failed to build Meta Data tab: {e}\n{tb}")
+            self.metadata_tab = None
+            ctk.CTkLabel(
+                self._tab_metadata,
+                text=f"Metadata view unavailable:\n{e}",
+                font=self._get_font(12), text_color=VIVID_MAGENTA, justify="left",
+            ).pack(padx=20, pady=20, anchor="w")
+
+    def _documents_in_scope(self):
+        """
+        Every PDF this run is about: the master first, then the translations.
+
+        Master first is not cosmetic - the metadata tab compares every other row
+        against the first one to find the odd document out.
+        """
+        out = []
+        # The English side is a folder now, so the master has to be resolved
+        # rather than assumed to be the path itself.
+        eng = (self.eng_pdf_var.get() or "").strip().strip('"').strip("'")
+        if eng:
+            master, _err = spotcheck_engine.resolve_master_pdf(eng)
+            if master:
+                out.append(os.path.abspath(master))
+
+        target = (self.tr_dir_var.get() or "").strip().strip('"').strip("'")
+        if target and os.path.isfile(target) and target.lower().endswith(".pdf"):
+            out.append(os.path.abspath(target))
+        elif target and os.path.isdir(target):
+            for f in sorted(os.listdir(target)):
+                if f.lower().endswith(".pdf"):
+                    out.append(os.path.join(os.path.abspath(target), f))
+
+        seen, unique = set(), []
+        for p in out:
+            key = os.path.normcase(p)
+            if key not in seen:
+                seen.add(key)
+                unique.append(p)
+        return unique
 
     def _build_comparisons_tab(self):
         """Embed the comparison-image gallery as a third tab."""
@@ -1119,6 +1291,29 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 font=self._get_font(12), text_color=VIVID_MAGENTA, justify="left",
             ).pack(padx=20, pady=20, anchor="w")
 
+    def _regions_for_run(self):
+        """
+        The stylesheet regions this run should check, and where they came from.
+
+        The saved template wins, because a run should be reproducible from its
+        name. Regions drawn but not yet saved are the fallback, so experimenting
+        does not require saving first. Neither, and the section is skipped.
+        """
+        insp = self.region_inspector
+        if insp is None:
+            return [], "the Region Inspector is unavailable"
+        tmpl = (self.template_var.get() or "").strip() if hasattr(self, "template_var") else ""
+        if tmpl and tmpl != "(none)":
+            try:
+                data = templates_store.load_template(tmpl)
+                if data and data.get("regions"):
+                    return data["regions"], f"template '{tmpl}'"
+            except Exception as e:
+                print(f"[Templates] Could not load '{tmpl}': {e}")
+        if insp.regions:
+            return list(insp.regions), "the regions currently marked in the Region Inspector"
+        return [], "no template selected and no regions marked"
+
     def _resolve_result_pdfs(self, row):
         """
         Turn a gallery row's file names back into paths on disk.
@@ -1128,7 +1323,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         the only place that knows where the user pointed it.
         """
         eng = (self.eng_pdf_var.get() or "").strip().strip('"').strip("'")
-        master = eng if eng and os.path.isfile(eng) else None
+        master, _err = spotcheck_engine.resolve_master_pdf(eng) if eng else (None, None)
         if master and row.get("eng_name") and \
                 os.path.basename(master) != row["eng_name"]:
             # The configured master has changed since the run that produced this

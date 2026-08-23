@@ -155,6 +155,7 @@ def page_graphics(pdf_path, page_no, margins=None):
     """
     from core.crop_images import get_all_image_candidates, is_blank_region
     from core import barcode_qr as Barcode_QR_Check
+    from core import margins as page_margins
 
     out = []
     with fitz.open(pdf_path) as doc:
@@ -165,7 +166,8 @@ def page_graphics(pdf_path, page_no, margins=None):
             codes = [c["rect"] for c in Barcode_QR_Check.detect_barcodes_and_qr_codes(page)]
         except Exception:
             codes = []
-        for r in get_all_image_candidates(page, margins=margins):
+        for r in get_all_image_candidates(
+                page, margins=page_margins.margins_for_page(margins, page_no, len(doc))):
             if any(fitz.Rect(c.x0 - 5, c.y0 - 5, c.x1 + 5, c.y1 + 5).intersects(r)
                    for c in codes):
                 continue

@@ -1,14 +1,14 @@
 {
   "schema": 1,
   "name": "12",
-  "saved_at": "2026-08-23T13:26:02",
+  "saved_at": "2026-08-23T22:02:39",
   "source_pdf": "894387_5.0_en-US_2026-04_IOM.Start350.pdf",
   "notes": "",
   "margins": {
     "header": 40.0,
     "footer": 40.0,
     "left": 35.0,
-    "right": 0.0
+    "right": 35.0
   },
   "page_size": [
     419.5,

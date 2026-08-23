@@ -6,6 +6,8 @@ import pymupdf as fitz  # PyMuPDF (aliased as fitz for API compat)
 import cv2
 import numpy as np
 
+from core import toc as TOC
+
 # ==============================================================================
 # CONFIGURATION - EDIT YOUR PATHS HERE DIRECTLY
 # ==============================================================================
@@ -142,12 +144,19 @@ def compare_english_crops_with_translated_pdf(eng_crop_dir, trans_pdf_path, outp
     diff_out_dir = os.path.join(output_dir, trans_name)
     os.makedirs(diff_out_dir, exist_ok=True)
 
+    # Where each topic lives in THIS translation. Empty when the document has no
+    # outline, which is the signal to fall back to searching by page number.
+    trans_spans = TOC.topic_page_spans(trans_pdf_path)
+    if trans_spans:
+        print(f"  Searching topic-wise: {len(trans_spans)} topic(s) located in the translation")
+    else:
+        print("  No outline in the translation - searching page-wise")
+
     total_crops_checked = 0
     total_matches_found = 0
     crop_details = []
 
     for folder_path, eng_page_num, topic_name, crop_file in _iter_english_crops(eng_crop_dir):
-        page_out_dir = os.path.join(diff_out_dir, f"page_{eng_page_num:03d}")
         crop_path = os.path.join(folder_path, crop_file)
         crop_img = cv2.imread(crop_path, cv2.IMREAD_GRAYSCALE)
 
@@ -156,42 +165,62 @@ def compare_english_crops_with_translated_pdf(eng_crop_dir, trans_pdf_path, outp
 
         total_crops_checked += 1
 
-        # Priority 1: Check Same Page first (eng_page_num - 1)
-        same_p_idx = eng_page_num - 1
+        # Which pages of the translation to search, and why.
+        #
+        # A page number does not survive translation: the Swedish rendering of
+        # this manual is 18 pages against the master's 20, so "page 12" is not
+        # the same content. A TOPIC number does survive - 3.2 is 3.2 in every
+        # language - so when both documents have an outline the search is scoped
+        # to wherever that topic actually landed. Only without an outline does it
+        # fall back to guessing from the page number.
+        topic_code = TOC.topic_code_of(topic_name) if topic_name else None
+        span = trans_spans.get(topic_code) if topic_code else None
+        if span:
+            lo, hi = span
+            scope_pages = list(range(max(1, lo - 1), min(total_trans_pages, hi + 1) + 1))
+            scope_desc = f"topic {topic_code} (pp {lo}-{hi})"
+        else:
+            scope_pages = list(range(max(1, eng_page_num - 3),
+                                     min(total_trans_pages, eng_page_num + 3) + 1))
+            scope_desc = "page window"
+
+        # Nearest to the master's own page first, so an unmoved graphic is found
+        # immediately and the search stops at the first page that clears the bar.
+        scope_pages.sort(key=lambda p: (abs(p - eng_page_num), p))
+
         best_score = 0.0
         best_page = -1
         best_loc = (0, 0)
 
-        if 0 <= same_p_idx < total_trans_pages:
-            target_gray = trans_gray_imgs[same_p_idx]
-            if crop_img.shape[0] <= target_gray.shape[0] and crop_img.shape[1] <= target_gray.shape[1]:
-                res = cv2.matchTemplate(target_gray, crop_img, cv2.TM_CCOEFF_NORMED)
-                _, max_val, _, max_loc = cv2.minMaxLoc(res)
-                best_score = max_val
-                best_page = eng_page_num
-                best_loc = max_loc
+        for page_no in scope_pages:
+            target_gray = trans_gray_imgs[page_no - 1]
+            if crop_img.shape[0] > target_gray.shape[0] or crop_img.shape[1] > target_gray.shape[1]:
+                continue
+            res = cv2.matchTemplate(target_gray, crop_img, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(res)
+            if max_val > best_score:
+                best_score, best_page, best_loc = max_val, page_no, max_loc
+            if best_score * 100 >= threshold:
+                break
 
-        # Priority 2: Only if same-page score is below threshold, search adjacent pages sorted by distance
-        if best_score * 100 < threshold:
-            search_start = max(0, eng_page_num - 4)
-            search_end = min(total_trans_pages, eng_page_num + 3)
-            all_search_pages = list(range(search_start, search_end))
-            all_search_pages.sort(key=lambda p_idx: abs(p_idx - same_p_idx))
-
-            for search_p_idx in all_search_pages:
-                if search_p_idx == same_p_idx:
+        # A topic-scoped search that found nothing widens to the whole document
+        # rather than reporting a false deletion: an outline entry can be wrong,
+        # and a graphic that genuinely moved section is a finding worth naming,
+        # not one worth hiding behind "not found".
+        if span and best_score * 100 < threshold:
+            for page_no in range(1, total_trans_pages + 1):
+                if page_no in scope_pages:
                     continue
-                target_gray = trans_gray_imgs[search_p_idx]
+                target_gray = trans_gray_imgs[page_no - 1]
                 if crop_img.shape[0] > target_gray.shape[0] or crop_img.shape[1] > target_gray.shape[1]:
                     continue
-
                 res = cv2.matchTemplate(target_gray, crop_img, cv2.TM_CCOEFF_NORMED)
                 _, max_val, _, max_loc = cv2.minMaxLoc(res)
-
                 if max_val > best_score:
-                    best_score = max_val
-                    best_page = search_p_idx + 1
-                    best_loc = max_loc
+                    best_score, best_page, best_loc = max_val, page_no, max_loc
+                    scope_desc = f"topic {topic_code}, then widened"
+                if best_score * 100 >= threshold:
+                    break
 
         match_pct = best_score * 100
         is_match = match_pct >= threshold
@@ -204,14 +233,17 @@ def compare_english_crops_with_translated_pdf(eng_crop_dir, trans_pdf_path, outp
         if best_page == -1:
             shift_info = "Not Found"
 
-        # Save visual match diff image
+        # The comparison output mirrors the crop layout: topic folders when the
+        # master was filed by topic, page folders when it was not. A reviewer
+        # opening the two trees side by side then sees the same shape.
         match_save_path = ""
         if best_page != -1:
+            out_dir_for_match = os.path.join(
+                diff_out_dir, topic_name if topic_name else f"page_{eng_page_num:03d}")
             target_bgr = trans_bgr_imgs[best_page - 1]
             match_img = create_crop_match_image(crop_img, target_bgr, best_loc, best_score, eng_page_num, best_page)
-            os.makedirs(page_out_dir, exist_ok=True)
-            match_filename = f"match_{crop_file}"
-            match_save_path = os.path.join(page_out_dir, match_filename)
+            os.makedirs(out_dir_for_match, exist_ok=True)
+            match_save_path = os.path.join(out_dir_for_match, f"match_{crop_file}")
             cv2.imwrite(match_save_path, match_img)
 
         crop_details.append({
@@ -220,12 +252,14 @@ def compare_english_crops_with_translated_pdf(eng_crop_dir, trans_pdf_path, outp
             "crop_file": crop_file,
             "trans_page": best_page,
             "shift_info": shift_info,
+            "scope": scope_desc,
             "match_pct": match_pct,
             "status": status,
             "match_img": match_save_path,
         })
 
-        print(f"  Eng Pg {eng_page_num:2d} | {crop_file:24s} -> Trans Pg {best_page:2d} ({shift_info:16s}) | Match: {match_pct:6.2f}% | {status}")
+        print(f"  Eng Pg {eng_page_num:2d} | {crop_file:24s} -> Trans Pg {best_page:2d} "
+              f"({shift_info:16s} via {scope_desc:22s}) | Match: {match_pct:6.2f}% | {status}")
 
     overall_pct = (total_matches_found / total_crops_checked * 100) if total_crops_checked > 0 else 0
     overall_status = "PASS" if overall_pct >= threshold else "CHECK"

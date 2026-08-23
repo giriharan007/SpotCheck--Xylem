@@ -38,6 +38,7 @@ from core.crop_images import (
     is_blank_region,
 )
 from core import barcode_qr as Barcode_QR_Check
+from core import margins as PageMargins
 
 TOPIC_CODE = re.compile(r"^\s*(\d+(?:\.\d+)*)")
 
@@ -93,7 +94,8 @@ def count_images_by_topic(pdf_path, dpi=150, margins=None):
                 codes = []
             code_rects = [c["rect"] for c in codes]
 
-            for r in get_all_image_candidates(page, margins=margins):
+            for r in get_all_image_candidates(
+                    page, margins=PageMargins.margins_for_page(margins, pno + 1, len(doc))):
                 if any(fitz.Rect(cr.x0 - 5, cr.y0 - 5, cr.x1 + 5, cr.y1 + 5).intersects(r)
                        for cr in code_rects):
                     continue                      # a code, not a graphic

@@ -36,6 +36,70 @@ def extract_toc_numerics(pdf_path):
     return numerics
 
 
+TOPIC_CODE = re.compile(r"^\s*(\d+(?:\.\d+)*)")
+
+
+def topic_page_spans(pdf_path):
+    """
+    Which pages each numbered topic occupies, keyed by its numeric code.
+
+    Returns {"1.3": (7, 9), "2.1": (10, 10), ...} - the page a topic starts on
+    through the page before the next topic begins, 1-based and inclusive. An
+    empty dict means the document has no usable outline.
+
+    The numeric code is the key rather than the title because titles are
+    translated and numbering is not: topic 3.2 is topic 3.2 in Swedish. That is
+    what lets a graphic be hunted for in the right part of a translation whose
+    pagination has shifted, instead of on "the same page number", which in an
+    18-page rendering of a 20-page manual means something else entirely.
+
+    A topic that opens partway down a page is treated as owning that whole page,
+    and a topic sharing a page with the next one has a single-page span. Both are
+    deliberate: the span is a search scope, so erring wide costs nothing while
+    erring narrow loses the match.
+    """
+    spans = {}
+    try:
+        with pymupdf.open(pdf_path) as doc:
+            total = len(doc)
+            entries = []
+            for item in doc.get_toc(simple=True) or []:
+                title, page = item[1], item[2]
+                if page is None or page < 1:
+                    continue
+                m = TOPIC_CODE.match(title or "")
+                if m:
+                    entries.append((m.group(1), int(page)))
+    except Exception as e:
+        print(f"  [TOC] Could not read topic spans from {os.path.basename(pdf_path)}: {e}")
+        return {}
+
+    if not entries:
+        return {}
+
+    entries.sort(key=lambda e: e[1])
+    for i, (code, start) in enumerate(entries):
+        # The next topic that begins on a LATER page bounds this one; topics
+        # sharing a page do not shorten each other to nothing.
+        end = total
+        for _next_code, next_start in entries[i + 1:]:
+            if next_start > start:
+                end = next_start - 1
+                break
+        lo, hi = min(start, end), max(start, end)
+        if code in spans:                      # a code repeated: widen the span
+            lo = min(lo, spans[code][0])
+            hi = max(hi, spans[code][1])
+        spans[code] = (max(1, lo), min(total, hi))
+    return spans
+
+
+def topic_code_of(title):
+    """The numeric code at the front of a topic title, or None."""
+    m = TOPIC_CODE.match(title or "")
+    return m.group(1) if m else None
+
+
 def compare_toc_numerics(source_numerics, target_numerics):
     """
     Compare topic numerics list of translated PDF against source English PDF.

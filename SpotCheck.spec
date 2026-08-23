@@ -33,6 +33,7 @@ all_hiddenimports = [
     'core.compare_crops',
     'core.image_counts',
     'core.margins',
+    'core.metadata',
     'core.templates',
     'core.page_diff',
     'core.region_engine',
@@ -42,6 +43,7 @@ all_hiddenimports = [
     'gui.region_dialog',
     'gui.comparison_gallery',
     'gui.page_diff_view',
+    'gui.metadata_tab',
 ]
 
 all_datas = []

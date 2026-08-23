@@ -61,8 +61,26 @@ SCOPE_EVEN = "even"
 SCOPE_RANGE = "range"
 SCOPE_PAGES = "pages"
 
+# Every scope the loader still understands, so templates saved before the
+# absolute-page ones were retired keep working.
 SCOPE_TYPES = (SCOPE_SINGLE, SCOPE_FIRST, SCOPE_LAST, SCOPE_ALL,
                SCOPE_ODD, SCOPE_EVEN, SCOPE_RANGE, SCOPE_PAGES)
+
+# What the interface offers. "This page only", "Page range" and "Specific pages"
+# were removed deliberately: they pin a region to a page NUMBER, and a page
+# number does not survive translation. The Swedish rendering of this manual is
+# 18 pages against the master's 20, so from topic 3.3 onwards every page number
+# is off by one - a region marked "page 16" would be checked against the wrong
+# content in three of the eleven languages, and would look like a defect in the
+# translation rather than a mistake in the setup.
+#
+# What is left is relative to the document rather than to a number, so it means
+# the same thing in a 20-page master and an 18-page translation.
+SCOPE_TYPES_OFFERED = (SCOPE_FIRST, SCOPE_LAST, SCOPE_ALL, SCOPE_ODD, SCOPE_EVEN)
+
+# Retired, still loadable. A template carrying one of these is flagged in the
+# regions table so it can be changed rather than silently mis-checked.
+SCOPE_TYPES_LEGACY = (SCOPE_SINGLE, SCOPE_RANGE, SCOPE_PAGES)
 
 SCOPE_LABELS = {
     SCOPE_SINGLE: "This page only",
@@ -91,27 +109,42 @@ _BAD_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 # ==============================================================================
 
 def default_scope(page_num=None, is_last=False):
-    """The scope a freshly drawn region gets: just the page it was drawn on."""
+    """
+    The scope a freshly drawn region gets.
+
+    Page 1 and the last page are the two a page number CAN express safely, so a
+    region drawn there gets that scope; anything else defaults to every page,
+    which is the honest answer when the tool cannot know which pages of a
+    translation hold the same content.
+    """
     if is_last:
         return {"type": SCOPE_LAST}
-    return {"type": SCOPE_SINGLE, "page": page_num}
+    if page_num == 1:
+        return {"type": SCOPE_FIRST}
+    return {"type": SCOPE_ALL}
 
 
 def describe_scope(scope):
     """Short human-readable form, for the regions table."""
     if not scope:
         return SCOPE_LABELS[SCOPE_SINGLE]
-    t = scope.get("type", SCOPE_SINGLE)
+    t = scope.get("type", SCOPE_ALL)
     if t == SCOPE_RANGE:
-        return f"Pages {scope.get('from', 1)}-{scope.get('to', 1)}"
+        return f"Pages {scope.get('from', 1)}-{scope.get('to', 1)}  (retired)"
     if t == SCOPE_PAGES:
         pages = scope.get("pages") or []
         shown = ", ".join(str(p) for p in pages[:6])
-        return f"Pages {shown}{'...' if len(pages) > 6 else ''}" if pages else "Pages (none)"
+        body = f"Pages {shown}{'...' if len(pages) > 6 else ''}" if pages else "Pages (none)"
+        return body + "  (retired)"
     if t == SCOPE_SINGLE:
         p = scope.get("page")
-        return f"Page {p}" if p else SCOPE_LABELS[SCOPE_SINGLE]
+        return f"Page {p}  (retired)" if p else SCOPE_LABELS[SCOPE_SINGLE]
     return SCOPE_LABELS.get(t, t)
+
+
+def is_legacy_scope(scope):
+    """True for a scope pinned to page numbers, which no longer travels safely."""
+    return (scope or {}).get("type") in SCOPE_TYPES_LEGACY
 
 
 def resolve_pages(scope, total_pages, anchor_page=None):
