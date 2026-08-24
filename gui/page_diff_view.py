@@ -261,7 +261,7 @@ class PageDiffWindow(ctk.CTkToplevel):
         self._busy = False
         if err is not None or result is None:
             self.summary_lbl.configure(text=f"Could not compare: {err}",
-                                       text_color=RADIANT_ORANGE)
+                                       text_color=theme.TEXT_ATTENTION)
             self.note_lbl.configure(text="")
             return
 

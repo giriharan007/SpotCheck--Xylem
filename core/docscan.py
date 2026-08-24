@@ -147,6 +147,63 @@ def _codes_on_page(args):
         return page_no, []
 
 
+def _lower_priority():
+    """
+    Run this worker below the interface.
+
+    Called once in each worker process. Without it a full-strength scan on a
+    four-core laptop leaves nothing for the main thread, and switching tabs
+    mid-run stutters or paints half a panel - the window is not hung, it is
+    just never scheduled. Dropping the workers one notch costs a few percent of
+    throughput and gives the interface back.
+    """
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            ctypes.windll.kernel32.SetPriorityClass(handle, BELOW_NORMAL_PRIORITY_CLASS)
+        else:
+            os.nice(5)
+    except Exception:
+        pass
+
+
+_POOL = None
+_POOL_SIZE = 0
+
+
+def _get_pool():
+    """
+    The run's worker pool, started once and kept.
+
+    A pool was previously created and torn down for every pass of every
+    document: on a twelve-document run that is two dozen spawn storms, each one
+    re-importing PyMuPDF and OpenCV in every worker while the user is trying to
+    use the window. One pool for the whole run removes all of that.
+    """
+    global _POOL, _POOL_SIZE
+    if _POOL is not None:
+        return _POOL
+    from concurrent.futures import ProcessPoolExecutor
+    _POOL_SIZE = _worker_count()
+    _POOL = ProcessPoolExecutor(max_workers=_POOL_SIZE, initializer=_lower_priority)
+    return _POOL
+
+
+def shutdown_pool(wait=False):
+    """Release the workers. Safe to call when none were ever started."""
+    global _POOL
+    pool, _POOL = _POOL, None
+    if pool is not None:
+        try:
+            pool.shutdown(wait=wait, cancel_futures=True)
+        except TypeError:                      # Python < 3.9
+            pool.shutdown(wait=wait)
+        except Exception:
+            pass
+
+
 def _map_pages(fn, jobs, progress=None, label=""):
     """
     Run one per-page function over every page, in parallel where that pays.
@@ -163,15 +220,15 @@ def _map_pages(fn, jobs, progress=None, label=""):
                 and _worker_count() > 1 and not _pool_disabled())
     if use_pool:
         try:
-            from concurrent.futures import ProcessPoolExecutor
-            with ProcessPoolExecutor(max_workers=_worker_count()) as pool:
-                for i, (page_no, res) in enumerate(pool.map(fn, jobs, chunksize=2), start=1):
-                    out[page_no] = res
-                    if progress:
-                        progress(i, total, label)
+            pool = _get_pool()
+            for i, (page_no, res) in enumerate(pool.map(fn, jobs, chunksize=2), start=1):
+                out[page_no] = res
+                if progress:
+                    progress(i, total, label)
             return out
         except Exception as e:
             print(f"  [scan] parallel {label or 'pass'} unavailable ({e}); using single process")
+            shutdown_pool()
             _disable_pool()
             out = {}
 

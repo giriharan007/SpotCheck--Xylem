@@ -649,6 +649,10 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
         region_note=region_note,
     )
 
+    # The workers have nothing left to do; hand the cores back before the
+    # interface starts drawing results into four tabs.
+    DocScan.shutdown_pool()
+
     print("=" * 80)
     print("UNIFIED QUALITY & VISUAL INSPECTION COMPLETE")
     print("=" * 80)

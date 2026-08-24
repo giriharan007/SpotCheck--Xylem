@@ -77,6 +77,12 @@ TEXT_ON_LIGHT = DEPENDABLE_BLUE
 # black gives 7.0:1 and is what the destructive buttons use.
 TEXT_ON_ORANGE = NEUTRAL_BLACK
 
+# Radiant Orange is a fill colour, not a text colour: as text it measures
+# 2.93:1 on white and 2.56:1 on the pale card, both below the 4.5:1 floor. This
+# is the same hue darkened until it reads - 6.12:1 on white - for status lines
+# that need to say "look at this" without becoming unreadable while they do it.
+TEXT_ATTENTION = "#A34600"
+
 # CTk's stock disabled grey is #bdbdbd, which on a white button is 1.9:1 -
 # effectively invisible, and the reason "Open Output Folder" could not be read
 # before a run had produced anything.

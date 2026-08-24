@@ -84,7 +84,11 @@ PAGE_WHEEL_STEP = 60
 MARGIN_GRAB_PX = 6                 # how close the pointer must be to grab a guide
 MARGIN_BAND_COLOR = "#D0021B"      # the ignored area, shaded
 MARGIN_GUIDE_COLOR = "#F5A623"     # the draggable boundary line
-MARGIN_KEPT_COLOR = "#1E9E5A"      # a graphic the current margins keep
+# A graphic the current margins keep. Was #1E9E5A drawn as a 1px dotted
+# line, which measured 3.45:1 on white and read as a smudge on a page full
+# of line art - the thing the overlay exists to show was the hardest thing
+# on it to see. Deeper green at 5.44:1, drawn thicker below.
+MARGIN_KEPT_COLOR = "#0B7A3B"      # a graphic the current margins keep
 MARGIN_SIDE_ORDER = ("header", "footer", "left", "right")
 MARGIN_FIELD_LABELS = {"header": "Top", "footer": "Bottom",
                        "left": "Left", "right": "Right"}
@@ -105,6 +109,13 @@ def _font(size=12, weight="normal", family=None, **kwargs):
 # ==============================================================================
 # CUSTOMTKINTER MULTI-REGION SELECTOR & INSPECTOR DIALOG
 # ==============================================================================
+
+# Half-width of a grab handle, in canvas pixels, and the smallest region a
+# resize may leave behind. Four pixels each way is comfortable with a mouse
+# without the handles swallowing a small box whole.
+HANDLE = 4
+MIN_REGION_PT = 8.0
+
 
 class RegionInspectorFrame(ctk.CTkFrame):
     """
@@ -154,6 +165,11 @@ class RegionInspectorFrame(ctk.CTkFrame):
         self.preview_tk_img = None
         self._updating_selection = False
         self._text_box_readonly = True
+        # Which region a drag is currently moving or resizing, and from where.
+        self._edit_region = None
+        self._edit_corner = None
+        self._edit_origin = (0.0, 0.0)
+        self._edit_start_rect = (0.0, 0.0, 0.0, 0.0)
 
         # Ignored page margins. Part of the stylesheet, edited on the canvas,
         # saved into the template - see core/margins.py for what they mean.
@@ -402,17 +418,22 @@ class RegionInspectorFrame(ctk.CTkFrame):
         r_table_frame = tk.Frame(right_card, bg=UI_CARD_BG)
         r_table_frame.pack(fill="x", padx=10, pady=2)
 
-        r_cols = ("label", "page", "type", "coords")
+        r_cols = ("label", "page", "type", "text", "coords")
         self.region_tree = ttk.Treeview(r_table_frame, columns=r_cols, show="headings", height=6, style=_TREE_STYLE)
         self.region_tree.heading("label", text="Custom Label / Name")
         self.region_tree.heading("page", text="Checked On")
         self.region_tree.heading("type", text="Match Type")
+        # Whether this region carries text of its own. Without a column for it
+        # there is no way to confirm an edit was taken before saving, and no way
+        # to see afterwards which regions the stylesheet actually pins.
+        self.region_tree.heading("text", text="Text")
         self.region_tree.heading("coords", text="Coordinates (x0, y0, x1, y1)")
 
         self.region_tree.column("label", width=140, anchor="w")
-        self.region_tree.column("page", width=160, anchor="w")
-        self.region_tree.column("type", width=115, anchor="center")
-        self.region_tree.column("coords", width=170, anchor="w")
+        self.region_tree.column("page", width=150, anchor="w")
+        self.region_tree.column("type", width=110, anchor="center")
+        self.region_tree.column("text", width=130, anchor="w")
+        self.region_tree.column("coords", width=165, anchor="w")
 
         r_scroll = tk.Scrollbar(r_table_frame, orient="vertical", command=self.region_tree.yview)
         self.region_tree.configure(yscrollcommand=r_scroll.set)
@@ -546,9 +567,23 @@ class RegionInspectorFrame(ctk.CTkFrame):
 
         text_bar = ctk.CTkFrame(editor_card, fg_color="transparent")
         text_bar.pack(fill="x", padx=8, pady=(0, 6))
+
+        # Typing in the box already pins the text, but relying on that alone
+        # left no way to pin the text AS IT IS - and no way to see, before
+        # saving, whether anything had been pinned at all. The tick does both:
+        # it is on whenever this region carries its own text, and ticking it
+        # pins whatever is currently in the box.
+        self.lock_text_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            text_bar, text="Match this exact text", variable=self.lock_text_var,
+            font=_font(size=10, weight="bold"), text_color=DEPENDABLE_BLUE,
+            checkbox_width=16, checkbox_height=16,
+            fg_color=XYLEM_BLUE, hover_color=UI_HOVER_BLUE,
+            command=self._on_lock_text_toggle).pack(side="left")
+
         self.text_state_lbl = ctk.CTkLabel(
             text_bar, text="", font=_font(size=9), text_color=NEUTRAL_DARK_GR, anchor="w")
-        self.text_state_lbl.pack(side="left")
+        self.text_state_lbl.pack(side="left", padx=(12, 0))
         self.revert_text_btn = ctk.CTkButton(
             text_bar, text="Use the text from the page", width=170, height=22,
             fg_color=UI_CARD_BG, text_color=DEPENDABLE_BLUE, border_width=1,
@@ -1067,9 +1102,14 @@ class RegionInspectorFrame(ctk.CTkFrame):
             cx1 = self._page_to_canvas(rect[2], "x")
             cy1 = self._page_to_canvas(rect[3], "y")
             if side is None:
+                # Two strokes: a pale halo underneath so the box stays visible
+                # where it crosses black line art, then the green over it.
                 self.canvas.create_rectangle(
-                    cx0, cy0, cx1, cy1, outline=MARGIN_KEPT_COLOR, width=1,
-                    dash=(1, 3), tags="margin")
+                    cx0 - 2, cy0 - 2, cx1 + 2, cy1 + 2, outline=NEUTRAL_WHITE,
+                    width=4, tags="margin")
+                self.canvas.create_rectangle(
+                    cx0, cy0, cx1, cy1, outline=MARGIN_KEPT_COLOR, width=3,
+                    dash=(6, 3), tags="margin")
             else:
                 self.canvas.create_rectangle(
                     cx0, cy0, cx1, cy1, outline=MARGIN_BAND_COLOR, width=2,
@@ -1198,14 +1238,29 @@ class RegionInspectorFrame(ctk.CTkFrame):
                 return side
         return None
 
+    # What the pointer turns into over each grab handle. Without this the
+    # handles are decoration; with it the box reads as something you can take
+    # hold of, which is the whole point of being able to correct a placement.
+    _CORNER_CURSORS = {
+        "nw": "top_left_corner", "ne": "top_right_corner",
+        "sw": "bottom_left_corner", "se": "bottom_right_corner",
+        "n": "sb_v_double_arrow", "s": "sb_v_double_arrow",
+        "w": "sb_h_double_arrow", "e": "sb_h_double_arrow",
+    }
+
     def _on_canvas_motion(self, event):
         """Turn the cursor into a resize arrow over a guide, so it reads as draggable."""
-        if self._drag_guide or self.selection_start:
+        if self._drag_guide or self.selection_start or self._edit_region is not None:
             return
-        side = self._guide_at(self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
+        cx, cy = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        side = self._guide_at(cx, cy)
         want = "crosshair"
         if side:
             want = "sb_v_double_arrow" if MARGIN_AXIS[side] == "y" else "sb_h_double_arrow"
+        else:
+            region, corner = self._region_at(cx, cy)
+            if region is not None:
+                want = self._CORNER_CURSORS.get(corner, "fleur")
         # Reconfiguring on every mouse-move is a Tk round trip per pixel; only
         # touch the widget when the cursor actually has to change.
         if want != getattr(self, "_canvas_cursor", None):
@@ -1401,6 +1456,31 @@ class RegionInspectorFrame(ctk.CTkFrame):
         self._update_text_state(r)
         self._refresh_region_row(r)
 
+    def _on_lock_text_toggle(self):
+        """
+        Pin, or unpin, whatever is currently in the box.
+
+        Ticking it is the deliberate version of editing: it says "this text,
+        exactly, on every translation" without requiring the user to change a
+        character first. Unticking hands the region back to the page.
+        """
+        r = self._get_active_region()
+        if r is None or self._text_box_readonly:
+            self.lock_text_var.set(bool(r and r.get("expected_text") is not None))
+            return
+        if self.lock_text_var.get():
+            r["expected_text"] = self.eng_text_box.get("1.0", "end").rstrip("\n")
+        else:
+            r.pop("expected_text", None)
+            self._updating_selection = True
+            try:
+                self.eng_text_box.delete("1.0", "end")
+                self.eng_text_box.insert("1.0", self._describe_master_content(r))
+            finally:
+                self._updating_selection = False
+        self._update_text_state(r)
+        self._refresh_region_row(r)
+
     def _revert_expected_text(self):
         """Drop the override and go back to what is on the page."""
         r = self._get_active_region()
@@ -1418,6 +1498,12 @@ class RegionInspectorFrame(ctk.CTkFrame):
 
     def _update_text_state(self, r):
         """The line under the box: where the text being matched comes from."""
+        locked = bool(r is not None and r.get("expected_text") is not None)
+        try:
+            self.lock_text_var.set(locked)
+        except Exception:
+            pass
+
         if r is None:
             self.text_state_lbl.configure(text="")
             self.revert_text_btn.configure(state="disabled")
@@ -1428,14 +1514,15 @@ class RegionInspectorFrame(ctk.CTkFrame):
                      "so its text cannot be edited here.")
             self.revert_text_btn.configure(state="disabled")
             return
-        if r.get("expected_text") is not None:
+        if locked:
             self.text_state_lbl.configure(
-                text="Edited — this text is what every translation is checked "
-                     "against, and it is saved with the stylesheet.")
+                text="Pinned — every translation is checked against exactly this, "
+                     "and it is saved in the stylesheet.")
             self.revert_text_btn.configure(state="normal")
         else:
             self.text_state_lbl.configure(
-                text="Taken from the page. Type here to override it.")
+                text="Read from the page each run. Type here, or tick the box, "
+                     "to pin it instead.")
             self.revert_text_btn.configure(state="disabled")
 
     def _describe_master_content(self, r: dict) -> str:
@@ -1498,7 +1585,8 @@ class RegionInspectorFrame(ctk.CTkFrame):
                     "",
                     "end",
                     iid=str(r["id"]),
-                    values=(display_label, self._page_cell(r), type_str, coords_str)
+                    values=(display_label, self._page_cell(r), type_str,
+                            self._text_cell(r), coords_str)
                 )
 
             if self.active_region_id and self.region_tree.exists(str(self.active_region_id)):
@@ -1602,7 +1690,10 @@ class RegionInspectorFrame(ctk.CTkFrame):
                     x0, y0, x1, y1 = active_r["roi_rect"]
                     type_str = self._get_match_type_string(active_r)
                     display_lbl = f"  ↳ {new_label}" if active_r.get("parent_id") is not None else new_label
-                    self.region_tree.item(str(active_r["id"]), values=(display_lbl, self._page_cell(active_r), type_str, f"[{x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f}]"))
+                    self.region_tree.item(str(active_r["id"]), values=(
+                        display_lbl, self._page_cell(active_r), type_str,
+                        self._text_cell(active_r),
+                        f"[{x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f}]"))
                 self._draw_all_rois_on_canvas()
 
     # ──────────────────────────────────────────────────────────
@@ -1675,9 +1766,18 @@ class RegionInspectorFrame(ctk.CTkFrame):
                 lbl = f"  ↳ {r['label']}" if r.get("parent_id") is not None else r["label"]
                 self.region_tree.item(str(r["id"]), values=(
                     lbl, self._page_cell(r), self._get_match_type_string(r),
+                    self._text_cell(r),
                     f"[{x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f}]"))
         except Exception:
             pass
+
+    def _text_cell(self, r):
+        """The Text column: saved-with-the-stylesheet, or taken from the page."""
+        val = r.get("expected_text")
+        if val is None:
+            return "from page"
+        flat = " ".join(str(val).split())
+        return f"saved: {flat[:22]}\u2026" if len(flat) > 22 else f"saved: {flat}"
 
     def _page_cell(self, r):
         """The Page column shows the scope, not a bare page number."""
@@ -1705,12 +1805,43 @@ class RegionInspectorFrame(ctk.CTkFrame):
                 messagebox.showerror("Template Not Found",
                                      f"Could not read template: {name_or_data}")
             return False
+        # The document in hand decides both WHICH PAGE a region belongs on and
+        # WHERE ON IT the box goes. Neither can come from the stored numbers:
+        # a region saved as "last page, page 20" was drawn on a 20-page manual,
+        # and a rectangle saved on A5 is in the wrong place on A3.
+        page_size = ((self.page_width_pt, self.page_height_pt)
+                     if self.page_width_pt and self.page_height_pt else None)
+        total = self.total_pages or 0
+
         self.regions = []
+        moved_pages, moved_geometry = 0, 0
         for src in data.get("regions", []):
             r = dict(src)
-            r.setdefault("eng_text", "")
+            # The saved master_text seeds the box, so a region shows its text
+            # the moment a stylesheet is loaded rather than only after the page
+            # it lives on has been rendered.
+            r.setdefault("eng_text", src.get("master_text") or "")
             r["is_custom_label"] = True
             r["color"] = REGION_COLORS[len(self.regions) % len(REGION_COLORS)]
+
+            if total:
+                scope = r.get("page_scope") or default_scope(
+                    r.get("page_num"), bool(r.get("is_last_page")))
+                pages = templates_store.resolve_pages(scope, total, r.get("page_num"))
+                if pages:
+                    want = pages[0] if scope.get("type") != templates_store.SCOPE_LAST else total
+                    if want != r.get("page_num"):
+                        moved_pages += 1
+                    r["page_num"] = want
+                    r["is_last_page"] = (want == total)
+
+            placed = templates_store.geometry_for_page(r, page_size)
+            if placed and list(map(lambda v: round(float(v), 1), placed)) != \
+                    list(map(lambda v: round(float(v), 1), r.get("roi_rect") or [])):
+                moved_geometry += 1
+            if placed:
+                r["roi_rect"] = tuple(float(v) for v in placed)
+
             self.regions.append(r)
         # The margins are as much a part of the stylesheet as the regions are;
         # loading one without the other would silently change what the run
@@ -1726,9 +1857,41 @@ class RegionInspectorFrame(ctk.CTkFrame):
             pass
         self._load_and_render_page()
         self.template_var.set(data.get("name", ""))
+        adjust = []
+        if moved_pages:
+            adjust.append(f"{moved_pages} re-pointed at this document's pages")
+        if moved_geometry:
+            adjust.append(f"{moved_geometry} re-placed for this sheet size")
         print(f"[Template] Loaded '{data.get('name')}' with {len(self.regions)} region(s), "
-              f"margins {page_margins.describe(self.margins)}")
+              f"margins {page_margins.describe(self.margins)}"
+              + (f"  ({', '.join(adjust)})" if adjust else ""))
+        self._announce_placement(data, moved_pages, moved_geometry, page_size)
         return True
+
+    def _announce_placement(self, data, moved_pages, moved_geometry, page_size):
+        """Say on screen what had to be adjusted to fit this document."""
+        bits = []
+        saved_size = data.get("page_size")
+        if saved_size and page_size:
+            a = templates_store.sheet_key(saved_size)
+            b = templates_store.sheet_key(page_size)
+            if a and b and a != b:
+                bits.append(f"stylesheet drawn on {a}, this document is {b}")
+        if moved_pages:
+            bits.append(f"{moved_pages} region(s) moved to this document's pages")
+        if moved_geometry:
+            bits.append(f"{moved_geometry} box(es) re-placed from their page edges "
+                        f"— drag or resize to correct, then Save As to remember it")
+        try:
+            if bits:
+                self.status_lbl.configure(text="Stylesheet fitted \u2022 " + "  \u00b7  ".join(bits),
+                                          text_color=theme.TEXT_ATTENTION)
+            else:
+                self.status_lbl.configure(
+                    text="Ready \u2022 Draw regions on page or edit labels above",
+                    text_color=theme.TEXT_ON_LIGHT)
+        except Exception:
+            pass
 
     def _reapply_selected_template(self):
         """
@@ -1797,9 +1960,12 @@ class RegionInspectorFrame(ctk.CTkFrame):
                 "Overwrite?", f"A template named '{name}' already exists.\n\nOverwrite it?"):
             return
         margins = self.get_margins()
+        page_size = (self.page_width_pt, self.page_height_pt)
+        self._record_geometry(page_size)
+        self._record_text()
         path = templates_store.save_template(
             name, self.regions, source_pdf=self.eng_pdf_path, margins=margins,
-            page_size=(self.page_width_pt, self.page_height_pt))
+            page_size=page_size)
         if path:
             self.refresh_template_list(select=name)
             if callable(self._on_templates_changed):
@@ -1814,6 +1980,78 @@ class RegionInspectorFrame(ctk.CTkFrame):
         else:
             messagebox.showerror("Save Failed",
                                  "The template could not be written. See the log for details.")
+
+    def _record_text(self):
+        """
+        Refresh every region's text from the master, just before saving.
+
+        The clip is read from the page for all of them, so the saved file always
+        says what each region contains - a stylesheet whose regions are only
+        rectangles is very hard to check by eye, and impossible to review in a
+        diff. A pinned text is left exactly as the user set it; only the record
+        of what the master says is updated.
+        """
+        if not self.eng_pdf_path:
+            return
+        try:
+            with fitz.open(self.eng_pdf_path) as doc_eng:
+                for r in self.regions:
+                    try:
+                        clip = extract_roi_text(doc_eng, r["page_num"], r["roi_rect"])
+                    except Exception:
+                        clip = r.get("eng_text", "") or ""
+                    r["eng_text"] = clip
+                    r["master_text"] = clip
+        except Exception as e:
+            print(f"  [Template] Could not re-read region text: {e}")
+
+    def _record_geometry(self, page_size):
+        """
+        Capture where each box sits, in a form that survives a change of sheet.
+
+        Two things are written. The anchor - which edges the box belongs to and
+        how far in - is refreshed from the box's current position, so dragging
+        it also updates how it will be placed on other sheet sizes. And the
+        exact rectangle is filed under this document's sheet size, so a box the
+        user positioned by hand on A3 comes back exactly there on the next A3
+        document rather than being re-derived.
+        """
+        if not page_size or not page_size[0] or not page_size[1]:
+            return
+        key = templates_store.sheet_key(page_size)
+        for r in self.regions:
+            rect = r.get("roi_rect")
+            if not rect:
+                continue
+
+            existing = r.get("anchor")
+            src = (existing or {}).get("from_size")
+            same_sheet = bool(src and templates_store.sheet_key(src) == key)
+
+            # The anchor is only rewritten on the sheet it was drawn against.
+            #
+            # This mattered more than it looks. Adjusting a box on A4 and then
+            # re-deriving the anchor from it moved the A5 placement too, so
+            # correcting one sheet silently broke the other - the opposite of
+            # what a per-size correction is for. An edit made on a different
+            # sheet is recorded for that sheet and nowhere else.
+            if existing is None or same_sheet:
+                anchor = templates_store.anchor_from_rect(rect, page_size)
+                if anchor:
+                    r["anchor"] = anchor
+
+            by_sheet = dict(r.get("rects_by_sheet") or {})
+            by_sheet[key] = [round(float(v), 2) for v in rect]
+
+            # Pin the sheet the anchor came from as well, so the original
+            # placement is a stored fact rather than something re-derived.
+            if src and templates_store.sheet_key(src) not in by_sheet:
+                origin = templates_store.rect_from_anchor(
+                    r["anchor"], src, scale=bool(r.get("scale_with_page")))
+                if origin:
+                    by_sheet[templates_store.sheet_key(src)] = origin
+
+            r["rects_by_sheet"] = by_sheet
 
     def _on_delete_template(self):
         name = self.template_var.get().strip()
@@ -1858,7 +2096,10 @@ class RegionInspectorFrame(ctk.CTkFrame):
                 x0, y0, x1, y1 = active_r["roi_rect"]
                 type_str = self._get_match_type_string(active_r)
                 display_lbl = f"  \u21b3 {active_r['label']}" if active_r.get("parent_id") is not None else active_r["label"]
-                self.region_tree.item(str(active_r["id"]), values=(display_lbl, self._page_cell(active_r), type_str, f"[{x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f}]"))
+                self.region_tree.item(str(active_r["id"]), values=(
+                        display_lbl, self._page_cell(active_r), type_str,
+                        self._text_cell(active_r),
+                        f"[{x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f}]"))
             self._draw_all_rois_on_canvas()
 
     def _on_exact_match_toggle(self):
@@ -1876,7 +2117,10 @@ class RegionInspectorFrame(ctk.CTkFrame):
                 x0, y0, x1, y1 = active_r["roi_rect"]
                 type_str = self._get_match_type_string(active_r)
                 display_lbl = f"  ↳ {active_r['label']}" if active_r.get("parent_id") is not None else active_r["label"]
-                self.region_tree.item(str(active_r["id"]), values=(display_lbl, self._page_cell(active_r), type_str, f"[{x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f}]"))
+                self.region_tree.item(str(active_r["id"]), values=(
+                        display_lbl, self._page_cell(active_r), type_str,
+                        self._text_cell(active_r),
+                        f"[{x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f}]"))
             self._draw_all_rois_on_canvas()
 
     def _on_dont_compare_text_toggle(self):
@@ -1894,7 +2138,10 @@ class RegionInspectorFrame(ctk.CTkFrame):
                 x0, y0, x1, y1 = active_r["roi_rect"]
                 type_str = self._get_match_type_string(active_r)
                 display_lbl = f"  ↳ {active_r['label']}" if active_r.get("parent_id") is not None else active_r["label"]
-                self.region_tree.item(str(active_r["id"]), values=(display_lbl, self._page_cell(active_r), type_str, f"[{x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f}]"))
+                self.region_tree.item(str(active_r["id"]), values=(
+                        display_lbl, self._page_cell(active_r), type_str,
+                        self._text_cell(active_r),
+                        f"[{x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f}]"))
             self._draw_all_rois_on_canvas()
 
     # ──────────────────────────────────────────────────────────
@@ -2016,6 +2263,17 @@ class RegionInspectorFrame(ctk.CTkFrame):
                 tags=("roi_box", f"roi_{r['id']}")
             )
 
+            # Grab handles on the selected box, so that it can be moved and
+            # resized rather than only redrawn from scratch. A stylesheet used
+            # at several trim sizes needs exactly this: the automatic placement
+            # gets a box close, and the last few points are a drag.
+            if is_active:
+                for hx, hy, _corner in self._handle_points(cx0, cy0, cx1, cy1):
+                    self.canvas.create_rectangle(
+                        hx - HANDLE, hy - HANDLE, hx + HANDLE, hy + HANDLE,
+                        fill=NEUTRAL_WHITE, outline=outline_color, width=2,
+                        tags=("roi_box", f"handle_{r['id']}"))
+
             # Badge tag
             mode_tag = " [VISUAL]" if r.get("dont_compare_text", False) else (" [EXACT]" if r.get("exact_match", False) else "")
             badge_text = f" {r['label']}{mode_tag} "
@@ -2035,6 +2293,53 @@ class RegionInspectorFrame(ctk.CTkFrame):
                 tags=("roi_badge", f"badge_txt_{r['id']}")
             )
 
+    # ── moving and resizing an existing box ───────────────────
+    #
+    # Until this existed every drag drew a NEW region, which made the
+    # cross-sheet story impossible to finish: automatic placement gets a box
+    # close on a different trim size, and the only way to correct it was to
+    # delete and redraw. Now a press picks the thing under it - a corner or edge
+    # handle resizes, the inside of a box moves it, empty page draws a new one -
+    # so the same single gesture does all three without a mode to remember.
+
+    def _handle_points(self, cx0, cy0, cx1, cy1):
+        """The eight grab points of a box, in canvas coordinates."""
+        mx, my = (cx0 + cx1) / 2.0, (cy0 + cy1) / 2.0
+        return (
+            (cx0, cy0, "nw"), (mx, cy0, "n"), (cx1, cy0, "ne"),
+            (cx1, my, "e"), (cx1, cy1, "se"), (mx, cy1, "s"),
+            (cx0, cy1, "sw"), (cx0, my, "w"),
+        )
+
+    def _region_at(self, cx, cy):
+        """
+        What the pointer is over: (region, corner) for a handle, (region, None)
+        inside a box, or (None, None) on bare page.
+
+        The active region is offered first so its handles stay grabbable even
+        where a larger box overlaps it, and smaller boxes win over larger ones
+        so a sub-region nested inside its parent can still be picked up.
+        """
+        on_page = [r for r in self.regions if r["page_num"] == self.current_page]
+        ordered = sorted(on_page, key=lambda r: (r["id"] != self.active_region_id,
+                                                 self._area(r)))
+        for r in ordered:
+            x0, y0, x1, y1 = r["roi_rect"]
+            cx0, cy0 = 10 + x0 * self.zoom, 10 + y0 * self.zoom
+            cx1, cy1 = 10 + x1 * self.zoom, 10 + y1 * self.zoom
+            if r["id"] == self.active_region_id:
+                for hx, hy, corner in self._handle_points(cx0, cy0, cx1, cy1):
+                    if abs(cx - hx) <= HANDLE + 2 and abs(cy - hy) <= HANDLE + 2:
+                        return r, corner
+            if cx0 <= cx <= cx1 and cy0 <= cy <= cy1:
+                return r, None
+        return None, None
+
+    @staticmethod
+    def _area(r):
+        x0, y0, x1, y1 = r["roi_rect"]
+        return max(0.0, (x1 - x0)) * max(0.0, (y1 - y0))
+
     def _on_canvas_press(self, event):
         canvas_x = self.canvas.canvasx(event.x)
         canvas_y = self.canvas.canvasy(event.y)
@@ -2048,11 +2353,59 @@ class RegionInspectorFrame(ctk.CTkFrame):
             self.selection_start = None
             return
 
+        region, corner = self._region_at(canvas_x, canvas_y)
+        if region is not None:
+            self.active_region_id = region["id"]
+            self._edit_region = region
+            self._edit_corner = corner
+            self._edit_origin = (canvas_x, canvas_y)
+            self._edit_start_rect = tuple(region["roi_rect"])
+            self.selection_start = None
+            self._sync_regions_table()
+            self._draw_all_rois_on_canvas()
+            return
+
         self.selection_start = (canvas_x, canvas_y)
+
+    def _apply_edit(self, cx, cy):
+        """Move or resize the region being dragged, live."""
+        r = self._edit_region
+        if r is None:
+            return
+        dx = (cx - self._edit_origin[0]) / self.zoom
+        dy = (cy - self._edit_origin[1]) / self.zoom
+        x0, y0, x1, y1 = self._edit_start_rect
+        pw = self.page_width_pt or (x1 + 1)
+        ph = self.page_height_pt or (y1 + 1)
+
+        if self._edit_corner is None:
+            # Move, kept whole: a box pushed at the edge stops rather than
+            # being silently clipped to a different size.
+            dx = max(-x0, min(dx, pw - x1))
+            dy = max(-y0, min(dy, ph - y1))
+            new = (x0 + dx, y0 + dy, x1 + dx, y1 + dy)
+        else:
+            c = self._edit_corner
+            nx0, ny0, nx1, ny1 = x0, y0, x1, y1
+            if "w" in c:
+                nx0 = min(x1 - MIN_REGION_PT, x0 + dx)
+            if "e" in c:
+                nx1 = max(x0 + MIN_REGION_PT, x1 + dx)
+            if "n" in c:
+                ny0 = min(y1 - MIN_REGION_PT, y0 + dy)
+            if "s" in c:
+                ny1 = max(y0 + MIN_REGION_PT, y1 + dy)
+            new = (max(0.0, nx0), max(0.0, ny0), min(pw, nx1), min(ph, ny1))
+
+        r["roi_rect"] = tuple(round(v, 1) for v in new)
+        self._draw_all_rois_on_canvas()
 
     def _on_canvas_drag(self, event):
         if self._drag_guide:
             self._drag_guide_to(self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
+            return
+        if self._edit_region is not None:
+            self._apply_edit(self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
             return
         if not self.selection_start:
             return
@@ -2084,6 +2437,33 @@ class RegionInspectorFrame(ctk.CTkFrame):
                      f"• saved with the template")
             self._schedule_margin_save()
             return
+
+        if self._edit_region is not None:
+            self._apply_edit(self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
+            r, self._edit_region = self._edit_region, None
+            self._edit_corner = None
+            moved = tuple(round(v, 1) for v in r["roi_rect"]) != \
+                tuple(round(v, 1) for v in self._edit_start_rect)
+            if moved:
+                # The clipped text belongs to the old rectangle; re-read it, but
+                # never over a text the user has corrected by hand.
+                try:
+                    with fitz.open(self.eng_pdf_path) as doc_eng:
+                        r["eng_text"] = extract_roi_text(
+                            doc_eng, r["page_num"], r["roi_rect"])
+                except Exception:
+                    pass
+                x0, y0, x1, y1 = r["roi_rect"]
+                self.status_lbl.configure(
+                    text=f"{r['label']} • {x1 - x0:.0f} × {y1 - y0:.0f} pt at "
+                         f"{x0:.0f}, {y0:.0f} • Save As… to keep this for "
+                         f"{templates_store.sheet_key((self.page_width_pt, self.page_height_pt))}",
+                    text_color=theme.TEXT_ATTENTION)
+            self._sync_regions_table()
+            self._update_region_preview(r)
+            self._draw_all_rois_on_canvas()
+            return
+
         if not self.selection_start:
             return
         cur_x = self.canvas.canvasx(event.x)
@@ -2151,7 +2531,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
 
         self.is_checking = True
         self.run_btn.configure(state="disabled", text="⏳ Checking & Cropping Regions...")
-        self.status_lbl.configure(text="Processing translations and generating comparison crops...", text_color=RADIANT_ORANGE)
+        self.status_lbl.configure(text="Processing translations and generating comparison crops...", text_color=theme.TEXT_ATTENTION)
         self.progress_bar.set(0.0)
 
         for item in self.results_tree.get_children():

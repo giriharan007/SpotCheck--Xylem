@@ -346,6 +346,22 @@ RULE_MIN_LENGTH_PT = 26.0
 # tab, comfortably less than any figure, which spans most of the text block.
 EDGE_ARTIFACT_MAX_WIDTH = 0.12
 
+# How much of the sheet a run of ruling must span before it counts as page
+# furniture. A quarter is comfortably below a separator rule across the text
+# column, and far above a single barcode bar.
+MIN_FURNITURE_SPAN = 0.25
+
+# A cluster made this much of long straight strokes is ruling, not artwork.
+# A table cell outline measures 1.0; a hazard triangle, whose sides are
+# diagonal, measures 0; the densest line drawing in the manual measures 0.42.
+RULE_ONLY_FRACTION = 0.85
+
+# ...and for a small cluster, where a partial cell border is common. Measured:
+# leftover cell fragment 564pt2 at 0.80, cover barcode 2958pt2 at 0.64, hazard
+# triangle 1213pt2 at 0.29.
+SMALL_RULE_AREA_PT2 = 1000.0
+SMALL_RULE_FRACTION = 0.60
+
 # A region is only treated as ruling if this much of its ink is long straight
 # lines. A parts table measures around 0.9; an exploded diagram around 0.2.
 RULE_DOMINANCE = 0.55
@@ -388,6 +404,97 @@ def _ink_mask(fitz_page, dpi=INK_DPI):
         pass
 
     return (gray < 245).astype(np.uint8), scale
+
+
+def _thin_rules(mask, min_len_px, max_thick_px=None):
+    """
+    Long straight strokes that are actually thin.
+
+    The thickness test is not fussiness. A horizontal opening asks "is there an
+    unbroken run of ink this wide", and a solid black disc 50px across answers
+    yes for every row through its middle - so the hazard pictogram on page 11
+    was classified as ruling and most of it removed, leaving an 18pt sliver
+    where a 50pt icon should have been. A rule is long AND thin; a picture is
+    long and thick.
+    """
+    if max_thick_px is None:
+        max_thick_px = max(3, int(round(min_len_px * 0.18)))
+
+    out = np.zeros_like(mask)
+    for kernel, axis in (((min_len_px, 1), "h"), ((1, min_len_px), "v")):
+        band = cv2.morphologyEx(mask, cv2.MORPH_OPEN,
+                                cv2.getStructuringElement(cv2.MORPH_RECT, kernel))
+        if not band.any():
+            continue
+        count, labels, stats, _c = cv2.connectedComponentsWithStats(band, 8)
+        keep = [i for i in range(1, count)
+                if (stats[i][3] if axis == "h" else stats[i][2]) <= max_thick_px]
+        if keep:
+            out = cv2.bitwise_or(out, np.isin(labels, keep).astype(np.uint8))
+    return out
+
+
+def _strip_isolated_rules(mask, min_len_px):
+    """
+    Remove long straight rules that touch nothing else.
+
+    A page separator - the line above and below a DANGER block - is a graphic to
+    a clustering algorithm and furniture to a reader. Leaving them in cost two
+    things on the Start 350 manual: each pair of rules became a candidate in its
+    own right (a 292x6pt "graphic"), and a rule running past a hazard pictogram
+    merged with it, stretching a 63pt icon box across the full text column.
+    Worse, where the rules fall depends on how long the translated text is, so
+    the count differed in every language and the symmetric count check failed on
+    all eleven for a reason that had nothing to do with the translations.
+
+    Isolation is the whole test, and it is what makes this safe. A separator
+    touches nothing once the text is masked away. A leader line in an exploded
+    diagram touches the part it points at - that is its job - so it is attached,
+    and attached rules are left exactly where they are. Without that distinction
+    this would take an exploded diagram apart, which is the failure the ink
+    clustering was written to fix.
+    """
+    rules = _thin_rules(mask, min_len_px)
+    if rules is None or not rules.any():
+        return mask
+
+    # Ink that is not part of a long rule.
+    #
+    # The rule's own anti-aliased fringe has to go with it. A 2pt rule renders
+    # as a solid core plus a grey row either side; the core is what the opening
+    # finds, and the fringe is not, so it lands in "other" one pixel away and
+    # every rule on the page reports itself as touching something. That is
+    # exactly what happened first time: fifteen rules, fifteen "attached", and
+    # nothing stripped.
+    rule_fringe = cv2.dilate(rules, np.ones((5, 5), np.uint8))
+    other = cv2.bitwise_and(mask, cv2.bitwise_not(rule_fringe))
+    if not other.any():
+        return cv2.bitwise_and(mask, cv2.bitwise_not(rules))
+    near_other = cv2.dilate(other, np.ones((5, 5), np.uint8))
+
+    count, labels, stats, _c = cv2.connectedComponentsWithStats(rules, 8)
+    attached = np.unique(labels[(near_other > 0) & (rules > 0)])
+    attached = set(int(v) for v in attached if v != 0)
+
+    # Furniture also has to SPAN something. A barcode is fifty thin vertical
+    # strokes, each one long enough to pass the stroke test and touching
+    # nothing, so an isolation test alone ate most of the barcode on the cover
+    # and left a different handful of fragments in every language - which is
+    # the very instability this was meant to remove. A separator rule runs
+    # across the text column and a table grid spans its whole table; a single
+    # barcode bar spans 5% of the page.
+    h, w = mask.shape
+    min_span = MIN_FURNITURE_SPAN * max(h, w)
+    drop_labels = [i for i in range(1, count)
+                   if i not in attached
+                   and (stats[i][2] >= min_span or stats[i][3] >= min_span)]
+    if not drop_labels:
+        return mask
+
+    isolated = np.isin(labels, drop_labels)
+
+    drop = cv2.dilate(isolated.astype(np.uint8), np.ones((3, 3), np.uint8))
+    return cv2.bitwise_and(mask, cv2.bitwise_not(drop))
 
 
 def _grid_regions(mask, min_len_px):
@@ -504,9 +611,9 @@ def ink_clusters(fitz_page, table_rects=None, gap_pt=CLUSTER_GAP_PT, dpi=INK_DPI
     mask, scale = _ink_mask(fitz_page, dpi=dpi)
     rule_px = max(3, int(round(RULE_MIN_LENGTH_PT * scale)))
 
-    # Ruled regions are found in the ink and stripped, so a text table does not
-    # cluster into a graphic. `table_rects` is an optional extra hint from a
-    # table finder; nothing depends on one being supplied.
+    # Where the ruled regions are, measured before anything is removed. These
+    # are used to LABEL a crop as coming out of a table; they are no longer used
+    # to decide what to remove.
     regions = list(_grid_regions(mask, rule_px))
     for t in (table_rects or []):
         r = fitz.Rect(t) & fitz_page.rect
@@ -516,8 +623,18 @@ def ink_clusters(fitz_page, table_rects=None, gap_pt=CLUSTER_GAP_PT, dpi=INK_DPI
                         min(mask.shape[1], int(r.x1 * scale) + 2),
                         min(mask.shape[0], int(r.y1 * scale) + 2)))
 
-    for region in regions:
-        _strip_rules(mask, region, rule_px)
+    # One rule handles all ruling: a long thin stroke that touches nothing else
+    # is furniture and goes. That covers a table grid (its rules touch only each
+    # other), a separator above a hazard block, and the line under a running
+    # header, without a region test.
+    #
+    # Stripping by region was the earlier design and it took the page-11 hazard
+    # pictogram apart: the rules above and below it made the area read as a
+    # lattice, the whole region was stripped, and a 61pt black disc came out as
+    # an 18pt sliver of the white arrow inside it. Asking about each stroke
+    # rather than each area cannot make that mistake.
+    ink_before = mask.copy()
+    mask = _strip_isolated_rules(mask, rule_px)
 
     k = max(3, int(round(gap_pt * scale)) | 1)          # odd, so it is centred
     grown = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
@@ -534,6 +651,35 @@ def ink_clusters(fitz_page, table_rects=None, gap_pt=CLUSTER_GAP_PT, dpi=INK_DPI
     # inset detail drawn in the white space of a larger diagram, for instance.
     # Cropping both means comparing the same picture twice and reporting it
     # twice, so the enclosed one goes.
+    # Anything that is only ruling is not a graphic.
+    #
+    # Stripping handles a rule that stands alone, but a table's own rules touch
+    # each other, and where the lattice breaks into pieces some of them are too
+    # short to look like furniture and cluster into a "graphic" - an empty cell
+    # of the Condition/Action table on page 14 came out as a 102x53pt crop in
+    # English and had no counterpart in any translation, which is what made
+    # topic 3.5 fail in all eleven languages. Asking what a cluster is MADE OF
+    # settles it: a cell outline is entirely straight strokes, a hazard triangle
+    # and a pump drawing are not.
+    rules_all = _thin_rules(ink_before, rule_px)
+    def rule_only(rect):
+        x0 = max(0, int(rect.x0 * scale)); y0 = max(0, int(rect.y0 * scale))
+        x1 = min(ink_before.shape[1], int(rect.x1 * scale) + 1)
+        y1 = min(ink_before.shape[0], int(rect.y1 * scale) + 1)
+        ink = int(ink_before[y0:y1, x0:x1].sum())
+        if ink <= 0:
+            return True
+        fraction = int(rules_all[y0:y1, x0:x1].sum()) / float(ink)
+        if fraction >= RULE_ONLY_FRACTION:
+            return True
+        # A SMALL cluster does not have to be pure ruling to be a leftover
+        # piece of a table. Two thresholds rather than one because the cover
+        # barcode measures 0.64 - it is fifty short vertical strokes - and must
+        # not be caught; it is five times the area of the biggest fragment.
+        return (rect.width * rect.height) < SMALL_RULE_AREA_PT2 and fraction >= SMALL_RULE_FRACTION
+
+    out = [r for r in out if not rule_only(r)]
+
     out.sort(key=lambda r: -(r.width * r.height))
     kept = []
     for r in out:

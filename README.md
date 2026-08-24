@@ -480,6 +480,33 @@ whatever the margins say, and a side band additionally catches anything anchored
 to the edge that pokes into it. Nothing else in the manual matches either test:
 the 84 elements dropped are all 46–47 × 15pt, one per page, alternating edges.
 
+**Ruling is not artwork, wherever it is.** One test covers all of it: a long,
+thin stroke that touches nothing else is furniture. That catches a table grid
+(its rules touch only each other), the separator above a hazard block, and the
+line under a running header, with no region test and no table finder. Three
+details make it safe, and each was found by it going wrong first:
+
+- *isolation* — a leader line in an exploded diagram touches the part it points
+  at, so it is attached and stays. Without this the diagrams came apart again.
+- *thickness* — a horizontal opening asks "is there an unbroken run of ink this
+  wide", and a solid 50pt disc answers yes. The page-11 hazard pictogram was
+  classified as ruling and reduced to an 18pt sliver of the arrow inside it.
+- *span* — furniture crosses a quarter of the sheet. A barcode is fifty thin
+  strokes touching nothing, and without a span test most of the cover barcode
+  was eaten, differently in every language.
+
+A cluster is then checked for what it is MADE of: 85% straight strokes and it is
+ruling, or 60% if it is smaller than 1000pt² where a partial cell border is
+common. Measured — cell fragment 564pt² at 0.80, cover barcode 2958pt² at 0.64,
+hazard triangle 1213pt² at 0.29.
+
+This is what made the symmetric count check usable. Before it, the Start 350 set
+failed on **all eleven languages**: separator rules counted as graphics and moved
+with the text, so every language disagreed with the master for reasons that had
+nothing to do with the translations. After it, nine of eleven pass, and the two
+that do not are real content differences — the Greek page 6 carries a
+magnetic-field symbol the English does not.
+
 Two guards earn their place:
 
 - A table rect is only ever a **hint**. Table finders return nonsense on figure
@@ -499,6 +526,68 @@ before. On the planted test — three pages deleted from a copy of the master �
 the report shows exactly three findings, one per deleted page, and nothing else
 across the remaining 89.
 
+## One Stylesheet, Many Documents
+
+A stylesheet is a claim that the same regions apply to every manual built from
+it. Three things have to be resolved against the document in hand for that claim
+to hold, and none of them can come from the numbers the template happens to
+store.
+
+**Which page.** A last-page region drawn on a 20-page manual was saved with
+`page_num: 20`, and drawing it on page 20 of a 90-page manual puts it in the
+middle of the book. The page is now resolved from the region's scope — `last`
+means the last page of *this* document, `first` means page 1 — and the stored
+number is only a fallback for a scope that no longer exists.
+
+**Where on the page.** The same stylesheet is issued at A2 through A6, and the
+layout is not a scaled copy of itself: the logo block is the same physical size
+on every sheet and the footer sits the same distance up from the trim, while the
+page around them grows. So a region records **which edges it belongs to** — the
+gap to the nearest horizontal and vertical edge, plus its own size — and is
+re-placed from those edges on whatever sheet it lands on. Measured on the real
+stylesheet, A5 → A3:
+
+| Region | on A5 | on A3 | anchored |
+|---|---|---|---|
+| Brand logo | 7.2, 12.8 | 7.2, 12.8 | top-left, unchanged |
+| Bar code | ends 17.1 from the right | ends 17.1 from the right | right edge |
+| Last-page block | 81.7 up from the bottom | 81.7 up from the bottom | bottom edge |
+
+Fractional coordinates were the obvious alternative and are wrong here: they
+would blow the logo up four times on A2. Anchoring is a default, not a law —
+every box stays draggable and resizable.
+
+**What the user corrected.** Automatic placement gets a box close; the last few
+points are a drag. Every box on the page can now be picked up:
+
+- press a corner or edge handle to resize
+- press inside the box to move it whole
+- press bare page to draw a new region, as before
+
+One gesture, no mode to remember, and the cursor says which of the three is
+about to happen. Until this existed the cross-sheet story could not be
+finished - every drag created a NEW region, so the only way to correct a
+placement was to delete and redraw it.
+
+A box adjusted this way is remembered **for that sheet size** under
+`rects_by_sheet` and wins over the anchor next time a document of that size is
+opened. Two rules keep the sizes from treading on each other:
+
+- the anchor is only re-derived on the sheet it was originally drawn against,
+  so correcting A4 does not move A5
+- saving pins the origin sheet's rectangle too, so the first placement is a
+  stored fact rather than something re-derived later
+
+Verified on the real stylesheet: a logo box arrives on A4 at its A5 size
+(7.2, 12.8, 120.8, 70.4), is stretched and nudged to (27.2, 23.2, 200.8, 111.2),
+comes back exactly there on the next A4 document, and the A5 geometry is
+untouched. A region whose artwork genuinely is scaled with the sheet can set
+`scale_with_page`.
+
+The status line says what had to be adjusted — "stylesheet drawn on A5, this
+document is A3 · 1 region moved to this document's pages · 2 boxes re-placed
+from their page edges" — so a fit is never silent.
+
 ## What a Region Is Checked Against
 
 The text a region must match starts as whatever is clipped out of the master at
@@ -508,8 +597,25 @@ a two-line block comes back joined. Every translation is then hunted for text
 the master does not really say.
 
 The box in the Region Inspector is therefore editable, and what is in it is what
-gets checked. An edit is stored as `expected_text` alongside the clipped text
-rather than over it, so:
+gets checked. There are three states, and the file records all of them:
+
+| In the editor | `master_text` | `expected_text` | At run time |
+|---|---|---|---|
+| left alone | what the page says | absent | re-read from the master |
+| typed over | what the page says | what you typed | exactly what you typed |
+| **Match this exact text** ticked | what the page says | the clip, pinned | exactly that, every time |
+
+`master_text` is always written. It is a record, not an instruction, but without
+it the file was silent about text and a stylesheet whose regions are only
+rectangles is very hard to check by eye and impossible to review in a diff.
+
+The tick matters as much as the typing. Relying on an edit alone meant there was
+no way to pin a text that was already correct, and no way to see before saving
+whether anything had been pinned at all. The **Text** column in the regions
+table now reads `from page` or `saved: Fax: +46-471-24…` for every region.
+
+An edit is stored as `expected_text` alongside the clipped text rather than over
+it, so:
 
 - the clip is still there to revert to, via **Use the text from the page**
 - an edit that merely reproduces the clip records no override at all, which
@@ -575,7 +681,12 @@ a normal Xylem set.
 
 The same module runs the sweep across several processes on documents long enough
 to be worth it (24 pages and up), keeping one core free so the window stays
-responsive. Output is byte-identical to the single-process path; verified on the
+responsive. One pool serves the whole run rather than one per pass — that was
+two dozen spawn storms on a twelve-document run, each re-importing PyMuPDF and
+OpenCV in every worker while the user was trying to use the window — and the
+workers run one priority notch below the interface, which costs a few percent of
+throughput and is the difference between a window that is busy and a window that
+looks broken. Output is byte-identical to the single-process path; verified on the
 92-page A4 manual, 478 crops, matching SHA-256.
 
 Measured on that manual (master plus one translation, on a two-core machine):

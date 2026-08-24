@@ -339,7 +339,7 @@ class MetadataFrame(ctk.CTkFrame):
         self._rows = rows or []
         self._fill_documents()
         if err:
-            self.status_lbl.configure(text="failed", text_color=RADIANT_ORANGE)
+            self.status_lbl.configure(text="failed", text_color=theme.TEXT_ATTENTION)
             messagebox.showerror("Scan Failed", str(err))
         else:
             self.status_lbl.configure(text="done", text_color=theme.TEXT_ON_LIGHT)

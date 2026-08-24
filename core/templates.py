@@ -99,15 +99,166 @@ REGION_FIELDS = (
     "id", "label", "page_num", "is_last_page", "roi_rect", "parent_id",
     "exact_match", "dont_compare_text", "scope_only",
     "page_scope", "variant_group",
-    # What the region must say, when the user has corrected it by hand.
-    # Absent means "whatever is clipped out of the master at run time", which
-    # is the right default; present means the extraction got it wrong - a stray
-    # line break in a phone number, a clipped trailing comma - and this is the
-    # text every translation is checked against instead.
+    # Which edges the region belongs to, so one stylesheet can be used at
+    # several trim sizes. See "ONE STYLESHEET, SEVERAL SHEET SIZES" below.
+    "anchor", "rects_by_sheet", "scale_with_page",
+    # The text side of a region, in two parts.
+    #
+    # master_text is ALWAYS written: whatever was clipped out of the master when
+    # the template was saved. It is a record, not an instruction - the run
+    # re-reads the master it is actually given - but without it the file was
+    # silent about text, and a stylesheet you cannot read is a stylesheet you
+    # cannot check.
+    #
+    # expected_text is the instruction, and only appears when there is one:
+    # the user corrected the clip, or locked it deliberately. Then every
+    # translation is matched against exactly this and nothing is re-extracted.
+    "master_text",
     "expected_text",
 )
 
 _BAD_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+# ==============================================================================
+# ONE STYLESHEET, SEVERAL SHEET SIZES
+# ==============================================================================
+# The same stylesheet is issued at A2 through A6. The layout is not a scaled
+# copy of itself: the logo block is the same physical size on every sheet and
+# the footer sits the same distance up from the trim, while the page around
+# them grows. Storing a rectangle in absolute page coordinates therefore breaks
+# the moment the trim changes - a footer 40pt from the bottom of an A5 page is
+# 40pt from the bottom of an A5 page, and nowhere near the bottom of an A2 one.
+#
+# So a region also records WHICH EDGES it belongs to. The anchor keeps the gap
+# to the nearest horizontal and vertical edge, and keeps the box's own size, so
+# a top-left logo stays top-left and a bottom-right code block stays
+# bottom-right whatever the sheet.
+#
+# Two escape hatches, because no rule fits every case:
+#   scale=True on a region whose artwork really is scaled with the page
+#   rects_by_sheet: a geometry the user positioned by hand for one sheet size,
+#                   which wins over the anchor for that size
+#
+# Anchoring is a better default than either fractions or fixed coordinates, but
+# it is only a default: the box is still draggable and resizable, and a box
+# moved on an A3 document is remembered for A3.
+
+ANCHOR_NEAR = "near"      # left edge, or top edge
+ANCHOR_FAR = "far"        # right edge, or bottom edge
+
+
+def anchor_from_rect(rect, page_size):
+    """
+    Describe a rectangle by the edges it sits against.
+
+    The nearer edge on each axis wins, which is what a page designer means: a
+    logo in the top-left corner is positioned from the top-left, and a page
+    number in the bottom-right is positioned from the bottom-right.
+    """
+    if not rect or not page_size:
+        return None
+    x0, y0, x1, y1 = (float(v) for v in rect)
+    pw, ph = float(page_size[0]), float(page_size[1])
+    if pw <= 0 or ph <= 0:
+        return None
+
+    ax = ANCHOR_NEAR if x0 <= (pw - x1) else ANCHOR_FAR
+    ay = ANCHOR_NEAR if y0 <= (ph - y1) else ANCHOR_FAR
+    return {
+        "x": ax,
+        "y": ay,
+        "dx": round(x0 if ax == ANCHOR_NEAR else pw - x1, 2),
+        "dy": round(y0 if ay == ANCHOR_NEAR else ph - y1, 2),
+        "w": round(x1 - x0, 2),
+        "h": round(y1 - y0, 2),
+        "from_size": [round(pw, 1), round(ph, 1)],
+    }
+
+
+def rect_from_anchor(anchor, page_size, scale=False):
+    """
+    Place an anchored region on a page of any size.
+
+    With scale=True the offsets and the box grow with the sheet, for artwork
+    that really is reproduced proportionally.
+    """
+    if not anchor or not page_size:
+        return None
+    pw, ph = float(page_size[0]), float(page_size[1])
+    dx, dy = float(anchor.get("dx", 0)), float(anchor.get("dy", 0))
+    w, h = float(anchor.get("w", 0)), float(anchor.get("h", 0))
+
+    if scale:
+        src = anchor.get("from_size") or [pw, ph]
+        sx = pw / float(src[0] or pw)
+        sy = ph / float(src[1] or ph)
+        dx, w = dx * sx, w * sx
+        dy, h = dy * sy, h * sy
+
+    if anchor.get("x", ANCHOR_NEAR) == ANCHOR_NEAR:
+        x0 = dx
+    else:
+        x0 = pw - dx - w
+    if anchor.get("y", ANCHOR_NEAR) == ANCHOR_NEAR:
+        y0 = dy
+    else:
+        y0 = ph - dy - h
+
+    # Clamp rather than refuse: a box that will not fit on a much smaller sheet
+    # is still worth showing where it can go, so the user can adjust it.
+    x0 = max(0.0, min(x0, max(0.0, pw - 1)))
+    y0 = max(0.0, min(y0, max(0.0, ph - 1)))
+    return [round(x0, 2), round(y0, 2),
+            round(min(pw, x0 + w), 2), round(min(ph, y0 + h), 2)]
+
+
+def sheet_key(page_size):
+    """A short name for a trim size, used to file per-size geometry."""
+    if not page_size:
+        return ""
+    try:
+        from core.metadata import classify_sheet
+        # classify_sheet returns (name, orientation, exact); a landscape A4 and
+        # a portrait A4 are different placements, so the orientation is part of
+        # the key.
+        name, orientation, _exact = classify_sheet(float(page_size[0]), float(page_size[1]))
+        if name and name != "-":
+            short = str(name).strip().split()[0]
+            return short if orientation == "portrait" else f"{short}-landscape"
+    except Exception:
+        pass
+    return f"{round(float(page_size[0]))}x{round(float(page_size[1]))}"
+
+
+def geometry_for_page(region, page_size):
+    """
+    Where this region goes on a page of this size.
+
+    Order of preference:
+      1. a rectangle the user positioned by hand for this exact sheet size
+      2. the anchor, replaced onto this sheet
+      3. the stored rectangle as-is, which is right when the sizes match and
+         is the only option for a template saved before anchors existed
+    """
+    stored = region.get("roi_rect")
+    if not page_size:
+        return stored
+
+    per_sheet = (region.get("rects_by_sheet") or {}).get(sheet_key(page_size))
+    if per_sheet:
+        return [float(v) for v in per_sheet]
+
+    anchor = region.get("anchor")
+    if anchor:
+        src = anchor.get("from_size")
+        same = (src and abs(float(src[0]) - float(page_size[0])) < 1.0
+                and abs(float(src[1]) - float(page_size[1])) < 1.0)
+        if not same:
+            placed = rect_from_anchor(anchor, page_size, scale=bool(region.get("scale_with_page")))
+            if placed:
+                return placed
+    return stored
 
 
 # ==============================================================================
@@ -297,7 +448,7 @@ def list_templates():
     return sorted(set(names), key=str.lower)
 
 
-def _clean_region(r, seq):
+def _clean_region(r, seq, page_size=None):
     """Keep only persistable fields, and fill in anything missing."""
     out = {k: r.get(k) for k in REGION_FIELDS if k in r}
     out["id"] = r.get("id", seq)
@@ -310,17 +461,40 @@ def _clean_region(r, seq):
     out["is_last_page"] = bool(r.get("is_last_page"))
     out["parent_id"] = r.get("parent_id")
     out["variant_group"] = (r.get("variant_group") or "").strip() or None
+    out["scale_with_page"] = bool(r.get("scale_with_page"))
+    by_sheet = r.get("rects_by_sheet") or {}
+    out["rects_by_sheet"] = {str(k): [round(float(v), 2) for v in rect]
+                             for k, rect in by_sheet.items() if rect}
     # Only carried when it is really an override; an empty override and no
     # override are different things, so this cannot use `or None`.
     if r.get("expected_text") is None:
         out.pop("expected_text", None)
     else:
         out["expected_text"] = str(r["expected_text"])
+
+    # Always recorded, so the file says what this region is about even when the
+    # text is not pinned. Falls back to the override when there is no clip -
+    # a region drawn on one master and saved against another.
+    text = r.get("master_text")
+    if text is None:
+        text = r.get("eng_text")
+    if text is None:
+        text = r.get("expected_text")
+    out["master_text"] = "" if text is None else str(text)
     scope = r.get("page_scope")
     if not isinstance(scope, dict) or scope.get("type") not in SCOPE_TYPES:
         scope = default_scope(r.get("page_num"), bool(r.get("is_last_page")))
     out["page_scope"] = scope
     out["page_num"] = r.get("page_num", scope.get("page", 1))
+
+    # Every saved region gets an anchor, so a template written on one sheet can
+    # be placed on another even if it was never opened at that size. Derived
+    # here rather than only in the editor, so a template saved from a script or
+    # an older build is upgraded the first time it is written.
+    if not out.get("anchor") and page_size and out.get("roi_rect"):
+        anchor = anchor_from_rect(out["roi_rect"], page_size)
+        if anchor:
+            out["anchor"] = anchor
     return out
 
 
@@ -344,7 +518,8 @@ def save_template(name, regions, source_pdf=None, notes="", margins=None, page_s
         "notes": notes or "",
         "margins": page_margins.to_storage(margins),
         "page_size": [round(float(v), 1) for v in page_size] if page_size else None,
-        "regions": [_clean_region(r, i + 1) for i, r in enumerate(regions or [])],
+        "regions": [_clean_region(r, i + 1, page_size)
+                    for i, r in enumerate(regions or [])],
     }
     path = template_path(name)
     try:

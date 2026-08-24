@@ -705,7 +705,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             self.master_lbl.configure(
                 text=f"master: {os.path.basename(pdf)}", text_color=NEUTRAL_DARK_GR)
         else:
-            self.master_lbl.configure(text=err.split("\n")[0], text_color=RADIANT_ORANGE)
+            self.master_lbl.configure(text=err.split("\n")[0], text_color=theme.TEXT_ATTENTION)
 
     def _browse_tr_dir(self):
         d = filedialog.askdirectory(title="Select Translated PDFs Directory")
@@ -720,24 +720,50 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
     # ──────────────────────────────────────────────────────────
     # Log Console
     # ──────────────────────────────────────────────────────────
+    # A run prints thousands of lines. Past this the console is scrollback
+    # nobody reads, and a Tk text widget holding it repaints slowly enough to
+    # be felt everywhere else in the window.
+    MAX_LOG_LINES = 4000
+
     def _append_log(self, text):
-        if HAS_CTK:
-            self.log_textbox.insert("end", text)
+        """Add one chunk. Prefer _append_log_batch while a run is producing."""
+        self._append_log_batch([text])
+
+    def _append_log_batch(self, chunks):
+        """
+        Write many log messages as one edit.
+
+        Inserting and then calling see() once per message was the single most
+        expensive thing on the main thread during a run: two hundred forced
+        scroll-and-redraws every tenth of a second. Everything else the
+        interface wanted to do - switching tabs, repainting a panel - queued up
+        behind it, which is what made the window look broken rather than busy.
+        One insert and one see() per tick costs the same as a single message.
+        """
+        if not chunks:
+            return
+        try:
+            self.log_textbox.insert("end", "".join(chunks))
+            # Trim from the front, so the console stays a fixed cost.
+            lines = int(self.log_textbox.index("end-1c").split(".")[0])
+            if lines > self.MAX_LOG_LINES:
+                self.log_textbox.delete("1.0", f"{lines - self.MAX_LOG_LINES}.0")
             self.log_textbox.see("end")
-        else:
-            self.log_textbox.insert("end", text)
-            self.log_textbox.see("end")
+        except Exception:
+            pass
 
     def _check_queue(self):
         # The log can arrive faster than it can be drawn on a long run. Draining
         # a bounded number of messages per tick keeps the window repainting -
         # an unbounded drain is what made the interface stop responding while
         # a 92-page manual scrolled past.
-        for _ in range(200):
+        chunks = []
+        for _ in range(400):
             try:
-                self._append_log(self.text_queue.get_nowait())
+                chunks.append(self.text_queue.get_nowait())
             except queue.Empty:
                 break
+        self._append_log_batch(chunks)
 
         latest = None
         while True:
@@ -781,7 +807,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             try:
                 text = f"● {message}"
                 if HAS_CTK:
-                    self.status_lbl.configure(text=text, text_color=RADIANT_ORANGE)
+                    self.status_lbl.configure(text=text, text_color=theme.TEXT_ATTENTION)
                 else:
                     self.status_lbl.config(text=text, fg=RADIANT_ORANGE)
             except Exception:
@@ -858,7 +884,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         self._lock_inputs()  # Fix 6
 
         if HAS_CTK:
-            self.status_lbl.configure(text="\u25cf Inspecting PDFs...", text_color=RADIANT_ORANGE)
+            self.status_lbl.configure(text="\u25cf Inspecting PDFs...", text_color=theme.TEXT_ATTENTION)
             self.progress_bar.start()
         else:
             self.status_lbl.config(text="\u25cf Inspecting PDFs...", fg=RADIANT_ORANGE)
@@ -1240,6 +1266,16 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
 
         if self.region_inspector is None:
             return
+
+        # Never re-open a PDF into the inspector while a run is working. The
+        # render happens on the main thread, and doing it while every core is
+        # busy scanning is what makes switching tabs mid-run feel like the
+        # window has broken. The paths cannot change during a run anyway - the
+        # fields are locked - so this only defers a redundant reload.
+        if getattr(self, "is_running", False):
+            self._path_reload_job = self.after(1500, self._sync_region_inspector)
+            return
+
         eng_path = self.eng_pdf_var.get().strip().strip('"').strip("'")
         eng, _err = (spotcheck_engine.resolve_master_pdf(eng_path)
                      if eng_path else (None, None))
