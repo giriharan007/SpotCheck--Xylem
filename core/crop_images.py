@@ -2,11 +2,13 @@ import os
 import re
 import sys
 import argparse
+import cv2
 import numpy as np
 import pymupdf as fitz  # PyMuPDF (aliased as fitz for API compat)
 import pdfplumber
 
 from core import barcode_qr as Barcode_QR_Check
+from core import docscan
 from core import margins as page_margins
 
 # ==============================================================================
@@ -75,20 +77,92 @@ def extract_topics_with_positions(pdf_path):
     return topics
 
 
+# Device names Windows reserves whatever the extension. A topic will almost
+# never be called one, but a folder named CON cannot be created at all.
+_WINDOWS_RESERVED = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
 def topic_slug(topic, max_len=60):
-    """A filesystem-safe folder name for a topic."""
+    """
+    A filesystem-safe folder name for a topic.
+
+    The trailing strip has to happen AFTER truncation, and the truncation marker
+    cannot be "...". That combination produced a folder ending in dots, which is
+    the one thing a Windows directory name must not do, and it failed in a way
+    that took a moment to see: Win32 strips trailing dots from the LAST
+    component of a path but not from intermediate ones. So os.makedirs created
+    "…arrangement with" while the subsequent image save opened
+    "…arrangement with...\\p033_crop_01_image.png", where the dotted name is no
+    longer last and is therefore taken literally. The directory it named did not
+    exist, MuPDF returned errno 2, and a 33-page manual aborted mid-run.
+    """
     if not topic:
-        return "_No topic"
+        # Sorts to the top of the output folder, which is where the cover
+        # belongs, and says what it holds rather than what it lacks.
+        return "_Front matter"
     name = topic.get("title") or "Untitled"
-    name = _TOPIC_SLUG_BAD.sub("_", name).strip().rstrip(". ")
-    name = re.sub(r"\s+", " ", name)
+    name = _TOPIC_SLUG_BAD.sub("_", name)
+    name = re.sub(r"\s+", " ", name).strip()
+
     if len(name) > max_len:
-        name = name[:max_len].rstrip() + "..."
-    return name or "Untitled"
+        name = name[:max_len].rstrip() + "~"     # "~" is legal at the end; "." is not
+
+    # Last, and only now: Windows silently drops trailing dots and spaces from a
+    # directory name, so a name that ends in one never matches the path we then
+    # try to write into.
+    name = name.rstrip(". ")
+
+    if not name:
+        return "Untitled"
+    if name.split(".")[0].upper() in _WINDOWS_RESERVED:
+        name = "_" + name
+    return name
+
+
+# Windows refuses a path over 260 characters unless long paths are enabled, and
+# a deep output folder plus a long PDF name plus a long topic title gets there
+# more easily than it looks.
+MAX_PATH_CHARS = 240
+
+
+def safe_crop_path(directory, filename, page_num):
+    """
+    A path that can actually be written.
+
+    Shortens the topic folder rather than the filename, because the filename
+    carries the page and index that make a crop identifiable, and falls back to
+    a plain page folder when even that is not enough.
+    """
+    full = os.path.join(directory, filename)
+    if len(os.path.abspath(full)) <= MAX_PATH_CHARS:
+        return full
+
+    parent, leaf = os.path.split(directory)
+    room = MAX_PATH_CHARS - len(os.path.abspath(parent)) - len(filename) - 2
+    if room >= 12:
+        trimmed = leaf[:room].rstrip(". ") or f"page_{page_num:03d}"
+        return os.path.join(parent, trimmed, filename)
+    return os.path.join(parent, f"page_{page_num:03d}", filename)
 
 
 def find_topic_for_rect(page_num, rect, topics):
-    """The last topic that begins at or above this rect, in reading order."""
+    """
+    The last topic that begins at or above this rect, in reading order.
+
+    None for anything that comes BEFORE the first topic - the cover, the legal
+    notice, the contents list. That used to be attributed to topic 1, and it was
+    not a harmless mislabel: the topic decides where the comparison looks for
+    the graphic in the translation. The Xylem logo on the cover was filed under
+    "1 Introduction", topic 1 starts on page 6, so the search covered pages 5-7,
+    did not find it, widened across the whole document, and matched the SAME
+    logo on the back cover - reporting the cover graphic as "moved to page 118"
+    at 97%. Front matter is not part of topic 1, and saying so puts the search
+    back on page 1 where the graphic actually is.
+    """
     if not topics:
         return None
     pos = (page_num, rect.y0 + rect.height * 0.3)
@@ -98,7 +172,7 @@ def find_topic_for_rect(page_num, rect, topics):
             best = t
         else:
             break
-    return best or topics[0]
+    return best
 
 
 # A region that renders essentially empty carries nothing to compare, and a
@@ -107,6 +181,23 @@ def find_topic_for_rect(page_num, rect, topics):
 # fall below the threshold. It does catch a graphic that has been painted over,
 # which a purely geometric check would still count as present.
 BLANK_INK_THRESHOLD = 0.002
+
+
+# A rendered crop with less variation than this carries no shape a template
+# match could ever find. Pure white measures 0.0; the faintest real hairline on
+# a white ground measures well above 1.
+MIN_CROP_VARIATION = 1.0
+
+
+def _is_blank_pixmap(pix, min_std=MIN_CROP_VARIATION):
+    """True when a rendered crop holds no ink worth comparing."""
+    try:
+        a = np.frombuffer(pix.samples, dtype=np.uint8)
+        if a.size == 0:
+            return True
+        return float(a.std()) < min_std
+    except Exception:
+        return False        # unreadable: keep it rather than silently drop it
 
 
 def is_blank_region(page, rect, dpi=110, threshold=BLANK_INK_THRESHOLD):
@@ -126,6 +217,11 @@ def is_blank_region(page, rect, dpi=110, threshold=BLANK_INK_THRESHOLD):
 def get_table_bboxes(fitz_page, pdfplumber_page=None):
     """
     Get table bounding boxes using PyMuPDF and pdfplumber.
+
+    Kept for callers that hold their own page objects. The run itself goes
+    through core.docscan, which does the same work once per document and in
+    parallel: on a 92-page manual this function costs about two seconds a page,
+    and it used to be called on every page of every pass.
     """
     table_rects = []
     try:
@@ -209,8 +305,253 @@ def resolve_margins(margins=None, header_margin=None, footer_margin=None, page=N
     return page_margins.normalize(base)
 
 
+# ==============================================================================
+# GROUPING A PAGE'S INK INTO WHOLE FIGURES
+# ==============================================================================
+# What counts as "one graphic" cannot be decided from the drawing operators. An
+# exploded parts diagram is hundreds of separate vector paths with white space
+# between them; a table grid is a few dozen long rules. Merging paths that touch
+# gave the wrong answer in both directions on this manual:
+#
+#   page 17  one exploded pump diagram came out as 19 boxes, several of them
+#            single table cells, plus two empty boxes in the left margin
+#   page 15  five illustrations came out as five WRONG boxes - part 1 was missed
+#            entirely, parts 3 and 4 were each cut in half
+#
+# What a reviewer calls one figure is a connected region of ink once the text is
+# taken away. So that is what is measured: the page is rendered, the text is
+# painted out, the remaining ink is dilated by the gap that should still count
+# as "the same picture", and each connected region becomes one candidate. The
+# leader lines of an exploded diagram then hold it together exactly as they do
+# for the eye, and five illustrations that share nothing stay five.
+#
+# It is also cheaper than walking the drawing list: about 0.05s a page against
+# 0.18s, because one render replaces thousands of rectangle intersections.
+
+# The resolution the ink is measured at. Enough to resolve a hairline; small
+# enough that the morphology is free.
+INK_DPI = 100
+
+# White space narrower than this still reads as one picture. Set from the manual:
+# the widest internal gap in an exploded diagram that a reviewer treats as one
+# figure is around 8pt, and the narrowest gap BETWEEN two illustrations that must
+# stay separate is around 20pt.
+CLUSTER_GAP_PT = 10.0
+
+# Rules at least this long are table or page furniture, not drawing strokes.
+RULE_MIN_LENGTH_PT = 26.0
+
+# An element touching the trim is furniture only if it is also narrow relative
+# to the sheet. A twelfth of A4 is 50pt - comfortably more than the 47pt thumb
+# tab, comfortably less than any figure, which spans most of the text block.
+EDGE_ARTIFACT_MAX_WIDTH = 0.12
+
+# A region is only treated as ruling if this much of its ink is long straight
+# lines. A parts table measures around 0.9; an exploded diagram around 0.2.
+RULE_DOMINANCE = 0.55
+
+# How many rule crossings make a lattice. Four is the smallest real table - one
+# cell has four corners - and it is well above what a drawing produces, where a
+# leader line meeting a centreline gives one or two.
+MIN_GRID_JUNCTIONS = 4
+
+
+def _ink_mask(fitz_page, dpi=INK_DPI):
+    """
+    The page's ink with the text taken out, as a binary image.
+
+    The page object is not touched. Masking by painting white rectangles onto
+    the page would work, but it would also change what every later stage sees;
+    the text is erased from the rendered pixels instead.
+    """
+    pix = fitz_page.get_pixmap(dpi=dpi)
+    a = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    if pix.n == 1:
+        gray = a[:, :, 0].copy()
+    else:
+        gray = cv2.cvtColor(np.ascontiguousarray(a[:, :, :3]), cv2.COLOR_RGB2GRAY)
+
+    scale = dpi / 72.0
+    h, w = gray.shape
+    try:
+        for b in fitz_page.get_text("dict").get("blocks", []):
+            if b.get("type") != 0:
+                continue                      # type 1 is an image block: keep it
+            for line in b.get("lines", []):
+                for span in line.get("spans", []):
+                    x0, y0, x1, y1 = span["bbox"]
+                    # A pixel of bleed each way: glyph outlines round outwards,
+                    # and a surviving stem would tie a caption to the figure.
+                    gray[max(0, int(y0 * scale) - 1):min(h, int(y1 * scale) + 2),
+                         max(0, int(x0 * scale) - 1):min(w, int(x1 * scale) + 2)] = 255
+    except Exception:
+        pass
+
+    return (gray < 245).astype(np.uint8), scale
+
+
+def _grid_regions(mask, min_len_px):
+    """
+    Where the page carries a ruled grid, found from the ink alone.
+
+    A table is the one thing on a technical page that draws long horizontal AND
+    long vertical rules crossing each other repeatedly in a small area. An
+    exploded diagram draws long lines too - leader lines, shaft centrelines -
+    but they do not form a lattice.
+
+    Deriving this from the ink rather than from a table finder is worth a great
+    deal: pdfplumber and PyMuPDF between them cost about two seconds a page on
+    this manual, they disagree, and on page 16 pdfplumber returned a "table"
+    wider than the sheet that swallowed the diagram. This costs about five
+    milliseconds and cannot return a region that has no rules in it.
+
+    Returns a list of (x0, y0, x1, y1) pixel boxes.
+    """
+    horiz = cv2.morphologyEx(mask, cv2.MORPH_OPEN,
+                             cv2.getStructuringElement(cv2.MORPH_RECT, (min_len_px, 1)))
+    vert = cv2.morphologyEx(mask, cv2.MORPH_OPEN,
+                            cv2.getStructuringElement(cv2.MORPH_RECT, (1, min_len_px)))
+    if not horiz.any() or not vert.any():
+        return []
+
+    # Where a long horizontal and a long vertical rule meet. The dilation gives
+    # each rule a little width so that a T-junction counts even when the two
+    # strokes stop a pixel short of touching.
+    reach = np.ones((5, 5), np.uint8)
+    crossings = cv2.bitwise_and(cv2.dilate(horiz, reach), cv2.dilate(vert, reach))
+    if not crossings.any():
+        return []
+
+    # Group by the LATTICE, not by how close the crossings are to each other.
+    # Grouping crossings was the first attempt and it does not work: in a
+    # two-column table the corners sit 200pt apart, so they came out as four
+    # separate clumps of one or two junctions each, none of them recognised as
+    # a table and none of them stripped. The rules of a table, though, all touch
+    # - that is what makes it a table - so one connected run of ruling is one
+    # lattice however wide the cells are.
+    lattice = cv2.dilate(cv2.bitwise_or(horiz, vert), np.ones((3, 3), np.uint8))
+    count, labels, stats, _c = cv2.connectedComponentsWithStats(lattice, 8)
+
+    regions = []
+    for i in range(1, count):
+        x, y, w, h, _area = stats[i]
+        # Distinct crossings inside this run of ruling: two lines meeting in a
+        # drawing give one, a grid gives one per cell corner.
+        junctions = cv2.connectedComponentsWithStats(
+            cv2.bitwise_and(crossings, (labels == i).astype(np.uint8)), 8)[0] - 1
+        if junctions < MIN_GRID_JUNCTIONS:
+            continue
+        # A lattice smaller than a couple of cells each way is a pair of drawing
+        # lines that happen to cross, not a table.
+        if w < min_len_px * 1.5 or h < min_len_px * 1.5:
+            continue
+        regions.append((x, y, x + w, y + h))
+    return regions
+
+
+def _strip_rules(mask, region, min_len_px):
+    """
+    Erase long straight rules inside one region of the mask.
+
+    Used on table interiors only. A table whose cells hold nothing but text is
+    all rules, so this empties it and it produces no candidate - which is right,
+    because a table's row heights change with the length of the translated text,
+    and cropping the grid would report a difference on every correct
+    translation. A table cell that holds a real picture keeps that picture,
+    because a drawing is not made of 26pt straight lines.
+    """
+    x0, y0, x1, y1 = region
+    sub = mask[y0:y1, x0:x1]
+    if sub.size == 0:
+        return
+    horiz = cv2.morphologyEx(sub, cv2.MORPH_OPEN,
+                             cv2.getStructuringElement(cv2.MORPH_RECT, (min_len_px, 1)))
+    vert = cv2.morphologyEx(sub, cv2.MORPH_OPEN,
+                            cv2.getStructuringElement(cv2.MORPH_RECT, (1, min_len_px)))
+    rules = cv2.bitwise_or(horiz, vert)
+
+    # Only strip where the ink really is a grid. A figure misread as a table is
+    # mostly curves and short strokes, and cutting its long lines would break
+    # one drawing into a dozen pieces - which is the failure this whole rewrite
+    # exists to remove, so it must not be reintroduced here by a bad table rect.
+    ink = int(sub.sum())
+    if ink and (int(rules.sum()) / float(ink)) < RULE_DOMINANCE:
+        return
+
+    # Grow the rule by a pixel before removing it, so its anti-aliased edge goes
+    # with it rather than being left behind as a hairline ghost.
+    rules = cv2.dilate(rules, np.ones((3, 3), np.uint8))
+    cleaned = cv2.bitwise_and(sub, cv2.bitwise_not(rules))
+
+    # Where two rules crossed, a few pixels survive both passes. A 2px speck in
+    # a cell corner is enough to become a candidate and then a meaningless crop,
+    # so an opening clears it. A picture inside a cell is many pixels thick and
+    # comes through untouched.
+    mask[y0:y1, x0:x1] = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN,
+                                          np.ones((3, 3), np.uint8))
+
+
+def ink_clusters(fitz_page, table_rects=None, gap_pt=CLUSTER_GAP_PT, dpi=INK_DPI,
+                 return_grids=False):
+    """
+    The page's graphics as whole figures: one rect per connected region of ink.
+
+    `table_rects` is an optional hint from a table finder; the ruled regions are
+    found in the ink either way. With return_grids the ruled regions come back
+    too, as PDF-point rects, which is what tells the caller whether a crop came
+    out of a table.
+    """
+    mask, scale = _ink_mask(fitz_page, dpi=dpi)
+    rule_px = max(3, int(round(RULE_MIN_LENGTH_PT * scale)))
+
+    # Ruled regions are found in the ink and stripped, so a text table does not
+    # cluster into a graphic. `table_rects` is an optional extra hint from a
+    # table finder; nothing depends on one being supplied.
+    regions = list(_grid_regions(mask, rule_px))
+    for t in (table_rects or []):
+        r = fitz.Rect(t) & fitz_page.rect
+        if r.is_empty:
+            continue
+        regions.append((max(0, int(r.x0 * scale) - 2), max(0, int(r.y0 * scale) - 2),
+                        min(mask.shape[1], int(r.x1 * scale) + 2),
+                        min(mask.shape[0], int(r.y1 * scale) + 2)))
+
+    for region in regions:
+        _strip_rules(mask, region, rule_px)
+
+    k = max(3, int(round(gap_pt * scale)) | 1)          # odd, so it is centred
+    grown = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    count, _labels, stats, _cent = cv2.connectedComponentsWithStats(grown, 8)
+
+    pad = (k - 1) / 2.0                                  # undo the dilation
+    out = []
+    for i in range(1, count):
+        x, y, w, h, _area = stats[i]
+        out.append(fitz.Rect((x + pad) / scale, (y + pad) / scale,
+                             (x + w - pad) / scale, (y + h - pad) / scale))
+
+    # Two regions can be separate ink and still sit one inside the other - an
+    # inset detail drawn in the white space of a larger diagram, for instance.
+    # Cropping both means comparing the same picture twice and reporting it
+    # twice, so the enclosed one goes.
+    out.sort(key=lambda r: -(r.width * r.height))
+    kept = []
+    for r in out:
+        area = max(1e-6, r.width * r.height)
+        if any(((r & big).get_area() / area) > 0.85 for big in kept):
+            continue
+        kept.append(r)
+
+    if return_grids:
+        return kept, [fitz.Rect(x0 / scale, y0 / scale, x1 / scale, y1 / scale)
+                      for x0, y0, x1, y1 in regions]
+    return kept
+
+
 def get_all_image_candidates(fitz_page, header_margin=None, footer_margin=None,
-                             margins=None, include_ignored=False):
+                             margins=None, include_ignored=False,
+                             table_rects=None, use_ink_clustering=True,
+                             return_grids=False):
     """
     Bounding boxes of all raster images, logos, and vector icons/diagrams/figures.
 
@@ -244,15 +585,40 @@ def get_all_image_candidates(fitz_page, header_margin=None, footer_margin=None,
     def dropped_by(r):
         return page_margins.which_margin((r.x0, r.y0, r.x1, r.y1), pw, ph, m)
 
-    # Kept separate from the margin test: this is the narrow-artifact heuristic
-    # that removes language thumb tabs and edge crop marks, and it is not the
-    # same rule as "sits inside the side margin". Both run.
-    def is_edge_artifact(r, reach=36):
-        return ((r.x0 < reach and r.width < 40)
-                or (r.x1 > pw - reach and r.width < 40))
+    # Kept separate from the margin test: this is the edge-furniture heuristic
+    # that removes language thumb tabs and crop marks, and it is not the same
+    # rule as "sits inside the side margin". Both run.
+    #
+    # The test is anchorage to the trim, not a fixed width. A thumb tab bleeds
+    # to the paper edge; the body text block on these manuals is inset 35-40pt
+    # and nothing inside it comes near. The old test also required the element
+    # to be under 40pt wide, which the Xylem tab is not - it measures about 47 -
+    # so the tab survived, and then survived the side margin too, and got
+    # cropped and compared on every page of every language.
+    def is_edge_artifact(r):
+        if r.width > pw * EDGE_ARTIFACT_MAX_WIDTH:
+            return False
+        return (r.x0 <= page_margins.EDGE_TOUCH
+                or r.x1 >= pw - page_margins.EDGE_TOUCH)
+
+    ignored = []               # (rect, reason) - only collected when asked for
+
+    if use_ink_clustering:
+        try:
+            merged_rects, grids = ink_clusters(fitz_page, table_rects=table_rects,
+                                               return_grids=True)
+            result = _judge_candidates(merged_rects, pw, ph, dropped_by,
+                                       is_edge_artifact, ignored, include_ignored)
+            if return_grids:
+                return result, grids
+            return result
+        except Exception as e:
+            # Rendering can fail on a damaged page. The path below is the older
+            # one: worse groupings, but it needs nothing but the drawing list.
+            print(f"  [candidates] ink clustering failed on page "
+                  f"{fitz_page.number + 1} ({e}); using the vector path")
 
     raw_elements = []          # everything drawn, before clustering
-    ignored = []               # (rect, reason) - only collected when asked for
 
     # 1. Raster images & logos
     try:
@@ -290,11 +656,28 @@ def get_all_image_candidates(fitz_page, header_margin=None, footer_margin=None,
         pass
 
     if not raw_elements:
-        return [] if not include_ignored else [(r, s) for r, s in ignored]
+        empty = [] if not include_ignored else [(r, s) for r, s in ignored]
+        return (empty, []) if return_grids else empty
 
     # Tight clustering to assemble vector paths into individual icons without merging separate graphics
     merged_rects = merge_rects_tight(raw_elements, gap=2)
+    result = _judge_candidates(merged_rects, pw, ph, dropped_by, is_edge_artifact,
+                               ignored, include_ignored)
+    return (result, []) if return_grids else result
 
+
+def _judge_candidates(merged_rects, pw, ph, dropped_by, is_edge_artifact,
+                      ignored, include_ignored):
+    """
+    Decide which finished clusters survive: too small, in a margin, an edge
+    artifact, or a graphic.
+
+    Shared by both clustering paths, because the question asked of a cluster is
+    the same however the cluster was assembled - and it is asked of the FINISHED
+    cluster, never of its fragments. Judging fragments is what let the masthead
+    through on the cover: only the pieces wholly inside the header band were
+    dropped, and what was left merged into a graphic that had never been asked.
+    """
     # Filter out tiny standalone noise artifacts (smaller than 12x12 and area < 140 pt^2)
     final_candidates = []
     for r in merged_rects:
@@ -374,7 +757,7 @@ def detect_barcodes_and_qr_codes(page, dpi=150):
     return Barcode_QR_Check.detect_barcodes_and_qr_codes(page, dpi=dpi)
 
 def crop_pdf_elements(pdf_path, output_dir, dpi=DPI, header_margin=None, footer_margin=None,
-                      mask_text_in_crops=MASK_TEXT_IN_CROPS, margins=None):
+                      mask_text_in_crops=MASK_TEXT_IN_CROPS, margins=None, progress=None):
     """
     Extract and crop pure inside images from PDF pages.
 
@@ -408,10 +791,19 @@ def crop_pdf_elements(pdf_path, output_dir, dpi=DPI, header_margin=None, footer_
     print(f"  Grouping: {'topic-wise (' + str(len(topics)) + ' TOC entries)' if by_topic else 'page-wise (no TOC in this document)'}")
     manifest = []
 
-    try:
-        plumb_doc = pdfplumber.open(pdf_path)
-    except Exception:
-        plumb_doc = None
+    # Tables and codes come from the shared document scan: computed once for
+    # this file, page-parallel, and reused by the count and barcode stages
+    # instead of each of them paying for the same page again.
+    # Codes come from the shared document scan. Tables do not: the ruled regions
+    # are found in each page's own ink as the graphics are grouped, which is
+    # both free and more reliable than a table finder on a page full of
+    # engineering drawings.
+    scan = docscan.scan(pdf_path)
+    plumb_doc = None
+    if scan is not None:
+        if progress:
+            progress(0, len(doc), "scanning pages")
+        scan._ensure_codes(dpi=dpi, progress=progress)
 
     total_crops = 0
 
@@ -420,22 +812,25 @@ def crop_pdf_elements(pdf_path, output_dir, dpi=DPI, header_margin=None, footer_
             page = doc[page_idx]
             page_rect = page.rect
             page_num = page_idx + 1
+            if progress:
+                progress(page_num, len(doc), "cropping")
 
             page_out_dir = os.path.join(output_dir, pdf_name, f"page_{page_num:03d}")  # page-wise fallback
 
-            # Get table bounding boxes
-            plumb_page = plumb_doc.pages[page_idx] if plumb_doc and page_idx < len(plumb_doc.pages) else None
-            table_rects = get_table_bboxes(page, plumb_page)
-
-            # Detect Barcodes and QR Codes on current page to exclude them from cropping
-            detected_codes = detect_barcodes_and_qr_codes(page, dpi=dpi)
-            code_rects = [c["rect"] for c in detected_codes]
+            if scan is not None:
+                code_rects = scan.code_rects(page_num, dpi=dpi)
+            else:
+                code_rects = [c["rect"] for c in detect_barcodes_and_qr_codes(page, dpi=dpi)]
 
             # Margins can be switched off on named pages (a cover that is
             # deliberately all furniture, say), so they are resolved per page.
             page_margins_here = page_margins.margins_for_page(
                 active_margins, page_num, len(doc))
-            image_rects = get_all_image_candidates(page, margins=page_margins_here)
+            # The ruled regions come back with the candidates: a text table
+            # leaves nothing behind once its grid is stripped, and a picture in
+            # a cell survives and is labelled as one.
+            image_rects, table_rects = get_all_image_candidates(
+                page, margins=page_margins_here, return_grids=True)
 
             crops_on_page = []
             for img_rect in image_rects:
@@ -485,6 +880,22 @@ def crop_pdf_elements(pdf_path, output_dir, dpi=DPI, header_margin=None, footer_
                         r_clamped = fitz.Rect(x0, y0, x1, y1)
                         crop_pix = page.get_pixmap(dpi=dpi, clip=r_clamped)
 
+                        # A region can pass the blank test and still come out
+                        # empty, because that test looks at the page BEFORE the
+                        # text is masked. A rect holding nothing but a caption
+                        # is white by the time it is rendered.
+                        #
+                        # An all-white crop cannot be compared: normalised
+                        # correlation against a constant template returns
+                        # essentially a random number, which is how a blank
+                        # 51x35 patch from page 16 came back as a 29% "match"
+                        # on page 59 of a translation. Dropping it here is both
+                        # cheaper and more honest than scoring it later.
+                        if _is_blank_pixmap(crop_pix):
+                            print(f"  Page {page_num:3d}: Skipped empty crop "
+                                  f"(nothing left after text masking) at {rect}")
+                            continue
+
                         # The index stays per-page in both layouts, so the same
                         # graphic keeps the same name with or without a TOC.
                         if by_topic:
@@ -497,9 +908,27 @@ def crop_pdf_elements(pdf_path, output_dir, dpi=DPI, header_margin=None, footer_
                             crop_filename = f"crop_{crop_idx:02d}_{label}.png"
                             topic_title = ""
 
-                        os.makedirs(out_dir_for_crop, exist_ok=True)
-                        crop_path = os.path.join(out_dir_for_crop, crop_filename)
-                        crop_pix.save(crop_path)
+                        crop_path = safe_crop_path(out_dir_for_crop, crop_filename,
+                                                   page_num)
+                        try:
+                            os.makedirs(os.path.dirname(crop_path), exist_ok=True)
+                            crop_pix.save(crop_path)
+                        except Exception as e:
+                            # One awkward topic title must not end a 33-page run.
+                            # Fall back to the page folder, which is built from
+                            # numbers and cannot be malformed, and say so.
+                            fallback_dir = os.path.join(output_dir, pdf_name,
+                                                        f"page_{page_num:03d}")
+                            print(f"  Page {page_num:3d}: could not write into "
+                                  f"{os.path.dirname(crop_path)!r} ({e}); "
+                                  f"filing under page_{page_num:03d} instead")
+                            try:
+                                os.makedirs(fallback_dir, exist_ok=True)
+                                crop_path = os.path.join(fallback_dir, crop_filename)
+                                crop_pix.save(crop_path)
+                            except Exception as e2:
+                                print(f"  Page {page_num:3d}: SKIPPED {crop_filename} - {e2}")
+                                continue
                         manifest.append({
                             "page": page_num, "index": crop_idx, "label": label,
                             "topic": topic_title, "path": crop_path,

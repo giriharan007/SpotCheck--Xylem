@@ -140,6 +140,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
 
         self.text_queue = queue.Queue()
         self.done_queue = queue.Queue()
+        self.progress_queue = queue.Queue()
         self.is_running = False
         self.output_excel_path = None
         self.output_dir_path = None
@@ -728,12 +729,24 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             self.log_textbox.see("end")
 
     def _check_queue(self):
-        while not self.text_queue.empty():
+        # The log can arrive faster than it can be drawn on a long run. Draining
+        # a bounded number of messages per tick keeps the window repainting -
+        # an unbounded drain is what made the interface stop responding while
+        # a 92-page manual scrolled past.
+        for _ in range(200):
             try:
-                msg = self.text_queue.get_nowait()
-                self._append_log(msg)
+                self._append_log(self.text_queue.get_nowait())
             except queue.Empty:
                 break
+
+        latest = None
+        while True:
+            try:
+                latest = self.progress_queue.get_nowait()
+            except queue.Empty:
+                break
+        if latest is not None:
+            self._show_progress(*latest)
 
         # Completion is delivered the same way the log is, on the main thread.
         # The worker used to call self.after() directly, which registers a
@@ -746,6 +759,33 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             except queue.Empty:
                 break
         self.after(100, self._check_queue)
+
+    def _show_progress(self, fraction, message):
+        """
+        Draw real progress, on the main thread.
+
+        A run over a dozen 92-page manuals takes minutes. An indeterminate bar
+        sliding back and forth for that long is indistinguishable from a hung
+        program, which is exactly how it was being read. A fraction and the name
+        of the stage answer the only question the user has: is it still working.
+        """
+        try:
+            if fraction is None:
+                self.progress_bar.start()
+            else:
+                self.progress_bar.stop()
+                self.progress_bar.set(max(0.0, min(1.0, float(fraction))))
+        except Exception:
+            pass
+        if message:
+            try:
+                text = f"● {message}"
+                if HAS_CTK:
+                    self.status_lbl.configure(text=text, text_color=RADIANT_ORANGE)
+                else:
+                    self.status_lbl.config(text=text, fg=RADIANT_ORANGE)
+            except Exception:
+                pass
 
     # ──────────────────────────────────────────────────────────
     # Fix 6: Lock / Unlock all input controls during inspection
@@ -859,10 +899,15 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         sys.stdout = redirector
         sys.stderr = redirector
 
+        def report(fraction, message):
+            # Straight onto a queue: touching a widget from here raises
+            # "main thread is not in main loop". The pump draws it.
+            self.progress_queue.put((fraction, message))
+
         try:
             self.last_run_results = spotcheck_engine.run_quality_inspection(
                 eng_pdf, tr_target, out_dir, margins=run_margins,
-                regions=run_regions or None)
+                regions=run_regions or None, progress=report)
             success = True
         except Exception as e:
             # Fix 5: Full traceback in error console for production debugging
@@ -1207,6 +1252,14 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
            os.path.abspath(tr or "") == getattr(self, "_loaded_target", "") and \
            os.path.abspath(out or "") == getattr(self, "_loaded_out", ""):
             return
+        # A new master means the inspector clears and re-applies the selected
+        # stylesheet. Forget which template is "already loaded" so that path is
+        # not short-circuited: the guard exists to stop redundant reloads of the
+        # same template on the same document, not to skip the one reload that
+        # matters when the document changes underneath it.
+        if os.path.abspath(eng) != getattr(self, "_loaded_master", None):
+            self._loaded_template = None
+
         try:
             self.region_inspector.load(eng_pdf_path=eng, tr_target_path=tr,
                                        output_dir=out or None)

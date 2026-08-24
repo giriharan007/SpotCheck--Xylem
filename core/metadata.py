@@ -309,20 +309,73 @@ def _dominant(values):
 
 
 def _mixed_label(values, dominant, unanimous, fmt=str):
+    """
+    One verdict, plus how solid it is.
+
+    A reviewer asking "is this a one-column manual" wants an answer, not a
+    tally. When every measured page agrees, the answer stands alone. When a few
+    disagree - a landscape parts diagram, a two-column spec page - the verdict
+    still leads, and the count says how many pages to go and look at.
+    """
     if unanimous or dominant is None:
         return fmt(dominant)
     others = len([v for v in values if v != dominant])
-    return f"{fmt(dominant)}  (+{others} other)"
+    return f"{fmt(dominant)}  ({others} of {len(values)} pages differ)"
+
+
+DEFAULT_SAMPLE_PERCENT = 50
+
+
+def sample_pages(total, percent=DEFAULT_SAMPLE_PERCENT):
+    """
+    Which pages to measure, spread evenly through the document.
+
+    Column layout is a property of the stylesheet, not of any one page, so
+    measuring every page of a 92-page manual buys accuracy nobody needs at a
+    cost everybody feels. Half the pages, evenly spaced, give the same verdict.
+
+    Evenly spaced rather than "the first N": the front of a manual is a cover,
+    a legal notice and a contents list, none of which run the body layout. A
+    sample taken from the front would describe the furniture and miss the book.
+
+    Page 1 is always included - it is the one page a reviewer checks by eye -
+    and so is the last, which is where back-matter tables tend to live.
+    """
+    total = max(0, int(total))
+    if total == 0:
+        return []
+    pct = max(1, min(100, int(percent or DEFAULT_SAMPLE_PERCENT)))
+    if pct >= 100:
+        return list(range(1, total + 1))
+
+    want = max(1, round(total * pct / 100.0))
+    if want >= total:
+        return list(range(1, total + 1))
+
+    step = total / float(want)
+    picked = sorted({min(total, max(1, int(round(i * step)) + 1)) for i in range(want)})
+    picked = sorted(set(picked) | {1, total})
+    return picked
 
 
 def pdf_metadata(path, margins=None, exclude_tables=True, max_pages=None,
-                 progress=None):
+                 progress=None, sample_percent=DEFAULT_SAMPLE_PERCENT,
+                 page_wise=False):
     """
     Collect the metadata for one PDF.
 
-    `max_pages` samples the first N pages instead of reading all of them, which
-    matters only for very long documents; the page count and file size are always
-    exact. `progress(done, total)` is called as pages are analysed.
+    Page count, file size, sheet size and the PDF's own properties are always
+    exact. Column detection is the expensive part, so it runs on a sample:
+
+        sample_percent   how much of the document to measure (default 50%),
+                         spread evenly rather than taken from the front
+        page_wise        keep and report the per-page findings. Off, the
+                         document gets one verdict ("1 column") and the page
+                         table stays empty, which is what a reviewer checking
+                         a stylesheet actually wants to see.
+
+    `max_pages` still caps the first N pages, for older callers.
+    `progress(done, total)` is called as pages are analysed.
     """
     row = {
         "path": path,
@@ -362,17 +415,28 @@ def pdf_metadata(path, margins=None, exclude_tables=True, max_pages=None,
             row["title"] = (info.get("title") or "-").strip() or "-"
             row["pdf_version"] = (info.get("format") or "-").strip() or "-"
 
-            last = len(doc) if not max_pages else min(len(doc), max_pages)
-            for i in range(last):
-                row["page_rows"].append(
-                    page_metadata(doc[i], i + 1, margins, exclude_tables))
+            if max_pages:
+                wanted = list(range(1, min(len(doc), max_pages) + 1))
+            else:
+                wanted = sample_pages(len(doc), sample_percent)
+            row["sampled_pages"] = len(wanted)
+            row["sample_percent"] = (100 if max_pages
+                                     else max(1, min(100, int(sample_percent or 100))))
+
+            measured = []
+            for done, page_no in enumerate(wanted, start=1):
+                measured.append(page_metadata(doc[page_no - 1], page_no,
+                                              margins, exclude_tables))
                 if progress:
-                    progress(i + 1, last)
+                    progress(done, len(wanted))
+            # The verdict is drawn from every measured page either way; only
+            # whether the detail is kept depends on page_wise.
+            row["page_rows"] = measured if page_wise else []
     except Exception as e:
         row["error"] = (row["error"] + "; " if row["error"] else "") + str(e)
         return row
 
-    pages = row["page_rows"]
+    pages = measured
     if pages:
         sheets = [p["sheet"] for p in pages]
         dom_sheet, uni_sheet = _dominant(sheets)
@@ -390,11 +454,17 @@ def pdf_metadata(path, margins=None, exclude_tables=True, max_pages=None,
         row["columns_label"] = _mixed_label(cols, dom_c, uni_c, columns_label)
         row["column_tally"] = {c: cols.count(c) for c in sorted(set(cols))}
 
+        # Say what the verdict rests on. A reviewer who sees "1 column" is
+        # entitled to know whether that came from 92 pages or from 46 of them.
+        n, total_pages = len(pages), row["pages"]
+        row["sample_note"] = ("every page" if n >= total_pages
+                              else f"{n} of {total_pages} pages ({row.get('sample_percent', 0)}%)")
+
     return row
 
 
 def collect(paths, margins=None, exclude_tables=True, max_pages=None,
-            progress=None):
+            progress=None, sample_percent=DEFAULT_SAMPLE_PERCENT, page_wise=False):
     """
     Metadata for a list of PDFs, in the order given.
 
@@ -405,7 +475,8 @@ def collect(paths, margins=None, exclude_tables=True, max_pages=None,
     total = len(paths)
     for i, p in enumerate(paths, start=1):
         rows.append(pdf_metadata(p, margins=margins, exclude_tables=exclude_tables,
-                                 max_pages=max_pages))
+                                 max_pages=max_pages, sample_percent=sample_percent,
+                                 page_wise=page_wise))
         if progress:
             progress(i, total, os.path.basename(p))
     return rows

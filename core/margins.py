@@ -84,6 +84,8 @@ SIDE_LABELS = {
     "right": "Right side",
 }
 
+SHORT_LABELS = {"header": "top", "footer": "bottom", "left": "left", "right": "right"}
+
 # A band wider than this fraction of the page is almost certainly a mistake -
 # usually a value typed in millimetres into a field that wants points - and
 # would quietly delete most of the document from the extraction.
@@ -95,6 +97,16 @@ MAX_FRACTION = 0.45
 # so anything from about 0.2 to 0.6 gives the same answer. Raise it towards 1.0
 # to go back to requiring an element to be wholly inside the band.
 MARGIN_COVERAGE = 0.5
+
+# How close to the trim an element has to come before it counts as anchored to
+# the paper edge. Xylem's thumb tabs stop about 5pt short; the body text block
+# on these manuals starts 35-40pt in, and no figure inside it comes near this.
+EDGE_TOUCH = 10.0
+
+# ...and how far such an element may run past the inner edge of the side band
+# and still be furniture. A tab overhangs its band by a few points; a figure
+# that merely grazes the band extends far further into the page than this.
+EDGE_REACH_BEYOND = 24.0
 
 
 def mm(points):
@@ -123,8 +135,8 @@ def normalize(margins=None, page_width=None, page_height=None):
     """
     out = dict(DEFAULT_MARGINS)
     skip = (margins or {}).get(SKIP_KEY) if isinstance(margins, dict) else None
-    if isinstance(skip, str) and skip.strip():
-        out[SKIP_KEY] = skip.strip()
+    if skip:
+        out[SKIP_KEY] = skip
     for side in SIDES:
         raw = (margins or {}).get(side)
         if raw is None:
@@ -145,32 +157,67 @@ def normalize(margins=None, page_width=None, page_height=None):
     return out
 
 
-def parse_skip_pages(text, total_pages=None):
+# Which page, and which of its bands. The value stored under SKIP_KEY is
+#
+#     {"first": ["header", "footer"], "last": ["header"]}
+#
+# rather than a list of pages, because "skip the margins on the cover" and
+# "skip only the header on the back page" are different instructions and the
+# stylesheets need both. Keys are "first", "last", or a 1-based page number as
+# a string; values are any subset of SIDES.
+SKIP_FIRST = "first"
+SKIP_LAST = "last"
+
+
+def normalize_skip(skip, total_pages=None):
     """
-    Pages the margin rules should NOT be applied to.
+    A clean {where: set(sides)} map from whatever was stored.
 
-    Accepts the words `first` and `last` alongside numbers and ranges, because
-    the pages worth exempting are usually the cover and the back page and those
-    are not at a fixed number in a translation:
-
-        "first, last"      "1, 2, last"      "first, 3-5"
-
-    Returns a set of 1-based page numbers. `first` and `last` only resolve when
-    total_pages is known; without it they are dropped rather than guessed.
+    A plain string is accepted and means "all four bands on those pages" - that
+    is what the earlier `first, last, 3-5` expression meant, so templates saved
+    with it keep working and simply gain the finer control when re-saved.
     """
-    if not text:
-        return set()
+    out = {}
+    if not skip:
+        return out
+
+    if isinstance(skip, str):
+        for page in _parse_page_expression(skip, total_pages):
+            out[page] = set(SIDES)
+        return out
+
+    if isinstance(skip, dict):
+        for where, sides in skip.items():
+            key = str(where).strip().lower()
+            if key in (SKIP_FIRST, SKIP_LAST):
+                pass
+            elif key.isdigit():
+                key = int(key)
+            else:
+                continue
+            if sides is True:
+                chosen = set(SIDES)
+            elif isinstance(sides, str):
+                chosen = {sides} & set(SIDES)
+            else:
+                chosen = {str(x).lower() for x in (sides or [])} & set(SIDES)
+            if chosen:
+                out[key] = chosen
+    return out
+
+
+def _parse_page_expression(text, total_pages=None):
+    """Legacy `first, last, 3-5` expression to a set of page numbers."""
     out = set()
-    for chunk in re.split(r"[,;]+", str(text)):
+    for chunk in re.split(r"[,;]+", str(text or "")):
         chunk = chunk.strip().lower()
         if not chunk:
             continue
         if chunk in ("first", "1st", "cover"):
-            out.add(1)
+            out.add(SKIP_FIRST)
             continue
         if chunk in ("last", "back"):
-            if total_pages:
-                out.add(int(total_pages))
+            out.add(SKIP_LAST)
             continue
         m = re.match(r"^(\d+)\s*[-–]\s*(\d+)$", chunk)
         if m:
@@ -180,32 +227,59 @@ def parse_skip_pages(text, total_pages=None):
             out.update(range(a, b + 1))
         elif chunk.isdigit():
             out.add(int(chunk))
-    if total_pages:
-        out = {p for p in out if 1 <= p <= int(total_pages)}
     return out
 
 
-def describe_skip(text):
-    """Short form for the editor's readout."""
-    t = (text or "").strip()
-    return f"margins off on: {t}" if t else "margins apply to every page"
+def sides_skipped_on(margins, page_no, total_pages=None):
+    """Which bands are switched off on this particular page."""
+    skip = normalize_skip((margins or {}).get(SKIP_KEY) if isinstance(margins, dict) else None,
+                          total_pages)
+    if not skip or page_no is None:
+        return set()
+
+    off = set()
+    page_no = int(page_no)
+    if page_no == 1:
+        off |= skip.get(SKIP_FIRST, set())
+    if total_pages and page_no == int(total_pages):
+        off |= skip.get(SKIP_LAST, set())
+    off |= skip.get(page_no, set())
+    return off
+
+
+def describe_skip(skip, total_pages=None):
+    """'first page: top, bottom off' - the editor's one-line readout."""
+    m = normalize_skip(skip, total_pages)
+    if not m:
+        return "margins apply to every page"
+    order = [SKIP_FIRST, SKIP_LAST] + sorted(k for k in m if isinstance(k, int))
+    parts = []
+    for where in order:
+        if where not in m:
+            continue
+        sides = m[where]
+        label = {SKIP_FIRST: "first page", SKIP_LAST: "last page"}.get(where, f"page {where}")
+        if sides == set(SIDES):
+            parts.append(f"{label}: all margins off")
+        else:
+            names = ", ".join(SHORT_LABELS[s] for s in SIDES if s in sides)
+            parts.append(f"{label}: {names} off")
+    return "  ·  ".join(parts)
 
 
 def margins_for_page(margins, page_no=None, total_pages=None):
     """
-    The margins in force on one page - all zero where the user exempted it.
+    The margins in force on one page, with the exempted bands zeroed.
 
-    Resolving it this way rather than threading a page number through every
-    geometry function keeps the exemption in one place: a page that is exempt
-    simply has no bands, so every downstream check behaves as it did before
-    margins existed.
+    Only the chosen bands are switched off, not all of them: a cover whose
+    header is deliberately artwork still wants its footer band honoured.
+    Resolving it here rather than threading a page number through every geometry
+    function keeps the exemption in one place.
     """
     m = normalize(margins)
-    skip = (margins or {}).get(SKIP_KEY) if isinstance(margins, dict) else None
-    if not skip or page_no is None:
-        return m
-    if int(page_no) in parse_skip_pages(skip, total_pages):
-        return dict(NO_MARGINS)
+    off = sides_skipped_on(margins, page_no, total_pages)
+    for side in off:
+        m[side] = 0.0
     return m
 
 
@@ -221,7 +295,7 @@ def describe(margins):
     txt = (f"header {m['header']:.0f} / footer {m['footer']:.0f} / "
            f"left {m['left']:.0f} / right {m['right']:.0f} pt")
     if m.get(SKIP_KEY):
-        txt += f"  (not applied on: {m[SKIP_KEY]})"
+        txt += f"  ({describe_skip(m[SKIP_KEY])})"
     return txt
 
 
@@ -287,10 +361,29 @@ def which_margin(rect, page_width, page_height, margins=None,
         return "header"
     if m["footer"] > 0 and max(0.0, y1 - (ph - m["footer"])) / h >= coverage:
         return "footer"
-    if m["left"] > 0 and max(0.0, min(x1, m["left"]) - x0) / w >= coverage:
-        return "left"
-    if m["right"] > 0 and max(0.0, x1 - (pw - m["right"])) / w >= coverage:
-        return "right"
+    # The side bands ask a second question as well. A language thumb tab is
+    # wider than the band it lives in - 47pt of tab against a 35pt margin - so
+    # the coverage test alone keeps it, which is not what someone who has just
+    # set a side margin expects to happen. What makes it furniture is that it
+    # is anchored to the paper edge: a real figure sits inside the text block
+    # and never comes within a few points of the trim. So an element that
+    # reaches the edge AND pokes into the band is furniture whatever its width,
+    # as long as it does not also run deep into the content area.
+    left_in = max(0.0, min(x1, m["left"]) - x0)
+    if m["left"] > 0:
+        if left_in / w >= coverage:
+            return "left"
+        if (x0 <= EDGE_TOUCH and left_in > 0
+                and x1 <= m["left"] + EDGE_REACH_BEYOND):
+            return "left"
+
+    right_in = max(0.0, x1 - (pw - m["right"]))
+    if m["right"] > 0:
+        if right_in / w >= coverage:
+            return "right"
+        if (x1 >= pw - EDGE_TOUCH and right_in > 0
+                and x0 >= pw - m["right"] - EDGE_REACH_BEYOND):
+            return "right"
     return None
 
 
@@ -309,6 +402,8 @@ def to_storage(margins):
     """Rounded, JSON-friendly form for the template file."""
     m = normalize(margins)
     out = {s: round(m[s], 1) for s in SIDES}
-    if m.get(SKIP_KEY):
-        out[SKIP_KEY] = m[SKIP_KEY]
+    skip = normalize_skip(m.get(SKIP_KEY))
+    if skip:
+        out[SKIP_KEY] = {str(k): [x for x in SIDES if x in v]
+                         for k, v in sorted(skip.items(), key=lambda kv: str(kv[0]))}
     return out

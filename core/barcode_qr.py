@@ -18,6 +18,8 @@ import numpy as np
 import cv2
 import pymupdf  # PyMuPDF
 
+from core import docscan
+
 try:
     from pyzbar.pyzbar import decode as pyzbar_decode
     HAS_PYZBAR = True
@@ -163,7 +165,15 @@ def detect_code_like_regions(page, dpi=STRUCTURAL_DPI):
 # Page-level Barcode & QR Code Detector
 # -----------------------------------------------------------
 
-def detect_barcodes_and_qr_codes(page, dpi=200):
+# One resolution for every code sweep in the run. The detectors were called at
+# 200 dpi from the document-level extractor and 150 from the crop stage, which
+# meant two sweeps of the same page could not share a result. Measured on the
+# 92-page A4 manual, 72, 100 and 150 dpi all locate exactly the same codes, so
+# the shared value is the cheaper one and nothing is lost.
+SCAN_DPI = 150
+
+
+def detect_barcodes_and_qr_codes(page, dpi=SCAN_DPI):
     """
     Detect all Barcodes and QR Codes on a PyMuPDF page using pyzbar with OpenCV fallbacks.
 
@@ -298,13 +308,17 @@ def detect_barcodes_and_qr_codes(page, dpi=200):
 # Document-level Barcode & QR Code Count Extractor
 # -----------------------------------------------------------
 
-def extract_barcode_qr_model(pdf_path, dpi=200):
+def extract_barcode_qr_model(pdf_path, dpi=SCAN_DPI, progress=None):
     """
     Extract multi-page Barcode and QR Code model from a PDF file.
 
     Returns dict containing counts, breakdown, and presence indicators.
+
+    The page sweep goes through core.docscan, so a document scanned here is not
+    scanned again by the crop or count stage - and the master, which used to be
+    re-swept once per translation, is swept once per run. Detection itself is
+    unchanged; only who pays for it is.
     """
-    doc = pymupdf.open(pdf_path)
     all_codes = []
     barcode_count = 0
     qr_count = 0
@@ -312,22 +326,25 @@ def extract_barcode_qr_model(pdf_path, dpi=200):
     pages_with_barcode = set()
     pages_with_qr = set()
 
-    try:
-        for page_idx in range(len(doc)):
-            page = doc[page_idx]
-            codes = detect_barcodes_and_qr_codes(page, dpi=dpi)
-            for c in codes:
-                all_codes.append(c)
-                if c.get("decoded"):
-                    decoded_count += 1
-                if c["type"] == "BARCODE":
-                    barcode_count += 1
-                    pages_with_barcode.add(c["page_num"])
-                elif c["type"] == "QRCODE":
-                    qr_count += 1
-                    pages_with_qr.add(c["page_num"])
-    finally:
-        doc.close()
+    scan = docscan.scan(pdf_path)
+    if scan is not None:
+        codes_iter = scan.all_codes(dpi=dpi, progress=progress)
+    else:
+        codes_iter = []
+        with pymupdf.open(pdf_path) as doc:
+            for page_idx in range(len(doc)):
+                codes_iter.extend(detect_barcodes_and_qr_codes(doc[page_idx], dpi=dpi))
+
+    for c in codes_iter:
+        all_codes.append(c)
+        if c.get("decoded"):
+            decoded_count += 1
+        if c["type"] == "BARCODE":
+            barcode_count += 1
+            pages_with_barcode.add(c["page_num"])
+        elif c["type"] == "QRCODE":
+            qr_count += 1
+            pages_with_qr.add(c["page_num"])
 
     return {
         "filename": os.path.basename(pdf_path),
@@ -412,7 +429,7 @@ def compare_barcode_qr_models(source_model, target_model):
     }
 
 
-def compare_barcode_qr(source_pdf_path, target_pdf_path, dpi=200):
+def compare_barcode_qr(source_pdf_path, target_pdf_path, dpi=SCAN_DPI):
     """
     Convenience wrapper to extract models and compare Barcode & QR Code counts between two PDFs.
     """

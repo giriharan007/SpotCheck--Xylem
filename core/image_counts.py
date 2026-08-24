@@ -38,11 +38,18 @@ from core.crop_images import (
     is_blank_region,
 )
 from core import barcode_qr as Barcode_QR_Check
+from core import docscan
 from core import margins as PageMargins
 
 TOPIC_CODE = re.compile(r"^\s*(\d+(?:\.\d+)*)")
 
 UNNUMBERED_PREFIX = "#"
+
+# Graphics that sit before the first topic - the cover, the legal notice, the
+# contents list - belong to no section. They get their own bucket so they are
+# still counted and still compared like for like, rather than being charged to
+# topic 1, which is somewhere else entirely in the document.
+FRONT_MATTER_KEY = "front"
 
 
 def _topic_keys(topics):
@@ -85,15 +92,26 @@ def count_images_by_topic(pdf_path, dpi=150, margins=None):
     index_of = {id(t): i for i, t in enumerate(topics)}
     total = 0
 
+    # The code sweep is the expensive part of this pass, and the crop stage and
+    # the barcode check need exactly the same answer. It is taken from the
+    # shared document scan so the three of them pay for it once between them.
+    scan = docscan.scan(pdf_path)
+
     with fitz.open(pdf_path) as doc:
         for pno in range(len(doc)):
             page = doc[pno]
-            try:
-                codes = Barcode_QR_Check.detect_barcodes_and_qr_codes(page, dpi=dpi)
-            except Exception:
-                codes = []
-            code_rects = [c["rect"] for c in codes]
+            if scan is not None:
+                code_rects = scan.code_rects(pno + 1, dpi=dpi)
+            else:
+                try:
+                    codes = Barcode_QR_Check.detect_barcodes_and_qr_codes(page, dpi=dpi)
+                except Exception:
+                    codes = []
+                code_rects = [c["rect"] for c in codes]
 
+            # Exactly the same view of the page as the cropper: this check
+            # exists to agree with the crop count, and it cannot do that if one
+            # of them treats a ruled table as a graphic and the other does not.
             for r in get_all_image_candidates(
                     page, margins=PageMargins.margins_for_page(margins, pno + 1, len(doc))):
                 if any(fitz.Rect(cr.x0 - 5, cr.y0 - 5, cr.x1 + 5, cr.y1 + 5).intersects(r)
@@ -104,7 +122,11 @@ def count_images_by_topic(pdf_path, dpi=150, margins=None):
                 total += 1
                 if topics:
                     t = find_topic_for_rect(pno + 1, r, topics)
-                    k = keys.get(index_of.get(id(t), -1), "?")
+                    if t is None:
+                        k = FRONT_MATTER_KEY
+                        titles.setdefault(k, "(front matter, before topic 1)")
+                    else:
+                        k = keys.get(index_of.get(id(t), -1), "?")
                     by_topic[k] = by_topic.get(k, 0) + 1
 
     return {
@@ -182,6 +204,8 @@ def compare_image_counts(source_model, target_model):
 
 def _sort_key(key):
     """Order topic codes numerically (1.2 before 1.10), unnumbered ones first."""
+    if key == FRONT_MATTER_KEY:
+        return (-1, [0])              # before everything: it is the cover
     if key.startswith(UNNUMBERED_PREFIX):
         try:
             return (0, [int(key[1:])])

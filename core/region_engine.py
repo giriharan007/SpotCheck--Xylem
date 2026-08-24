@@ -27,6 +27,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw
 
+from core import toc as TOC
 from core.templates import collapse_variant_results, expand_regions_for_document
 
 # Default output location, used only when the caller does not supply one.
@@ -433,7 +434,8 @@ def search_and_verify_region_in_target(
     output_crops_dir: str = None,
     region_label: str = "Region",
     scope_rect: tuple = None,
-    needle: str = None
+    needle: str = None,
+    page_map=None
 ) -> dict:
     """
     Locate corresponding region in target translated PDF with flexible y-offset tolerance,
@@ -465,7 +467,21 @@ def search_and_verify_region_in_target(
                     "comparison_img_path": "",
                 }
 
-            p_idx = (total_tr - 1) if (is_last_page or eng_page == -1) else max(0, min(total_tr - 1, eng_page - 1))
+            # Which page of the translation this region lives on.
+            #
+            # Not "the same page number": a translation runs longer than its
+            # master, so by the middle of the book page N is no longer page N.
+            # A stylesheet check on English page 12 was being run against page
+            # 12 of the Danish, which after reflow is a different section
+            # entirely - the check then failed on every document for a reason
+            # that had nothing to do with the stylesheet. `page_map` carries the
+            # topic-aligned drift; without one this falls back to the old
+            # same-number behaviour, which is right for documents with no TOC.
+            if is_last_page or eng_page == -1:
+                p_idx = total_tr - 1
+            else:
+                want = page_map(eng_page) if callable(page_map) else eng_page
+                p_idx = max(0, min(total_tr - 1, int(want) - 1))
             tr_page_num = p_idx + 1
             tr_page = doc_tr[p_idx]
             pw, ph = tr_page.rect.width, tr_page.rect.height
@@ -641,7 +657,15 @@ def run_batch_multiple_regions_check(
 
     with fitz.open(eng_pdf_path) as doc_eng:
         for r in regions:
-            r["eng_text"] = extract_roi_text(doc_eng, r["page_num"], r["roi_rect"])
+            clipped = extract_roi_text(doc_eng, r["page_num"], r["roi_rect"])
+            r["clipped_text"] = clipped
+            # A hand-corrected expected text wins over what the clip returns.
+            # The extraction is a good first guess and a poor final answer: it
+            # picks up a line break in the middle of a phone number, or loses a
+            # trailing comma, and every translation is then checked against
+            # something the master does not really say.
+            override = r.get("expected_text")
+            r["eng_text"] = override if override is not None else clipped
 
     # A sub-region marked "Exact Match" is checked against its parent's scope:
     # its own box only defines the needle. Resolve that pairing up front.
@@ -671,6 +695,15 @@ def run_batch_multiple_regions_check(
     total_steps = len(checkable) * len(tr_files)
     step = 0
 
+    # One mapper per translation, built once rather than per region.
+    page_maps = {}
+    for tr_path in tr_files:
+        try:
+            page_maps[tr_path] = TOC.page_mapper(eng_pdf_path, tr_path)
+        except Exception as e:
+            print(f"  [Regions] No page mapping for {os.path.basename(tr_path)}: {e}")
+            page_maps[tr_path] = None
+
     for r in checkable:
         for tr_path in tr_files:
             step += 1
@@ -692,7 +725,8 @@ def run_batch_multiple_regions_check(
                 output_crops_dir=output_crops_dir,
                 region_label=r["label"],
                 scope_rect=r.get("_scope_rect"),
-                needle=r.get("_needle")
+                needle=r.get("_needle"),
+                page_map=page_maps.get(tr_path)
             )
             res["region_label"] = r["label"]
             res["eng_page"] = r["page_num"]

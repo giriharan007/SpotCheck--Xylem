@@ -153,6 +153,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
         self.check_results = []
         self.preview_tk_img = None
         self._updating_selection = False
+        self._text_box_readonly = True
 
         # Ignored page margins. Part of the stylesheet, edited on the canvas,
         # saved into the template - see core/margins.py for what they mean.
@@ -210,6 +211,17 @@ class RegionInspectorFrame(ctk.CTkFrame):
                     self.results_tree.delete(row)
             except Exception:
                 pass
+
+            # ...and then put the chosen stylesheet back.
+            #
+            # Clearing on a document change is right for regions someone drew by
+            # hand: those coordinates belong to the document they were drawn on.
+            # A stylesheet is the opposite claim - that these coordinates hold
+            # for every manual in this style - which is the whole reason for
+            # saving one. Leaving the name in the dropdown while silently
+            # emptying the table meant opening a second product manual looked
+            # configured and checked nothing.
+            self._reapply_selected_template()
 
         self.current_page = max(1, min(self.current_page, max(1, self.total_pages)))
 
@@ -511,11 +523,38 @@ class RegionInspectorFrame(ctk.CTkFrame):
 
         content_hdr = ctk.CTkFrame(editor_card, fg_color="transparent")
         content_hdr.pack(fill="x", padx=8, pady=(2, 1))
-        ctk.CTkLabel(content_hdr, text="Extracted English Master Content:", font=_font(size=10, weight="bold"), text_color=DEPENDABLE_BLUE).pack(side="left")
+        ctk.CTkLabel(content_hdr, text="Text to match:", font=_font(size=10, weight="bold"),
+                     text_color=DEPENDABLE_BLUE).pack(side="left")
         self.coords_lbl = ctk.CTkLabel(content_hdr, text="No region selected", font=_font(family="Consolas", size=9), text_color=theme.TEXT_ON_LIGHT)
         self.coords_lbl.pack(side="right")
-        self.eng_text_box = ctk.CTkTextbox(editor_card, height=40, font=_font(size=10), fg_color=UI_CARD_BG, text_color=DEPENDABLE_BLUE)
-        self.eng_text_box.pack(fill="x", padx=8, pady=(0, 6))
+
+        # Editable, and what is in here is what gets checked.
+        #
+        # The box used to be a read-only display of whatever was clipped out of
+        # the master. That is the right starting point but the wrong final
+        # answer: a phone number picks up a stray line break, an address clips
+        # a trailing comma, and the checker then hunts every translation for
+        # text the master does not really say. Typing the wanted text in here
+        # overrides the extraction, is saved into the stylesheet, and is what
+        # every translation is matched against.
+        self.eng_text_box = ctk.CTkTextbox(editor_card, height=48, font=_font(size=10),
+                                           fg_color=UI_CARD_BG, text_color=DEPENDABLE_BLUE,
+                                           wrap="word")
+        self.eng_text_box.pack(fill="x", padx=8, pady=(0, 2))
+        self.eng_text_box.bind("<KeyRelease>", self._on_expected_text_edit)
+        self.eng_text_box.bind("<FocusOut>", self._on_expected_text_edit)
+
+        text_bar = ctk.CTkFrame(editor_card, fg_color="transparent")
+        text_bar.pack(fill="x", padx=8, pady=(0, 6))
+        self.text_state_lbl = ctk.CTkLabel(
+            text_bar, text="", font=_font(size=9), text_color=NEUTRAL_DARK_GR, anchor="w")
+        self.text_state_lbl.pack(side="left")
+        self.revert_text_btn = ctk.CTkButton(
+            text_bar, text="Use the text from the page", width=170, height=22,
+            fg_color=UI_CARD_BG, text_color=DEPENDABLE_BLUE, border_width=1,
+            border_color=UI_BORDER, font=_font(size=9),
+            command=self._revert_expected_text)
+        self.revert_text_btn.pack(side="right")
 
         # Plenty of regions contain no text at all - a divider rule, the Xylem
         # logo, a hazard icon. The text box shows nothing useful for those, so
@@ -793,16 +832,6 @@ class RegionInspectorFrame(ctk.CTkFrame):
         ctk.CTkLabel(row, text="pt", font=_font(size=10),
                      text_color=NEUTRAL_DARK_GR).pack(side="left", padx=(3, 0))
 
-        ctk.CTkLabel(row, text="  skip pages:", font=_font(size=10, weight="bold"),
-                     text_color=DEPENDABLE_BLUE).pack(side="left", padx=(10, 2))
-        self.margin_skip_var = tk.StringVar()
-        self.margin_skip_entry = ctk.CTkEntry(
-            row, textvariable=self.margin_skip_var, width=170, height=24,
-            font=_font(size=10), placeholder_text="e.g. first, last, 3-5, 9")
-        self.margin_skip_entry.pack(side="left")
-        self.margin_skip_entry.bind("<KeyRelease>", lambda _e: self._on_skip_change())
-        self.margin_skip_entry.bind("<FocusOut>", lambda _e: self._on_skip_change())
-
         ctk.CTkButton(row, text="Reset", width=52, height=24, fg_color=UI_CARD_BG,
                       text_color=DEPENDABLE_BLUE, border_width=1, border_color=UI_BORDER,
                       font=_font(size=10), command=self._reset_margins).pack(side="right", padx=2)
@@ -814,6 +843,29 @@ class RegionInspectorFrame(ctk.CTkFrame):
                         fg_color=XYLEM_BLUE, hover_color=UI_HOVER_BLUE,
                         command=self._on_show_margins_toggle).pack(side="right", padx=6)
 
+        # Which bands to switch off, and on which page. Two independent rows
+        # rather than one page picker: "skip everything on the cover" and "skip
+        # only the header on the back page" are different instructions, and a
+        # stylesheet often wants one without the other.
+        self.skip_vars = {}
+        for where, caption in ((page_margins.SKIP_FIRST, "First page"),
+                               (page_margins.SKIP_LAST, "Last page")):
+            srow = ctk.CTkFrame(bar, fg_color="transparent")
+            srow.pack(fill="x", padx=10, pady=(2, 0))
+            ctk.CTkLabel(srow, text=f"Skip margins on {caption.lower()}:",
+                         font=_font(size=10, weight="bold"),
+                         text_color=DEPENDABLE_BLUE, width=168,
+                         anchor="w").pack(side="left")
+            for side in MARGIN_SIDE_ORDER:
+                var = ctk.BooleanVar(value=False)
+                self.skip_vars[(where, side)] = var
+                ctk.CTkCheckBox(
+                    srow, text=MARGIN_FIELD_LABELS[side], variable=var,
+                    font=_font(size=10), text_color=DEPENDABLE_BLUE,
+                    checkbox_width=15, checkbox_height=15, width=72,
+                    fg_color=XYLEM_BLUE, hover_color=UI_HOVER_BLUE,
+                    command=self._on_skip_change).pack(side="left", padx=(0, 10))
+
         self.margin_hint_lbl = ctk.CTkLabel(
             bar, text="", font=_font(size=9), text_color=NEUTRAL_DARK_GR,
             anchor="w", justify="left")
@@ -823,9 +875,13 @@ class RegionInspectorFrame(ctk.CTkFrame):
         """The margins currently set, for the run and for saving."""
         m = page_margins.normalize(self.margins,
                                    self.page_width_pt, self.page_height_pt)
-        skip = (self.margin_skip_var.get() or "").strip()
+        skip = {}
+        for (where, side), var in self.skip_vars.items():
+            if var.get():
+                skip.setdefault(where, []).append(side)
         if skip:
-            m[page_margins.SKIP_KEY] = skip
+            m[page_margins.SKIP_KEY] = {w: [s for s in page_margins.SIDES if s in v]
+                                        for w, v in skip.items()}
         else:
             m.pop(page_margins.SKIP_KEY, None)
         return m
@@ -833,8 +889,13 @@ class RegionInspectorFrame(ctk.CTkFrame):
     def set_margins(self, margins, redraw=True):
         """Adopt a margins dict (from a template, or remembered settings)."""
         self.margins = page_margins.normalize(margins)
+        # A template saved with the older "first, last" text expression comes
+        # back through normalize_skip as every band on those pages, so the boxes
+        # tick themselves and the setting survives the change of shape.
+        chosen = page_margins.normalize_skip(self.margins.get(page_margins.SKIP_KEY))
         try:
-            self.margin_skip_var.set(self.margins.get(page_margins.SKIP_KEY, "") or "")
+            for (where, side), var in self.skip_vars.items():
+                var.set(side in chosen.get(where, set()))
         except Exception:
             pass
         self._sync_margin_spins()
@@ -975,11 +1036,16 @@ class RegionInspectorFrame(ctk.CTkFrame):
             return
 
         m = self._effective_margins()
-        if all(m.get(s, 0) <= 0 for s in page_margins.SIDES):
+        off = page_margins.sides_skipped_on(self.get_margins(), self.current_page,
+                                            self.total_pages)
+        if off:
+            names = ", ".join(page_margins.SHORT_LABELS[s]
+                              for s in page_margins.SIDES if s in off)
             self.canvas.create_text(
                 14, 14, anchor="nw", tags="margin",
-                text=f"margins switched off on page {self.current_page}",
+                text=f"page {self.current_page}: {names} margin(s) switched off",
                 font=theme.get_font(9, "bold"), fill=MARGIN_BAND_COLOR)
+        if all(m.get(s, 0) <= 0 for s in page_margins.SIDES):
             return
         pw, ph = self.page_width_pt, self.page_height_pt
 
@@ -1088,8 +1154,11 @@ class RegionInspectorFrame(ctk.CTkFrame):
             f"{MARGIN_FIELD_LABELS[s]} {page_margins.describe_value(m[s])}"
             for s in MARGIN_SIDE_ORDER)
 
+        skipped = page_margins.describe_skip(m.get(page_margins.SKIP_KEY))
+        skip_txt = f" · {skipped}" if skipped else ""
+
         if not self.eng_pdf_path or self.total_pages == 0:
-            self.margin_hint_lbl.configure(text=sizes)
+            self.margin_hint_lbl.configure(text=f"{sizes}{skip_txt}")
             return
 
         # The sizes above are what is configured; the count below is what those
@@ -1112,9 +1181,6 @@ class RegionInspectorFrame(ctk.CTkFrame):
         else:
             effect = f"page {self.current_page}: {kept} graphic(s) kept, none ignored"
 
-        skip = (self.margin_skip_var.get() or "").strip()
-        skip_txt = (f" · not applied on: {skip}" if skip
-                    else " · applied to every page")
         self.margin_hint_lbl.configure(
             text=f"{sizes}{skip_txt}\nDrag the orange guides on the page to set these · {effect}")
 
@@ -1310,6 +1376,68 @@ class RegionInspectorFrame(ctk.CTkFrame):
         except Exception as e:
             self._set_region_preview_image(None, f"[preview failed: {e}]")
 
+    # ── the text a region is checked against ──────────────────
+
+    def _on_expected_text_edit(self, _event=None):
+        """
+        Adopt what the user typed as this region's expected text.
+
+        Stored under `expected_text` rather than over `eng_text`, so the text
+        actually clipped from the page is still there to revert to and to show
+        as the difference. An edit that merely reproduces the extracted text is
+        recorded as no override at all, which keeps a stylesheet clean when
+        someone clicks into the box and out again.
+        """
+        if self._updating_selection:
+            return
+        r = self._get_active_region()
+        if r is None or self._text_box_readonly:
+            return
+        typed = self.eng_text_box.get("1.0", "end").rstrip("\n")
+        if typed.strip() == (r.get("eng_text", "") or "").strip():
+            r.pop("expected_text", None)
+        else:
+            r["expected_text"] = typed
+        self._update_text_state(r)
+        self._refresh_region_row(r)
+
+    def _revert_expected_text(self):
+        """Drop the override and go back to what is on the page."""
+        r = self._get_active_region()
+        if r is None:
+            return
+        r.pop("expected_text", None)
+        self._updating_selection = True
+        try:
+            self.eng_text_box.delete("1.0", "end")
+            self.eng_text_box.insert("1.0", self._describe_master_content(r))
+        finally:
+            self._updating_selection = False
+        self._update_text_state(r)
+        self._refresh_region_row(r)
+
+    def _update_text_state(self, r):
+        """The line under the box: where the text being matched comes from."""
+        if r is None:
+            self.text_state_lbl.configure(text="")
+            self.revert_text_btn.configure(state="disabled")
+            return
+        if self._text_box_readonly:
+            self.text_state_lbl.configure(
+                text="This sub-region is matched by its needle inside the parent, "
+                     "so its text cannot be edited here.")
+            self.revert_text_btn.configure(state="disabled")
+            return
+        if r.get("expected_text") is not None:
+            self.text_state_lbl.configure(
+                text="Edited — this text is what every translation is checked "
+                     "against, and it is saved with the stylesheet.")
+            self.revert_text_btn.configure(state="normal")
+        else:
+            self.text_state_lbl.configure(
+                text="Taken from the page. Type here to override it.")
+            self.revert_text_btn.configure(state="disabled")
+
     def _describe_master_content(self, r: dict) -> str:
         """
         What the master region contributes to the check.
@@ -1318,6 +1446,12 @@ class RegionInspectorFrame(ctk.CTkFrame):
         text but the token-snapped needle that will be searched for inside the
         parent region.
         """
+        # An override wins: it IS the master content as far as the check is
+        # concerned, and showing the clipped text instead would be showing
+        # something that is no longer used.
+        if r.get("expected_text") is not None and not (r.get("exact_match") and r.get("parent_id")):
+            return r["expected_text"]
+
         raw = r.get("eng_text", "") or ""
         if not (r.get("exact_match") and r.get("parent_id")):
             return raw
@@ -1379,8 +1513,13 @@ class RegionInspectorFrame(ctk.CTkFrame):
                 self._sync_scope_controls(active_r)
                 x0, y0, x1, y1 = active_r["roi_rect"]
                 self.coords_lbl.configure(text=f"x: {x0:.1f} \u2192 {x1:.1f}, y: {y0:.1f} \u2192 {y1:.1f}")
+                # A scoped sub-region shows a description of the needle search,
+                # not text, so it must not be editable.
+                self._text_box_readonly = bool(active_r.get("exact_match")
+                                               and active_r.get("parent_id"))
                 self.eng_text_box.delete("1.0", "end")
                 self.eng_text_box.insert("1.0", self._describe_master_content(active_r))
+                self._update_text_state(active_r)
                 self._update_region_preview(active_r)
             else:
                 self.label_var.set("")
@@ -1389,8 +1528,10 @@ class RegionInspectorFrame(ctk.CTkFrame):
                 self.scope_only_var.set(False)
                 self._sync_scope_controls(None)
                 self.coords_lbl.configure(text="No region selected")
+                self._text_box_readonly = True
                 self.eng_text_box.delete("1.0", "end")
                 self.eng_text_box.insert("1.0", "[Drag on the page to select an area]")
+                self._update_text_state(None)
                 self._update_region_preview(None)
         finally:
             self._updating_selection = False
@@ -1442,8 +1583,11 @@ class RegionInspectorFrame(ctk.CTkFrame):
                 self._sync_scope_controls(active_r)
                 x0, y0, x1, y1 = active_r["roi_rect"]
                 self.coords_lbl.configure(text=f"x: {x0:.1f} \u2192 {x1:.1f}, y: {y0:.1f} \u2192 {y1:.1f}")
+                self._text_box_readonly = bool(active_r.get("exact_match")
+                                               and active_r.get("parent_id"))
                 self.eng_text_box.delete("1.0", "end")
                 self.eng_text_box.insert("1.0", self._describe_master_content(active_r))
+                self._update_text_state(active_r)
                 self._update_region_preview(active_r)
                 self._draw_all_rois_on_canvas()
 
@@ -1586,6 +1730,27 @@ class RegionInspectorFrame(ctk.CTkFrame):
               f"margins {page_margins.describe(self.margins)}")
         return True
 
+    def _reapply_selected_template(self):
+        """
+        Re-load whichever stylesheet the dropdown names, silently.
+
+        Called after switching to a different master. Silent because the user
+        did not ask for it - they opened another manual, and the stylesheet
+        they had selected should simply still be in force. A missing or
+        unreadable template is left alone rather than raising a dialog: the
+        regions table is then empty, which is the honest picture, and the run
+        reports that no stylesheet was applied.
+        """
+        try:
+            name = (self.template_var.get() or "").strip()
+        except Exception:
+            return False
+        if not name or name == "(none)":
+            return False
+        if name not in templates_store.list_templates():
+            return False
+        return self.apply_template(name, announce=False)
+
     def _on_load_template(self):
         name = self.template_var.get().strip()
         if not name or name == "(none)":
@@ -1605,6 +1770,20 @@ class RegionInspectorFrame(ctk.CTkFrame):
                 "Nothing to Save",
                 "Mark at least one region, or set the page margins for this "
                 "stylesheet, before saving a template.")
+            return
+
+        # Saying so out loud. A stylesheet with margins but no regions is a
+        # legitimate thing to save, but it is almost never what someone means
+        # when they have been marking regions - and the file it writes says
+        # "regions": [], which then checks nothing on every manual it is
+        # applied to, silently. Better to be asked once than to find out from
+        # a report that passed everything.
+        if not self.regions and not messagebox.askyesno(
+                "No Regions Marked",
+                "This stylesheet has no regions, so it will set the ignored "
+                "margins and check no text.\n\n"
+                "If you meant to mark regions, cancel and draw them on the "
+                "page first.\n\nSave the margins only?"):
             return
         suggested = self.template_var.get() if self.template_var.get() != "(none)" else ""
         name = simpledialog.askstring(

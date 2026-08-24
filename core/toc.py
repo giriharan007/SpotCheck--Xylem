@@ -94,6 +94,61 @@ def topic_page_spans(pdf_path):
     return spans
 
 
+def page_mapper(master_pdf_path, target_pdf_path):
+    """
+    A function from a master page number to the page it became in a translation.
+
+    Page numbers do not survive translation. A Danish rendering of an English
+    manual runs longer, so English page 12 is Danish page 13 or 14, and by the
+    back of the book the drift is several pages. Anything that pairs page N with
+    page N is therefore comparing two unrelated pages once reflow has set in -
+    which is what a region check was doing, and why a stylesheet check on page
+    12 was shown against a page holding a completely different table.
+
+    Topic numbers DO survive: 3.2 is 3.2 in every language. So the drift is
+    measured at each topic boundary and applied to the pages inside it. Where a
+    topic exists in both documents the mapping is exact at its first page and
+    correct to within the reflow inside that topic - a page or so, which the
+    caller's own search window absorbs.
+
+    Falls back to the identity mapping (page N -> page N, clamped) when either
+    document has no usable outline, which is the same behaviour as before and
+    the best available guess.
+    """
+    src = topic_page_spans(master_pdf_path)
+    dst = topic_page_spans(target_pdf_path)
+
+    try:
+        with pymupdf.open(target_pdf_path) as doc:
+            target_total = len(doc)
+    except Exception:
+        target_total = 0
+
+    # (master start page, delta) for every topic both documents have, in order.
+    shifts = sorted((src[code][0], dst[code][0] - src[code][0])
+                    for code in src.keys() & dst.keys())
+
+    def mapped(page_no):
+        try:
+            page_no = int(page_no)
+        except (TypeError, ValueError):
+            return page_no
+        delta = 0
+        for start, d in shifts:
+            if start <= page_no:
+                delta = d
+            else:
+                break
+        out = page_no + delta
+        if target_total:
+            out = max(1, min(target_total, out))
+        return max(1, out)
+
+    mapped.shifts = shifts
+    mapped.usable = bool(shifts)
+    return mapped
+
+
 def topic_code_of(title):
     """The numeric code at the front of a topic title, or None."""
     m = TOPIC_CODE.match(title or "")

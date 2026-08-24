@@ -20,6 +20,16 @@ all_hiddenimports = [
     'pyzbar.locations',
     'openpyxl',
     'customtkinter',
+    # The page scan runs across worker processes. A worker re-launches this
+    # executable and imports the worker function's module by name, and the
+    # barcode import inside it is deferred, so both are named here rather than
+    # left to static analysis.
+    'multiprocessing',
+    'multiprocessing.spawn',
+    'concurrent.futures',
+    'concurrent.futures.process',
+    'core.docscan',
+    'core.barcode_qr',
     'PIL',
     'PIL.Image',
     'PIL.ImageTk',

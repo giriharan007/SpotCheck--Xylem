@@ -77,6 +77,17 @@ without TOC  <pdf>/page_007/crop_01_image.png
 filename prefix in the topic layout and from the folder name otherwise. The topic
 is carried into the Excel **Images** tab as its own column.
 
+**Topic folder names are Windows-safe.** A long TOC title used to be truncated and given
+a `...` suffix, producing a directory ending in dots — the one thing a Windows directory
+name must not do. It failed in a way worth recording: Win32 strips trailing dots from the
+**last** component of a path but not from intermediate ones, so `os.makedirs` created
+`…arrangement with` while the image save then opened
+`…arrangement with...\p033_crop_01_image.png`, where the dotted name is no longer last and
+is taken literally. MuPDF returned errno 2 and a 33-page manual aborted mid-run. The strip
+now happens *after* truncation, the marker is `~`, reserved device names are prefixed, and
+the whole path is kept under 240 characters. A crop that still cannot be written falls back
+to a plain `page_NNN` folder with a warning rather than ending the run.
+
 **Ignored margins come from the stylesheet** (`core/margins.py`). Extraction skips
 anything **most of which** lies inside a margin band, measured inwards from each page
 edge in points — `header`, `footer`, and now `left` and `right` as well. These were two
@@ -376,6 +387,7 @@ SpotCheck/
 │   ├── pipeline.py                # Unified orchestration & Excel report generator
 │   ├── toc.py                     # TOC bookmark & topic numerics validator
 │   ├── barcode_qr.py              # Barcode & QR code count & presence verification
+│   ├── docscan.py                 # One page scan per document, cached & page-parallel
 │   ├── crop_images.py             # Vector & raster clustering, pure graphic crops
 │   ├── compare_crops.py           # Cross-page pure graphic template comparison
 │   ├── image_counts.py            # Symmetric image-count check (topic or total)
@@ -415,6 +427,180 @@ SpotCheck/
 | Brand palette & fonts | `gui/theme.py` | Single source of truth, imported by both windows |
 
 ---
+
+## What Counts as One Graphic
+
+A crop is only useful if it is the same picture in both documents, so the
+grouping has to match what a reviewer would circle with a pen. Deciding that
+from the PDF's drawing operators does not work: an exploded parts diagram is
+hundreds of separate vector paths with white space between them, and a table
+grid is a few dozen long rules. Merging paths that touch got it wrong in both
+directions on the 92-page parts manual:
+
+- page 17 — one exploded pump diagram came out as **19 boxes**, several of them
+  single table cells, plus two empty boxes in the left margin
+- page 15 — five illustrations came out as five *wrong* boxes: part 1 missed
+  entirely, parts 3 and 4 each cut in half
+- page 45 — sixteen loose parts on the page, **four** of them found
+
+What a reviewer calls one figure is a connected region of ink once the text is
+taken away, so that is what `core/crop_images.py` measures. The page is
+rendered, the text is erased from the pixels (the page object is never
+modified), the remaining ink is dilated by the gap that still reads as "the same
+picture", and each connected region becomes one candidate. The leader lines of
+an exploded diagram then hold it together exactly as they do for the eye, and
+five illustrations that share no ink stay five.
+
+Ruled regions are found in the same pass — a table is the one thing on a
+technical page that draws long horizontal *and* long vertical rules crossing
+repeatedly — and their ruling is stripped before grouping. A text table
+therefore produces nothing, which is what you want: row heights change with the
+length of the translated text, so cropping a grid would report a difference on
+every correct translation. A picture inside a table cell survives, because a
+drawing is not made of 26pt straight lines; 54 such pictures are kept across
+this manual.
+
+The grouping of the ruling matters as much as finding it. Grouping the
+*crossings* by proximity was the first attempt and it fails on wide tables: in
+the two-column table on page 15 the corners sit 200pt apart, so they came out as
+four separate clumps of one or two junctions each, none recognised as a table
+and none stripped — which is exactly the symptom of a table still being cropped
+as a picture. The rules of a table all touch each other, though, so one
+connected run of ruling is one lattice however wide the cells are. That is what
+is grouped, and it finds every table in the manual.
+
+**Page furniture is recognised by where it sits, not how wide it is.** The
+language thumb tab bleeds to the trim, alternating edges on recto and verso.
+The old rule required an edge element to be under 40pt wide; the Xylem tab is
+47, so it survived — and then survived the side margin too, because it is wider
+than the 35pt band and the coverage test needs half the element inside. It was
+being cropped and compared on 84 of the 92 pages. An element that reaches within
+10pt of the trim and is narrower than a twelfth of the sheet is now furniture
+whatever the margins say, and a side band additionally catches anything anchored
+to the edge that pokes into it. Nothing else in the manual matches either test:
+the 84 elements dropped are all 46–47 × 15pt, one per page, alternating edges.
+
+Two guards earn their place:
+
+- A table rect is only ever a **hint**. Table finders return nonsense on figure
+  pages — page 16 came back with a "table" wider than the sheet that covered the
+  diagram — so implausible rects are dropped, and a region is only stripped when
+  most of its ink really is long straight lines.
+- A cluster wholly inside another is dropped, so an inset detail drawn in the
+  white space of a larger diagram is not compared twice.
+
+Because the ruled regions come from the ink, no table finder runs in the crop
+path at all — the label `table_image` comes from the same pass. That removed the
+last per-document table scan.
+
+Measured over the whole manual: 517 fragments → **446 whole figures**. The crop
+count and the symmetric image count now agree exactly, which they did not
+before. On the planted test — three pages deleted from a copy of the master —
+the report shows exactly three findings, one per deleted page, and nothing else
+across the remaining 89.
+
+## What a Region Is Checked Against
+
+The text a region must match starts as whatever is clipped out of the master at
+that rectangle, and that is a good first guess and a poor final answer. A phone
+number picks up a line break in the middle; an address loses a trailing comma;
+a two-line block comes back joined. Every translation is then hunted for text
+the master does not really say.
+
+The box in the Region Inspector is therefore editable, and what is in it is what
+gets checked. An edit is stored as `expected_text` alongside the clipped text
+rather than over it, so:
+
+- the clip is still there to revert to, via **Use the text from the page**
+- an edit that merely reproduces the clip records no override at all, which
+  keeps a stylesheet from filling up with redundant text
+- `expected_text` is saved into the template JSON and reloaded with it, and only
+  appears on regions that actually carry an override
+
+Verified end to end: with no override a region scores PASS at 100.0%; with the
+same region overridden to text no manual contains, the same run returns CHECK at
+16.1%. The override is what the checker uses, not a display.
+
+A scoped sub-region is the exception — it is matched by a needle searched for
+inside its parent, so its box shows that search and stays read-only.
+
+Saving a stylesheet with no regions now asks first. It is a legitimate thing to
+do — a stylesheet can be nothing but ignored margins — but a file containing
+`"regions": []` checks no text on every manual it is applied to, and silently.
+
+## Where a Graphic Is Looked For
+
+A page number does not survive translation, but a topic number does — 3.2 is 3.2
+in every language — so each crop is hunted for in whichever pages that topic
+occupies in the translation. Two things have to be right for that to work.
+
+**Front matter belongs to no topic.** The cover, the legal notice and the
+contents list come before topic 1, and attributing them to topic 1 is not a
+harmless mislabel: the topic decides where the search looks. The Xylem logo on
+the cover was filed under "1 Introduction", topic 1 starts on page 6, the search
+covered pages 5–7, found nothing, widened across the whole document, and matched
+the *same logo on the back cover* — reporting a page 1 graphic as "moved to page
+118" at 97%. Those crops now go to a `_Front matter` folder, carry no topic code,
+and are searched for around their own page, where they match at 100%.
+
+**Reflow moves pages, so the pairing has to move with it.** A translation runs
+longer than its master, so English page 12 is Danish page 13 or 14, and by the
+back of the book the drift is several pages. Anything that pairs page N with
+page N is comparing two unrelated pages once reflow has set in. `toc.page_mapper`
+measures the drift at every topic boundary that both documents share and applies
+it to the pages inside — English 40 → Swedish 37 on the test copy — and the
+region check, the Review side-by-side and the crop search all use it. Measured on
+one region: page-for-page gave CHECK at 69.8% against the wrong page; topic-
+aligned gives PASS at 100.0% against the right one. With no usable outline in
+either document it falls back to the page number, which is the best guess
+available.
+
+**A tie goes to the near copy.** Manuals repeat their logo, their hazard icons
+and their connector symbols, so several pages score alike and the coarse pass
+cannot separate them. The candidate pages are therefore checked nearest-to-
+expected first and the search stops there, so a repeated graphic is reported
+where it belongs rather than wherever it scored a hair higher.
+
+Below 55% nothing is reported as a location at all — see the credibility floor
+in `core/compare_crops.py`.
+
+## How Long a Run Takes
+
+The two facts that used to dominate a run were both re-derived over and over:
+where a document's barcodes are, and where its tables are. Neither changes
+between passes, so `core/docscan.py` computes each once per document, caches it
+against the file's path, size and modification time, and hands it to every stage
+that asks. The master used to be re-swept once per translation — twelve times on
+a normal Xylem set.
+
+The same module runs the sweep across several processes on documents long enough
+to be worth it (24 pages and up), keeping one core free so the window stays
+responsive. Output is byte-identical to the single-process path; verified on the
+92-page A4 manual, 478 crops, matching SHA-256.
+
+Measured on that manual (master plus one translation, on a two-core machine):
+
+| Stage                       | Before | After (serial) | After (2 workers) |
+|-----------------------------|--------|----------------|-------------------|
+| Master scan (tables + codes)| —      | 212 s          | 128 s             |
+| Cropping the master         | 250 s  | 42 s           | 42 s              |
+| Per translation             | ~300 s | 103 s          | 71 s              |
+| Whole run                   | ~760 s | 391 s          | **157 s**         |
+
+A machine with six cores divides the scan stages again. The run also reports a
+real percentage and the name of the stage it is in, rather than an indeterminate
+bar that is indistinguishable from a hang.
+
+Two settings trade accuracy for time, both in plain sight:
+
+- **Meta Data → Measure N% of pages.** Column layout belongs to the stylesheet,
+  not to any one page, so the scan measures an evenly spread sample — half the
+  document by default — and reports one verdict with the count of pages that
+  disagreed. Evenly spread rather than the first N: the front of a manual is a
+  cover, a notice and a contents list, none of which run the body layout. Tick
+  **List every page** for the per-page detail behind the verdict.
+- **Ignore tables when counting columns.** On by default; it is what stops a
+  spec table being read as two columns.
 
 ## Installation & Setup
 

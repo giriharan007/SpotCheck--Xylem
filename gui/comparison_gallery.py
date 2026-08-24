@@ -142,13 +142,19 @@ def cards_from_crop_details(details):
     """Normalise pipeline per-crop image results into gallery rows."""
     rows = []
     for d in details or []:
+        # -1 is the search saying it never found the graphic. Printing it as a
+        # page number puts "page -1" in front of a reviewer; a dash reads as
+        # what it is, and the Result column carries the word NOT FOUND.
+        tr_page = d.get("trans_page", "-")
+        if tr_page in (-1, "-1"):
+            tr_page = "—"
         rows.append({
             "source": SOURCE_CROPS,
             "title": d.get("crop_name", "crop"),
             "eng_name": d.get("english_pdf", ""),
             "eng_page": d.get("eng_page", "-"),
             "tr_name": d.get("translated_pdf", ""),
-            "tr_page": d.get("trans_page", "-"),
+            "tr_page": tr_page,
             "status": d.get("status", ""),
             "passed": _is_pass(d.get("status", "")),
             "score": f"{d.get('similarity', 0):.1f}%",
@@ -645,6 +651,19 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
             except (TypeError, ValueError):
                 return default
 
+        eng_page = _page(row.get("eng_page"))
+
+        # Where to look in the translation when the result itself does not say -
+        # a graphic reported NOT FOUND, for instance. Falling back to the same
+        # page number opens two pages that reflow has long since separated, so
+        # the topic-aligned page is used instead and only then the page number.
+        fallback = eng_page
+        try:
+            from core import toc as TOC
+            fallback = TOC.page_mapper(master_pdf, trans_pdf)(eng_page)
+        except Exception:
+            pass
+
         margins = None
         if callable(self._get_margins):
             try:
@@ -655,8 +674,8 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         from gui.page_diff_view import open_page_diff
         _win, err = open_page_diff(
             self.winfo_toplevel(),
-            master_pdf, _page(row.get("eng_page")),
-            trans_pdf, _page(row.get("tr_page"), _page(row.get("eng_page"))),
+            master_pdf, eng_page,
+            trans_pdf, _page(row.get("tr_page"), fallback),
             focus_rect=row.get("roi_rect"),
             margins=margins,
             title_hint=f"{row.get('title', '')}  •  {row.get('status', '')}")

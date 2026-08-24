@@ -114,15 +114,29 @@ class MetadataFrame(ctk.CTkFrame):
 
         opts = ctk.CTkFrame(self, fg_color=UI_CARD_WELL, corner_radius=8)
         opts.pack(fill="x", padx=14, pady=(0, 8))
-        ctk.CTkLabel(opts, text="Pages per document:", font=self._f(10, "bold"),
+        # Column layout belongs to the stylesheet, not to any one page, so the
+        # scan measures a spread of pages rather than all of them and reports a
+        # single verdict. Half is enough on every Xylem manual measured; the
+        # figure is here because a document with an unusual back section might
+        # need more, and because a reviewer should be able to see what the
+        # answer rests on.
+        ctk.CTkLabel(opts, text="Measure:", font=self._f(10, "bold"),
                      text_color=DEPENDABLE_BLUE).pack(side="left", padx=(12, 4), pady=8)
-        self.max_pages_spin = tk.Spinbox(opts, from_=0, to=9999, width=6,
-                                         font=theme.get_font(9))
-        self.max_pages_spin.delete(0, "end")
-        self.max_pages_spin.insert(0, "0")
-        self.max_pages_spin.pack(side="left", pady=8)
-        ctk.CTkLabel(opts, text="0 = every page", font=self._f(9),
-                     text_color=NEUTRAL_DARK_GR).pack(side="left", padx=(6, 0), pady=8)
+        self.sample_spin = tk.Spinbox(opts, from_=1, to=100, increment=5, width=5,
+                                      font=theme.get_font(9))
+        self.sample_spin.delete(0, "end")
+        self.sample_spin.insert(0, str(meta.DEFAULT_SAMPLE_PERCENT))
+        self.sample_spin.pack(side="left", pady=8)
+        ctk.CTkLabel(opts, text="% of pages, spread through the document",
+                     font=self._f(9), text_color=NEUTRAL_DARK_GR
+                     ).pack(side="left", padx=(6, 0), pady=8)
+
+        self.page_wise = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(opts, text="List every page", variable=self.page_wise,
+                        font=self._f(10, "bold"), text_color=DEPENDABLE_BLUE,
+                        checkbox_width=16, checkbox_height=16,
+                        fg_color=XYLEM_BLUE, hover_color=UI_HOVER_BLUE
+                        ).pack(side="left", padx=(16, 8), pady=8)
 
         # Table detection is the slow part of a scan and the reason a spec table
         # is not mistaken for two columns, so it is on - but it is the first
@@ -221,9 +235,11 @@ class MetadataFrame(ctk.CTkFrame):
             return
 
         try:
-            max_pages = int(self.max_pages_spin.get() or 0)
+            sample_percent = int(self.sample_spin.get() or meta.DEFAULT_SAMPLE_PERCENT)
         except ValueError:
-            max_pages = 0
+            sample_percent = meta.DEFAULT_SAMPLE_PERCENT
+        sample_percent = max(1, min(100, sample_percent))
+        page_wise = bool(self.page_wise.get())
         margins = None
         if callable(self._get_margins):
             try:
@@ -243,7 +259,7 @@ class MetadataFrame(ctk.CTkFrame):
                 for i, path in enumerate(docs, start=1):
                     out.append(meta.pdf_metadata(
                         path, margins=margins, exclude_tables=exclude,
-                        max_pages=max_pages or None))
+                        sample_percent=sample_percent, page_wise=page_wise))
                     self._queue.put(("progress", i, len(docs), os.path.basename(path)))
                 self._queue.put(("done", out, None, ""))
             except Exception as e:
@@ -387,7 +403,9 @@ class MetadataFrame(ctk.CTkFrame):
         except (ValueError, IndexError):
             return
 
-        self.page_hdr.configure(text=f"Pages — {row['filename']}")
+        note = row.get("sample_note")
+        self.page_hdr.configure(
+            text=f"Pages — {row['filename']}" + (f"   (measured {note})" if note else ""))
         # doc.metadata["format"] already reads "PDF 1.5"; prefixing it again gave
         # "PDF PDF 1.5".
         bits = [row.get("pdf_version", "-"),
@@ -400,6 +418,14 @@ class MetadataFrame(ctk.CTkFrame):
 
         self.page_tree.delete(*self.page_tree.get_children())
         dominant = row.get("columns_label")
+        if not row.get("page_rows") and not row.get("error"):
+            # The per-page detail is off by default. Say so in the table itself,
+            # rather than leaving a reviewer looking at an empty panel.
+            blank = ["" for _k, _h, _w, _a in meta.PAGE_COLUMNS]
+            blank[-1] = ("Tick “List every page” above to see the "
+                         "per-page findings behind this verdict.")
+            self.page_tree.insert("", "end", values=blank)
+            return
         for p in row.get("page_rows", []):
             values = [p.get(key, "-") for key, _h, _w, _a in meta.PAGE_COLUMNS]
             tag = ("problem",) if (dominant and p.get("columns_label") != dominant

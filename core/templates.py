@@ -99,6 +99,12 @@ REGION_FIELDS = (
     "id", "label", "page_num", "is_last_page", "roi_rect", "parent_id",
     "exact_match", "dont_compare_text", "scope_only",
     "page_scope", "variant_group",
+    # What the region must say, when the user has corrected it by hand.
+    # Absent means "whatever is clipped out of the master at run time", which
+    # is the right default; present means the extraction got it wrong - a stray
+    # line break in a phone number, a clipped trailing comma - and this is the
+    # text every translation is checked against instead.
+    "expected_text",
 )
 
 _BAD_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -253,10 +259,16 @@ def get_template_dir():
 
 
 def safe_name(name):
-    """A filesystem-safe template name; the display name is stored inside."""
-    n = _BAD_NAME.sub("_", (name or "").strip()).strip(". ")
-    n = re.sub(r"\s+", " ", n)
-    return n[:80] or "untitled"
+    """
+    A filesystem-safe template name; the display name is stored inside.
+
+    Trailing dots and spaces are stripped AFTER the length cap, not before -
+    truncating first and stripping second is what produced a Windows-illegal
+    directory name in crop_images, and the same ordering mistake was here.
+    """
+    n = _BAD_NAME.sub("_", (name or "").strip())
+    n = re.sub(r"\s+", " ", n)[:80].rstrip(". ")
+    return n or "untitled"
 
 
 def template_path(name):
@@ -298,6 +310,12 @@ def _clean_region(r, seq):
     out["is_last_page"] = bool(r.get("is_last_page"))
     out["parent_id"] = r.get("parent_id")
     out["variant_group"] = (r.get("variant_group") or "").strip() or None
+    # Only carried when it is really an override; an empty override and no
+    # override are different things, so this cannot use `or None`.
+    if r.get("expected_text") is None:
+        out.pop("expected_text", None)
+    else:
+        out["expected_text"] = str(r["expected_text"])
     scope = r.get("page_scope")
     if not isinstance(scope, dict) or scope.get("type") not in SCOPE_TYPES:
         scope = default_scope(r.get("page_num"), bool(r.get("is_last_page")))

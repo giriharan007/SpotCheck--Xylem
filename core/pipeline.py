@@ -31,6 +31,7 @@ from core import crop_images as crop_pdf_images
 from core import compare_crops as Compare_cropped_images
 from core import image_counts as ImageCounts
 from core import margins as PageMargins
+from core import docscan as DocScan
 from core import metadata as MetaData
 from core import region_engine as RegionEngine
 
@@ -259,7 +260,8 @@ def generate_unified_excel_report(
     # TAB 6: META DATA
     # --------------------------------------------------------
     ws_meta = wb.create_sheet(title="Meta Data")
-    ws_meta.append([h for _k, h, _w, _a in MetaData.SUMMARY_COLUMNS] + ["Notes"])
+    ws_meta.append([h for _k, h, _w, _a in MetaData.SUMMARY_COLUMNS]
+                   + ["Columns measured on", "Notes"])
     if metadata_rows:
         master = metadata_rows[0]
         for i, r in enumerate(metadata_rows):
@@ -271,7 +273,7 @@ def generate_unified_excel_report(
             if r.get("error"):
                 note = (note + "; " if note else "") + r["error"]
             ws_meta.append([r.get(k, "-") for k, _h, _w, _a in MetaData.SUMMARY_COLUMNS]
-                           + [note])
+                           + [r.get("sample_note", "-"), note])
     else:
         ws_meta.append(["(metadata was not collected for this run)"])
 
@@ -407,6 +409,25 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
 
     active_margins = PageMargins.normalize(margins)
 
+    # A run of a dozen manuals is minutes of work. Every stage reports where it
+    # has got to, so the interface can show a moving bar with a name on it
+    # instead of a spinner that looks identical to a crash.
+    def say(fraction, message):
+        if progress:
+            try:
+                progress(fraction, message)
+            except Exception:
+                pass
+
+    def stage_progress(base, span, label):
+        """A per-page callback that maps into this stage's slice of the bar."""
+        def cb(done, total, note=""):
+            frac = base + span * (done / float(total or 1))
+            say(frac, f"{label} — {note} {done}/{total}" if note else f"{label} {done}/{total}")
+        return cb
+
+    say(0.0, "Starting")
+
     print("=" * 80)
     print("UNIFIED PDF QUALITY & VISUAL INSPECTION ENGINE (MAIN)")
     print("=" * 80)
@@ -433,7 +454,17 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
         return
 
     # 2. Extract Master Source Models & Crop Graphic Elements
+    #
+    # The master is scanned once here - barcodes, QR codes and tables - and the
+    # result is cached for every stage and every translation that follows. It
+    # used to be re-scanned by the barcode check on each of the eleven
+    # translations, which on a 92-page manual was most of the run.
     print("Extracting Master Models for Source PDF...")
+    say(0.01, "Scanning the master")
+    DocScan.forget()
+    DocScan.prepare(source_pdf_path, tables=False, codes=True,
+                    progress=stage_progress(0.01, 0.12, "Scanning the master"))
+
     source_toc_numerics = TOC.extract_toc_numerics(source_pdf_path)
     source_count_model = ImageCounts.count_images_by_topic(source_pdf_path, margins=active_margins)
 
@@ -443,7 +474,9 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     eng_crops_dir = os.path.join(eng_crops_out_dir, pdf_name_no_ext)
 
     print(f"Extracting Pure Graphic Crops from Source PDF...")
-    crop_pdf_images.crop_pdf_elements(source_pdf_path, eng_crops_out_dir, margins=active_margins)
+    crop_pdf_images.crop_pdf_elements(
+        source_pdf_path, eng_crops_out_dir, margins=active_margins,
+        progress=stage_progress(0.13, 0.07, "Cropping the master"))
 
     print(f"  Source Topics        : {len(source_toc_numerics)} sections")
     print(f"  Source Images        : {source_count_model['total']} "
@@ -462,9 +495,20 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
 
     diff_crops_out_dir = os.path.join(output_dir, "Cropped_Comparison")
 
+    # Documents occupy the bar from 20% to 90%; the report and metadata take
+    # the rest.
+    DOC_BASE, DOC_SPAN = 0.20, 0.70
+    doc_slice = DOC_SPAN / max(1, len(translated_files))
+
     for idx, tr_path in enumerate(translated_files, start=1):
         tr_filename = os.path.basename(tr_path)
-        
+        here = DOC_BASE + doc_slice * (idx - 1)
+        say(here, f"{tr_filename}  ({idx} of {len(translated_files)})")
+        # Scan this translation once, up front, for the three stages below.
+        DocScan.prepare(tr_path, tables=False, codes=True,
+                        progress=stage_progress(here, doc_slice * 0.35,
+                                                f"Scanning {tr_filename}"))
+
         # 1. TOC check
         try:
             target_toc_numerics = TOC.extract_toc_numerics(tr_path)
@@ -501,7 +545,9 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
             img_res = Compare_cropped_images.compare_english_crops_with_translated_pdf(
                 eng_crop_dir=eng_crops_dir,
                 trans_pdf_path=tr_path,
-                output_dir=diff_crops_out_dir
+                output_dir=diff_crops_out_dir,
+                progress=stage_progress(here + doc_slice * 0.45, doc_slice * 0.5,
+                                        f"Images: {tr_filename}"),
             )
         except Exception as e:
             img_res = {"trans_name": tr_filename, "total_crops": 0, "matched_crops": 0, "match_pct": 0.0, "overall_status": "FAIL", "crop_details": []}
@@ -576,9 +622,12 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     metadata_rows = []
     if collect_metadata:
         print("Collecting document metadata...")
+        say(0.90, "Measuring documents")
         try:
             metadata_rows = MetaData.collect(
-                [source_pdf_path] + translated_files, margins=active_margins)
+                [source_pdf_path] + translated_files, margins=active_margins,
+                progress=lambda i, n, name: say(0.90 + 0.07 * (i / float(n or 1)),
+                                                f"Measuring {name} ({i}/{n})"))
             print(f"  {len(metadata_rows)} document(s) measured")
         except Exception as e:
             print(f"  ERROR: metadata scan failed: {e}")
@@ -586,6 +635,7 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
 
     # 6. Generate ONE single Excel report
     unified_report_path = os.path.join(output_dir, "PDF_Quality_Inspection_Report.xlsx")
+    say(0.97, "Writing the report")
     generate_unified_excel_report(
         toc_results,
         bc_qr_results,
