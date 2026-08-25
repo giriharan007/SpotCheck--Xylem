@@ -169,6 +169,250 @@ def trim_white_borders(gray_img: np.ndarray, threshold: int = 245) -> np.ndarray
                     max(0, x0 - pad):min(gray_img.shape[1], x1 + pad + 1)]
 
 
+# Returned by the visual comparison when there is no artwork on either side to
+# compare - the region is text, and text is exactly what this mode ignores.
+# Defaults for the three matching numbers. Zero slack and a high bar, because
+# these regions are stylesheet furniture: a logo, a footer code, an address
+# block. They sit where the stylesheet puts them, and a region that needs to
+# move can be given its own tolerance rather than loosening every other one.
+DEFAULT_X_TOLERANCE = 0.0
+DEFAULT_Y_TOLERANCE = 0.0
+DEFAULT_PASS_THRESHOLD = 90.0
+
+NOTHING_TO_COMPARE = -1.0
+
+
+def region_codes(pdf_path, page_no, rect):
+    """Barcodes and QR codes inside one rectangle, decoded where possible."""
+    try:
+        from core import barcode_qr as Codes
+        with fitz.open(pdf_path) as doc:
+            page = doc[max(0, min(len(doc) - 1, page_no - 1))]
+            box = fitz.Rect(rect) & page.rect
+            found = []
+            for c in Codes.detect_barcodes_and_qr_codes(page):
+                if fitz.Rect(c["rect"]).intersects(box):
+                    found.append({"type": c.get("type", ""),
+                                  "data": (c.get("data") or "").strip(),
+                                  "decoded": bool(c.get("decoded"))})
+            return found
+    except Exception:
+        return []
+
+
+def region_has_ink(pdf_path, page_no, rect, dpi=150):
+    """True when the region renders as something other than blank paper."""
+    try:
+        with fitz.open(pdf_path) as doc:
+            page = doc[max(0, min(len(doc) - 1, page_no - 1))]
+            box = fitz.Rect(rect) & page.rect
+            if box.is_empty:
+                return False
+            pix = page.get_pixmap(dpi=dpi, clip=box)
+            a = np.frombuffer(pix.samples, dtype=np.uint8)
+            return a.size > 0 and float(a.std()) >= 1.0
+    except Exception:
+        return False
+
+
+def derive_pattern(text):
+    """
+    Turn the master's text into the shape a translation must also have.
+
+    The rule the stylesheet actually follows: whatever pattern the English copy
+    uses, the translation uses too. A six-digit document number is six digits
+    in every language - a different six digits, but six. A two-letter code is
+    two letters. So the shape is read off the master rather than configured:
+
+        894387       ->  exactly 6 digits
+        EN           ->  exactly 2 letters, either case
+        894387_5.0   ->  6 digits, "_", 1 digit, ".", 1 digit
+
+    Letters are matched case-insensitively and by Unicode class, not [A-Za-z]:
+    a Greek or Cyrillic code is still letters, and insisting on ASCII would
+    fail it for being foreign rather than for being wrong.
+
+    Digit and letter RUN LENGTHS are exact. A ten-digit number must stay ten
+    digits; that is the whole point of checking the pattern rather than just
+    checking something is there.
+
+    Returns (regex, description), or (None, why not).
+    """
+    t = " ".join((text or "").split())
+    if not t:
+        return None, "no text in the master to take a pattern from"
+
+    parts, described, i = [], [], 0
+    while i < len(t):
+        ch = t[i]
+        if ch.isdigit():
+            j = i
+            while j < len(t) and t[j].isdigit():
+                j += 1
+            n = j - i
+            parts.append(rf"\d{{{n}}}")
+            described.append(f"{n} digit{'s' if n > 1 else ''}")
+            i = j
+        elif ch.isalpha():
+            j = i
+            while j < len(t) and t[j].isalpha():
+                j += 1
+            n = j - i
+            # [^\W\d_] is "a letter" in any script, unlike [A-Za-z].
+            parts.append(rf"[^\W\d_]{{{n}}}")
+            described.append(f"{n} letter{'s' if n > 1 else ''}")
+            i = j
+        elif ch.isspace():
+            parts.append(r"\s+")
+            described.append("space")
+            while i < len(t) and t[i].isspace():
+                i += 1
+        else:
+            parts.append(re.escape(ch))
+            described.append(repr(ch))
+            i += 1
+
+    # Boundaries that treat "_" as a separator. The default \b does not: the
+    # cover text is "894387_5.0" as ONE token, and \b\d{6}\b finds nothing
+    # in it because "_" counts as a word character. That cost an hour.
+    regex = r"(?<![^\W_])" + "".join(parts) + r"(?![^\W_])"
+    return regex, " + ".join(described)
+
+
+PATTERN_SPECIFIC_MIN_DIGITS = 4
+
+
+def pattern_is_specific(master_text):
+    """
+    Is this shape rare enough that finding it ANYWHERE proves something?
+
+    "894387_5.0" is: nothing in ordinary prose looks like that, so a hit
+    anywhere in the scope is the document number and no argument.
+
+    "EN" is not. Two letters is the shape of half the small words in every
+    language on the list - og, de, ja, et, di, en. Measured, not guessed:
+    with the language code redacted out of all eleven translations, a
+    whole-scope search for "two letters" still passed EIGHT of them, on da's
+    "og" and es's "de". A check that passes when the thing is deleted is not
+    a check.
+
+    Digits are what make a shape rare; letters never do. So a pattern is
+    specific when it carries a real run of digits, and generic otherwise -
+    and a generic pattern is only trusted where the region actually sits.
+    """
+    return sum(c.isdigit() for c in (master_text or "")) >= PATTERN_SPECIFIC_MIN_DIGITS
+
+
+def check_pattern(master_text, in_place_text, scope_text=None, custom=None):
+    """
+    Does the translation carry text of the same shape - and is it still where
+    it belongs?
+
+    Looked for in two places, in this order:
+
+      1. The region's own box, grown by its tolerances. A hit here is a PASS
+         and needs no further thought.
+      2. The rest of the parent scope. The token does move: the Finnish and
+         Swedish covers have a one-line-shorter title, so the document number
+         sits 9.8 pt higher than in English. A specific shape found here is
+         still a PASS, and the move is reported.
+
+    A GENERIC shape found only in step 2 is not a pass. It is reported as
+    CHECK with the text that was found, because it is far likelier to be an
+    ordinary word than the thing that was supposed to be here.
+
+    Returns (similarity, description, status, is_match).
+    """
+    if custom:
+        # Hand-written, so it was written on purpose - trusted across the
+        # whole scope the way a specific derived pattern is.
+        regex, desc, specific = custom, f"custom pattern {custom}", True
+    else:
+        regex, desc = derive_pattern(master_text)
+        if regex is None:
+            return 0.0, f"Pattern check: {desc}", "CHECK (No Pattern)", False
+        specific = pattern_is_specific(master_text)
+
+    def _hits(text):
+        return list(dict.fromkeys(re.findall(regex, text or "", flags=re.UNICODE)))
+
+    try:
+        here = _hits(in_place_text)
+        elsewhere = [h for h in _hits(scope_text) if h not in here] if scope_text else []
+    except re.error as e:
+        return 0.0, f"Pattern check: bad pattern ({e})", "CHECK (Bad Pattern)", False
+
+    if here:
+        return (100.0, f"Pattern {desc} → found {', '.join(here)[:60]} in place",
+                "PASS (Pattern)", True)
+
+    if elsewhere:
+        shown = ", ".join(elsewhere)[:60]
+        if specific:
+            return (100.0,
+                    f"Pattern {desc} → found {shown} elsewhere in the scope "
+                    f"(moved, but unmistakable)",
+                    "PASS (Pattern)", True)
+        return (0.0,
+                f"Pattern {desc} → nothing where it belongs. {shown} is "
+                f"the same shape but sits elsewhere in the scope, and a shape "
+                f"this common matches ordinary words - check by eye",
+                "CHECK (Pattern Moved)", False)
+
+    return (0.0, f"Pattern {desc} → nothing of that shape in the scope",
+            "FAIL (Pattern)", False)
+
+
+def check_presence(eng_pdf_path, tr_pdf_path, eng_page, tr_page,
+                   roi_rect, search_rect, eng_text, tr_text):
+    """
+    "Is it there?" - for content that is SUPPOSED to differ.
+
+    A QR code encodes a language-specific URL, so its pattern is different in
+    every translation by design; comparing the pixels can only ever fail, and
+    it did - twelve QR and barcode regions came back at 45-75% and were told to
+    REVIEW every run, which trains a reviewer to ignore the column. The same is
+    true of a document number, a language code, and a date.
+
+    What can be checked is that the right KIND of thing is still in the right
+    place. A code region passes when both documents carry a code of the same
+    type there, and the decoded values are reported side by side so a reviewer
+    can see the URLs differ by language, which is the expected outcome rather
+    than a finding. A region with no code in it passes when both sides have
+    something in them.
+
+    Returns (similarity, description, status, is_match).
+    """
+    eng_codes = region_codes(eng_pdf_path, eng_page, roi_rect)
+    tr_codes = region_codes(tr_pdf_path, tr_page, search_rect)
+
+    if eng_codes:
+        want = sorted(c["type"] for c in eng_codes)
+        got = sorted(c["type"] for c in tr_codes)
+        if want == got:
+            detail = ", ".join(sorted({c["type"] for c in eng_codes}))
+            values = []
+            for a, b in zip(eng_codes, tr_codes):
+                if a["decoded"] or b["decoded"]:
+                    values.append(f"{a['data'] or '?'} -> {b['data'] or '?'}")
+            note = f"  ({'; '.join(values)})" if values else ""
+            return (100.0, f"Present: {detail}{note}", "PASS (Present)", True)
+        if not tr_codes:
+            return (0.0, f"Expected {', '.join(want)} here, found none",
+                    "FAIL (Code Missing)", False)
+        return (0.0, f"Expected {', '.join(want)}, found {', '.join(got)}",
+                "FAIL (Wrong Code Type)", False)
+
+    # No code: fall back to "there is something here".
+    if (tr_text or "").strip():
+        return (100.0, "Present (text, contents not compared)", "PASS (Present)", True)
+    if region_has_ink(tr_pdf_path, tr_page, search_rect):
+        return (100.0, "Present (graphic, contents not compared)", "PASS (Present)", True)
+    if not (eng_text or "").strip() and not region_has_ink(eng_pdf_path, eng_page, roi_rect):
+        return (100.0, "Empty in both", "PASS (Present)", True)
+    return (0.0, "Nothing here in the translation", "FAIL (Missing)", False)
+
+
 def compute_visual_graphic_similarity(
     eng_pdf_path: str,
     tr_pdf_path: str,
@@ -209,9 +453,19 @@ def compute_visual_graphic_similarity(
         trimmed_e = trim_white_borders(gray_e)
         trimmed_t = trim_white_borders(gray_t)
 
-        # If both regions contain only masked text and no other graphics, return 100%
+        # Two blank rectangles are not a match; they are an unanswerable
+        # question. This used to return 100%, and it is the single most
+        # dangerous line in the file: a Visual-only check on a region that
+        # holds nothing BUT text masks all of it away on both sides, compares
+        # white against white, and reports PASS 100% - while the English and
+        # Italian disclaimers underneath say entirely different things. Every
+        # text-only region set to Visual only passed in every language for
+        # exactly this reason.
+        #
+        # NOTHING_TO_COMPARE travels up to the caller, which says so plainly
+        # and does not count it as a pass.
         if np.all(trimmed_e > 240) and np.all(trimmed_t > 240):
-            return 100.0
+            return NOTHING_TO_COMPARE
 
         # 4. Normalized template matching across search window
         if trimmed_e.shape[0] <= trimmed_t.shape[0] and trimmed_e.shape[1] <= trimmed_t.shape[1]:
@@ -428,14 +682,17 @@ def search_and_verify_region_in_target(
     eng_text: str,
     exact_match_required: bool = False,
     dont_compare_text: bool = False,
-    y_tolerance: float = 15.0,
-    x_tolerance: float = 15.0,
-    similarity_threshold: float = 75.0,
+    y_tolerance: float = DEFAULT_Y_TOLERANCE,
+    x_tolerance: float = DEFAULT_X_TOLERANCE,
+    similarity_threshold: float = DEFAULT_PASS_THRESHOLD,
     output_crops_dir: str = None,
     region_label: str = "Region",
     scope_rect: tuple = None,
     needle: str = None,
-    page_map=None
+    page_map=None,
+    presence_only: bool = False,
+    pattern_match: bool = False,
+    pattern: str = None
 ) -> dict:
     """
     Locate corresponding region in target translated PDF with flexible y-offset tolerance,
@@ -510,7 +767,53 @@ def search_and_verify_region_in_target(
 
             # Determine similarity & status based on region mode
             needle_count = -1
-            if dont_compare_text:
+            # Scoped modes look inside the parent when there is one. A doc
+            # number nested in the cover group is looked for anywhere in that
+            # group - the whole reason for drawing the group - not at the exact
+            # coordinates it happened to occupy in English.
+            def _scoped_area():
+                if not scope_rect:
+                    return search_rect, tr_text, ""
+                sx0, sy0, sx1, sy1 = scope_rect
+                area = (max(0.0, sx0 - x_tolerance), max(0.0, sy0 - y_tolerance),
+                        min(pw, sx1 + x_tolerance), min(ph, sy1 + y_tolerance))
+                return (area,
+                        tr_page.get_text("text", clip=fitz.Rect(area)).strip(),
+                        "  [searched the whole scope]")
+
+            if pattern_match:
+                # Mode 0a: the shape the English copy uses, the translation must
+                # use too - six digits stay six digits, two letters stay two -
+                # without caring what the digits or letters actually are.
+                # Its own box first, then the rest of the scope. Both are
+                # needed: a fixed-position check misses the Finnish document
+                # number that rides 9.8 pt up on a shorter title, and a
+                # scope-wide-only check passes a deleted language code on the
+                # first two-letter word it trips over.
+                _area, scope_hay, note = _scoped_area()
+                similarity, match_desc, status, is_match = check_pattern(
+                    eng_text, tr_text, scope_text=scope_hay, custom=pattern)
+                # Only say the scope was searched when it actually had to be.
+                # "found in place [searched the whole scope]" reads as though
+                # the check is looser than it was.
+                if scope_rect and "in place" not in match_desc:
+                    match_desc += note
+
+            elif presence_only:
+                # Mode 0: must be there, contents may legitimately differ.
+                #
+                # Inside its parent when it has one. A doc number nested in the
+                # cover group should be looked for anywhere in that group - the
+                # whole reason for drawing the group - not at the exact
+                # coordinates it happened to occupy in English, which a longer
+                # manual-type line above it will have pushed sideways.
+                where, hay, note = _scoped_area()
+                similarity, match_desc, status, is_match = check_presence(
+                    eng_pdf_path, tr_pdf_path, eng_page, tr_page_num,
+                    roi_rect, where, eng_text, hay)
+                match_desc += note
+
+            elif dont_compare_text:
                 # Mode 1: Don't Compare Text (Visual Match)
                 vis_sim = compute_visual_graphic_similarity(
                     eng_pdf_path=eng_pdf_path,
@@ -520,18 +823,30 @@ def search_and_verify_region_in_target(
                     roi_rect=roi_rect,
                     search_rect=search_rect
                 )
-                similarity = vis_sim
-                match_desc = "Visual Graphic Match (Ignoring Text)"
-
-                if vis_sim >= 75.0:
-                    status = "PASS (Visual Match)"
-                    is_match = True
-                elif vis_sim >= similarity_threshold:
-                    status = "CHECK (Visual Partial)"
-                    is_match = True
-                else:
-                    status = "FAIL (Visual Mismatch)"
+                if vis_sim == NOTHING_TO_COMPARE:
+                    # Nothing but text in the box, and this mode ignores text.
+                    # Reported rather than scored: the previous answer was
+                    # "100%, PASS", which is how a disclaimer in the wrong
+                    # language sailed through in all eleven translations.
+                    similarity = 0.0
+                    match_desc = ("Visual only, but this region holds only text - "
+                                  "nothing to compare. Use Exact match to check the "
+                                  "wording, or Present only to check it is there.")
+                    status = "CHECK (No Graphics Here)"
                     is_match = False
+                else:
+                    similarity = vis_sim
+                    match_desc = "Visual Graphic Match (Ignoring Text)"
+
+                    if vis_sim >= max(75.0, similarity_threshold):
+                        status = "PASS (Visual Match)"
+                        is_match = True
+                    elif vis_sim >= similarity_threshold:
+                        status = "CHECK (Visual Partial)"
+                        is_match = True
+                    else:
+                        status = "FAIL (Visual Mismatch)"
+                        is_match = False
 
             elif exact_match_required and scope_rect and needle:
                 # Mode 2a: Scoped Exact Match (sub-region inside a parent region).
@@ -627,9 +942,9 @@ def run_batch_multiple_regions_check(
     eng_pdf_path: str,
     tr_target: str,
     regions: list[dict],
-    y_tolerance: float = 15.0,
-    x_tolerance: float = 15.0,
-    similarity_threshold: float = 75.0,
+    y_tolerance: float = DEFAULT_Y_TOLERANCE,
+    x_tolerance: float = DEFAULT_X_TOLERANCE,
+    similarity_threshold: float = DEFAULT_PASS_THRESHOLD,
     output_crops_dir: str = DEFAULT_CROPS_OUTPUT_DIR,
     progress_callback=None
 ) -> list[dict]:
@@ -671,9 +986,17 @@ def run_batch_multiple_regions_check(
     # its own box only defines the needle. Resolve that pairing up front.
     for r in regions:
         parent = by_id.get(r.get("parent_id")) if r.get("parent_id") else None
-        if parent is not None and r.get("exact_match", False):
+        # A sub-region's parent is its scope for BOTH kinds of scoped check.
+        # It used to be attached only for Exact match, which meant a Present
+        # only child silently ignored the scope it had been deliberately nested
+        # inside and was checked at its own fixed coordinates instead - the
+        # opposite of what nesting a box inside a group is for.
+        scoped = (r.get("exact_match", False) or r.get("presence_only", False)
+                  or r.get("pattern_match", False))
+        if parent is not None and scoped:
             r["_scope_rect"] = parent["roi_rect"]
-            r["_needle"] = needle_from_region(eng_pdf_path, r["page_num"], r["roi_rect"])
+            r["_needle"] = (needle_from_region(eng_pdf_path, r["page_num"], r["roi_rect"])
+                            if r.get("exact_match", False) else None)
         else:
             r["_scope_rect"] = None
             r["_needle"] = None
@@ -710,6 +1033,18 @@ def run_batch_multiple_regions_check(
             if progress_callback:
                 progress_callback(step, total_steps, r["label"], os.path.basename(tr_path))
 
+            # Per-region settings win over the ones on screen. A footer code
+            # has to sit exactly where it sits and wants no slack at all; a
+            # paragraph that reflows in eleven languages needs plenty. One
+            # setting for the whole document could only ever be a compromise
+            # between the two, so each region may carry its own.
+            def _own(key, fallback):
+                val = r.get(key)
+                try:
+                    return fallback if val is None or val == "" else float(val)
+                except (TypeError, ValueError):
+                    return fallback
+
             res = search_and_verify_region_in_target(
                 eng_pdf_path=eng_pdf_path,
                 tr_pdf_path=tr_path,
@@ -719,9 +1054,12 @@ def run_batch_multiple_regions_check(
                 eng_text=r.get("eng_text", ""),
                 exact_match_required=r.get("exact_match", False),
                 dont_compare_text=r.get("dont_compare_text", False),
-                y_tolerance=y_tolerance,
-                x_tolerance=x_tolerance,
-                similarity_threshold=similarity_threshold,
+                presence_only=r.get("presence_only", False),
+                pattern_match=r.get("pattern_match", False),
+                pattern=r.get("pattern") or None,
+                y_tolerance=_own("y_tolerance", y_tolerance),
+                x_tolerance=_own("x_tolerance", x_tolerance),
+                similarity_threshold=_own("pass_threshold", similarity_threshold),
                 output_crops_dir=output_crops_dir,
                 region_label=r["label"],
                 scope_rect=r.get("_scope_rect"),
@@ -738,4 +1076,3 @@ def run_batch_multiple_regions_check(
 
     # Alternatives in a variant group are OR-ed: one match on a page is enough.
     return collapse_variant_results(all_results)
-

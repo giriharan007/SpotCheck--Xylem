@@ -21,6 +21,7 @@ Features:
 """
 
 import os
+import re
 import threading
 
 import pymupdf as fitz  # PyMuPDF (aliased as fitz for API compat)
@@ -53,6 +54,7 @@ from core.templates import (
     SCOPE_LABELS, SCOPE_TYPES_OFFERED,
     default_scope, describe_scope, is_legacy_scope,
 )
+from core import region_engine
 from core.region_engine import (
     DEFAULT_CROPS_OUTPUT_DIR,
     render_region_image,
@@ -61,15 +63,49 @@ from core.region_engine import (
     extract_roi_text,
     is_rect_contained_in_parent,
     run_batch_multiple_regions_check,
+    derive_pattern,
 )
+
+# The five ways a region can be checked. Exactly one of them at a time: they
+# answer different questions, and a region ticked for two of them would have
+# to be scored twice with no rule for which score wins. Kept in one place so
+# the exclusion cannot drift apart across five separate handlers - it did.
+MATCH_MODE_KEYS = ("exact_match", "scope_only", "dont_compare_text",
+                   "presence_only", "pattern_match")
 
 # Xylem-branded ttk table style, registered lazily on first widget creation.
 _TREE_STYLE = "Xylem.Treeview"
 
+
+def _clamped_to_page(rect, page_size):
+    """
+    Keep a rectangle on the sheet, without flattening it.
+
+    A stylesheet drawn on a wider sheet can put a right-hand box past the trim
+    of a narrower one. Left alone it is drawn under the page edge where it
+    cannot be seen, clicked or dragged back - the box is still in the table and
+    still checked, so the run reports on a region the user has no way to look
+    at. Slid inward instead, keeping its size where the size still fits.
+    """
+    if not rect or not page_size:
+        return rect
+    x0, y0, x1, y1 = (float(v) for v in rect)
+    pw, ph = float(page_size[0]), float(page_size[1])
+    if pw <= 0 or ph <= 0:
+        return rect
+    w, h = min(x1 - x0, pw), min(y1 - y0, ph)
+    x0 = max(0.0, min(x0, pw - w))
+    y0 = max(0.0, min(y0, ph - h))
+    return [round(x0, 2), round(y0, 2), round(x0 + w, 2), round(y0 + h, 2)]
+
 # Inspector defaults
-DEFAULT_Y_TOLERANCE = 15
-DEFAULT_X_TOLERANCE = 15
-DEFAULT_PASS_THRESHOLD = 75
+# The run-wide fallbacks, used by any region that does not carry its own.
+# Zero slack and a high bar: these regions are stylesheet furniture and sit
+# where the stylesheet puts them. A region that genuinely moves is given its
+# own tolerance rather than loosening the bar for everything else.
+DEFAULT_Y_TOLERANCE = region_engine.DEFAULT_Y_TOLERANCE
+DEFAULT_X_TOLERANCE = region_engine.DEFAULT_X_TOLERANCE
+DEFAULT_PASS_THRESHOLD = region_engine.DEFAULT_PASS_THRESHOLD
 
 # The tab scrolls, and its two columns are never shorter than this. Chosen to
 # be taller than a laptop window on purpose: the space below the fold is what
@@ -176,6 +212,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
         self.margins = dict(page_margins.DEFAULT_MARGINS)
         self._drag_guide = None            # which guide the pointer is holding
         self._margin_scan = {}             # (pdf, page) -> element list, cached
+        self._page_size_cache = {}         # (pdf, page) -> (w, h) in points
         self._suspend_margin_sync = False  # stops the spinboxes echoing a drag
 
         theme.apply_treeview_style(_TREE_STYLE)
@@ -204,6 +241,39 @@ class RegionInspectorFrame(ctk.CTkFrame):
 
         self.total_pages = get_page_count(self.eng_pdf_path) if self.eng_pdf_path else 0
 
+    def _page_size_pt(self, page_num=1):
+        """
+        The real trim size of one page of the master, in points.
+
+        Read from the document, NOT from self.page_width_pt. Those two are only
+        set when a page is drawn on the canvas, which happens at the END of a
+        load - so anything that asks them during a load is told the size of the
+        document that was open BEFORE. Placing a stylesheet from that number is
+        how loading A5, then A4, then A5 again put nineteen of twenty-one boxes
+        somewhere they had never been, several of them shoved off the right edge
+        and clamped into a sliver against the margin.
+
+        Per page, not per document, because the trim can change inside one file:
+        a fold-out schematic in the middle of an A5 manual is a real thing, and
+        a footer region on it belongs to that page's bottom edge.
+        """
+        if not self.eng_pdf_path:
+            return None
+        page_num = max(1, int(page_num or 1))
+        key = (self.eng_pdf_path, page_num)
+        if key in self._page_size_cache:
+            return self._page_size_cache[key]
+        size = None
+        try:
+            with fitz.open(self.eng_pdf_path) as doc:
+                if len(doc):
+                    rect = doc[min(page_num, len(doc)) - 1].rect
+                    size = (float(rect.width), float(rect.height))
+        except Exception:
+            size = None
+        self._page_size_cache[key] = size
+        return size
+
     def load(self, eng_pdf_path, tr_target_path=None, output_dir=None):
         """
         Point the inspector at a document and re-render.
@@ -222,6 +292,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
             self.check_results = []
             self.current_page = 1
             self._margin_scan = {}      # element cache belongs to the old document
+            self._page_size_cache = {}  # and so do the page sizes
             try:
                 for row in self.results_tree.get_children():
                     self.results_tree.delete(row)
@@ -491,10 +562,64 @@ class RegionInspectorFrame(ctk.CTkFrame):
         )
         self.dont_compare_text_chk.pack(side="left", padx=4)
 
+        # For content that is SUPPOSED to differ. A QR encodes a language
+        # specific URL, so its pattern is different in every translation by
+        # design and comparing pixels can only ever fail - twelve code regions
+        # came back at 45-75% and were told to REVIEW on every single run.
+        # Presence is the only question about them with a true answer.
+        self.presence_only_var = ctk.BooleanVar(value=False)
+        self.presence_only_chk = ctk.CTkCheckBox(
+            edit_row,
+            text="Present only",
+            variable=self.presence_only_var,
+            font=_font(size=10, weight="bold"),
+            fg_color=XYLEM_BLUE, hover_color=UI_HOVER_BLUE,
+            text_color=DEPENDABLE_BLUE,
+            command=self._on_presence_only_toggle
+        )
+        self.presence_only_chk.pack(side="left", padx=4)
+
+        # Stricter than "Present only" without being as strict as "Exact".
+        # A document number is six digits in every language - six DIFFERENT
+        # digits, but six. A language code is two letters, whichever two. So
+        # the check is on the shape, and the shape is read off the master's own
+        # text rather than configured: whatever pattern the English copy uses,
+        # the translation has to use as well.
+        self.pattern_match_var = ctk.BooleanVar(value=False)
+        self.pattern_match_chk = ctk.CTkCheckBox(
+            edit_row,
+            text="Same pattern",
+            variable=self.pattern_match_var,
+            font=_font(size=10, weight="bold"),
+            fg_color=XYLEM_BLUE, hover_color=UI_HOVER_BLUE,
+            text_color=DEPENDABLE_BLUE,
+            command=self._on_pattern_match_toggle
+        )
+        self.pattern_match_chk.pack(side="left", padx=4)
+
+        # What the shape actually came out as, and a way to overrule it. Shown
+        # only while "Same pattern" is on: a derived regex that nobody can see
+        # is a check nobody can trust.
+        self.pattern_row = ctk.CTkFrame(editor_card, fg_color="transparent")
+        ctk.CTkLabel(self.pattern_row, text="Pattern:",
+                     font=_font(size=10, weight="bold"),
+                     text_color=DEPENDABLE_BLUE).pack(side="left")
+        self.pattern_desc_lbl = ctk.CTkLabel(
+            self.pattern_row, text="", font=_font(size=9),
+            text_color=NEUTRAL_DARK_GR, anchor="w")
+        self.pattern_desc_lbl.pack(side="left", padx=6)
+        self.pattern_var = tk.StringVar()
+        self.pattern_entry = ctk.CTkEntry(
+            self.pattern_row, textvariable=self.pattern_var, width=170, height=26,
+            font=_font(size=10), placeholder_text="blank = from master text")
+        self.pattern_entry.pack(side="right", padx=(6, 0))
+        self.pattern_entry.bind("<KeyRelease>",
+                                lambda _e: self._on_pattern_override_change())
+
         # Page scope and variant grouping. A header is not tied to the page it
         # was drawn on, and a mirrored layout needs more than one accepted
         # rectangle, so both live per-region rather than per-run.
-        scope_row = ctk.CTkFrame(editor_card, fg_color="transparent")
+        scope_row = self._scope_row = ctk.CTkFrame(editor_card, fg_color="transparent")
         scope_row.pack(fill="x", padx=8, pady=(0, 4))
 
         ctk.CTkLabel(scope_row, text="Check this region on:",
@@ -528,11 +653,37 @@ class RegionInspectorFrame(ctk.CTkFrame):
         ctk.CTkLabel(variant_row, text="same name on two regions = either one passes",
                      font=_font(size=9), text_color=NEUTRAL_DARK_GR).pack(side="left", padx=4)
 
+        # Per-region matching numbers. Blank means "use the defaults at the
+        # bottom of this panel", so a stylesheet stays readable: only the
+        # regions that genuinely need their own carry one.
+        tune_row = ctk.CTkFrame(editor_card, fg_color="transparent")
+        tune_row.pack(fill="x", padx=10, pady=(2, 0))
+        ctk.CTkLabel(tune_row, text="This region:", font=_font(size=10, weight="bold"),
+                     text_color=DEPENDABLE_BLUE, width=86, anchor="w").pack(side="left")
+        self.region_tune = {}
+        for key, caption, lo, hi in (("y_tolerance", "\u00b1\u0394y", 0, 150),
+                                     ("x_tolerance", "\u00b1\u0394x", 0, 150),
+                                     ("pass_threshold", "pass %", 0, 100)):
+            ctk.CTkLabel(tune_row, text=caption, font=_font(size=9),
+                         text_color=NEUTRAL_DARK_GR).pack(side="left", padx=(8, 2))
+            sp = tk.Spinbox(tune_row, from_=lo, to=hi, width=5, font=theme.get_font(9),
+                            command=lambda k=key: self._on_region_tune(k))
+            sp.bind("<KeyRelease>", lambda _e, k=key: self._on_region_tune(k))
+            sp.bind("<FocusOut>", lambda _e, k=key: self._on_region_tune(k))
+            sp.pack(side="left")
+            self.region_tune[key] = sp
+        ctk.CTkButton(tune_row, text="Use defaults", width=90, height=22,
+                      fg_color=UI_CARD_BG, text_color=DEPENDABLE_BLUE, border_width=1,
+                      border_color=UI_BORDER, font=_font(size=9),
+                      command=self._clear_region_tune).pack(side="left", padx=(10, 0))
+
         # One line. The long explanation belonged in the README, not on screen.
         self.editor_help = ctk.CTkLabel(
             editor_card,
             text=("Exact match = text must be identical  ·  Scope only = container, not scored  ·  "
-                  "Visual only = ignore text, compare the picture"),
+                  "Visual only = ignore text, compare the picture  ·  "
+                  "Present only = must be there, contents may differ (QR, barcode, doc number)  \u00b7  "
+                  "Same pattern = same shape as the master, searched across the scope (6 digits stay 6 digits)"),
             font=_font(size=9), text_color=NEUTRAL_DARK_GR,
             anchor="w", justify="left", wraplength=520)
         self.editor_help.pack(fill="x", padx=10, pady=(0, 4))
@@ -614,27 +765,27 @@ class RegionInspectorFrame(ctk.CTkFrame):
         params_card = ctk.CTkFrame(right_card, fg_color="transparent")
         params_card.pack(fill="x", padx=10, pady=2)
 
-        ctk.CTkLabel(params_card, text="Vertical Tolerance (\u00b1 \u0394y pt):", font=_font(size=10),
+        ctk.CTkLabel(params_card, text="Defaults \u2014 vertical (\u00b1 \u0394y pt):", font=_font(size=10),
                      text_color=DEPENDABLE_BLUE).pack(side="left")
         self.tol_spin = tk.Spinbox(params_card, from_=0, to=150, width=5, font=theme.get_font(9))
         self.tol_spin.delete(0, "end")
-        self.tol_spin.insert(0, str(DEFAULT_Y_TOLERANCE))
+        self.tol_spin.insert(0, f"{DEFAULT_Y_TOLERANCE:g}")
         self.tol_spin.pack(side="left", padx=6)
 
         # Translation changes line width as well as line count, so the search
         # window needs slack on both axes, not just vertically.
-        ctk.CTkLabel(params_card, text="Horizontal Tolerance (\u00b1 \u0394x pt):", font=_font(size=10),
+        ctk.CTkLabel(params_card, text="horizontal (\u00b1 \u0394x pt):", font=_font(size=10),
                      text_color=DEPENDABLE_BLUE).pack(side="left", padx=(10, 0))
         self.xtol_spin = tk.Spinbox(params_card, from_=0, to=150, width=5, font=theme.get_font(9))
         self.xtol_spin.delete(0, "end")
-        self.xtol_spin.insert(0, str(DEFAULT_X_TOLERANCE))
+        self.xtol_spin.insert(0, f"{DEFAULT_X_TOLERANCE:g}")
         self.xtol_spin.pack(side="left", padx=6)
 
-        ctk.CTkLabel(params_card, text="Pass Threshold (%):", font=_font(size=10),
+        ctk.CTkLabel(params_card, text="pass (%):", font=_font(size=10),
                      text_color=DEPENDABLE_BLUE).pack(side="left", padx=(10, 0))
         self.thresh_spin = tk.Spinbox(params_card, from_=40, to=100, width=5, font=theme.get_font(9))
         self.thresh_spin.delete(0, "end")
-        self.thresh_spin.insert(0, str(DEFAULT_PASS_THRESHOLD))
+        self.thresh_spin.insert(0, f"{DEFAULT_PASS_THRESHOLD:g}")
         self.thresh_spin.pack(side="left", padx=6)
 
         # 4. Action Buttons (Run & Open Folder)
@@ -1285,13 +1436,95 @@ class RegionInspectorFrame(ctk.CTkFrame):
     # ──────────────────────────────────────────────────────────
     # Multi-Region & Sub-Region Management with Consecutive Numbering
     # ──────────────────────────────────────────────────────────
-    def _find_enclosing_parent(self, roi_rect: tuple, page_num: int):
-        """Find if roi_rect is contained inside an existing top-level region on page_num."""
+    def _find_enclosing_parent(self, roi_rect: tuple, page_num: int, ignore_id=None):
+        """
+        The top-level region on this page that encloses roi_rect, if any.
+
+        `ignore_id` keeps a region from adopting itself, and keeps a region that
+        already has children from being adopted - nesting is one level deep, and
+        a scope that became someone's child would take its own sub-regions with
+        it.
+
+        The smallest enclosing region wins. Scopes can sit inside scopes on a
+        busy cover, and the innermost one is the one a reader means.
+        """
+        best = None
         for r in self.regions:
-            if r["page_num"] == page_num and r.get("parent_id") is None:
-                if is_rect_contained_in_parent(roi_rect, r["roi_rect"]):
-                    return r
-        return None
+            if r["page_num"] != page_num or r.get("parent_id") is not None:
+                continue
+            if ignore_id is not None and r["id"] == ignore_id:
+                continue
+            if not is_rect_contained_in_parent(roi_rect, r["roi_rect"]):
+                continue
+            if best is None or self._area(r) < self._area(best):
+                best = r
+        return best
+
+    def _reparent_after_edit(self, region):
+        """
+        Work out whether a moved or resized box has become somebody's child, or
+        stopped being one.
+
+        Parentage used to be decided once, when the box was drawn, and never
+        looked at again. That was survivable while drawing was the only way to
+        place a box; now that a box can be dragged, it is actively wrong - you
+        drag a region into a scope, it sits visibly inside it, and it is still
+        checked at its own fixed coordinates instead of being searched for
+        anywhere within the scope. Nothing on screen said otherwise.
+
+        Returns a short description of what changed, or "" if nothing did.
+        """
+        if region is None:
+            return ""
+
+        # Children first: reshaping a scope can push one of them out of it.
+        orphaned = 0
+        for child in [r for r in self.regions if r.get("parent_id") == region["id"]]:
+            if not is_rect_contained_in_parent(child["roi_rect"], region["roi_rect"]):
+                child["parent_id"] = None
+                orphaned += 1
+        if orphaned:
+            self._reindex_and_renumber_regions()
+            self.active_region_id = region["id"]
+            return (f"{orphaned} sub-region(s) no longer fit inside it and are "
+                    f"now checked on their own")
+
+        # A region that has children of its own cannot become a child.
+        has_children = any(r.get("parent_id") == region["id"] for r in self.regions)
+        old_parent_id = region.get("parent_id")
+
+        parent = None
+        if not has_children:
+            parent = self._find_enclosing_parent(
+                region["roi_rect"], region["page_num"], ignore_id=region["id"])
+        new_parent_id = parent["id"] if parent else None
+
+        if new_parent_id == old_parent_id:
+            return ""
+
+        old_parent = next((r for r in self.regions if r["id"] == old_parent_id), None)
+        region["parent_id"] = new_parent_id
+
+        # Renumbering reassigns ids, so the selection has to be recovered from
+        # the object rather than the number it used to have.
+        self._reindex_and_renumber_regions()
+        self.active_region_id = region["id"]
+
+        if new_parent_id is not None:
+            # Being a sub-region is not by itself a scoped search. The scoped
+            # search - find this text ANYWHERE inside the parent - is what
+            # Exact match turns on for a child; without it the box is still
+            # checked where it sits. Saying "searched anywhere inside it" for
+            # every child would be the same false reassurance the user just
+            # spent an afternoon discovering.
+            if region.get("exact_match"):
+                return (f"sub-region of “{parent['label']}” — its text is "
+                        f"searched for anywhere inside that scope")
+            return (f"sub-region of “{parent['label']}” — tick Exact match to "
+                    f"search for it anywhere in that scope instead of at fixed "
+                    f"coordinates")
+        return (f"no longer inside “{old_parent['label']}” — "
+                f"checked at its own coordinates again") if old_parent else ""
 
     def _reindex_and_renumber_regions(self):
         """
@@ -1356,6 +1589,9 @@ class RegionInspectorFrame(ctk.CTkFrame):
             "exact_match": False,
             "dont_compare_text": False,
             "scope_only": False,
+            "presence_only": False,
+            "pattern_match": False,
+            "pattern": None,
             "page_scope": default_scope(p_num, is_last),
             "variant_group": None,
             "color": REGION_COLORS[len(self.regions) % len(REGION_COLORS)],
@@ -1554,6 +1790,14 @@ class RegionInspectorFrame(ctk.CTkFrame):
         return raw
 
     def _get_match_type_string(self, r: dict) -> str:
+        if r.get("pattern_match", False):
+            # Says WHERE as well as WHAT: a pattern is looked for across the
+            # whole parent scope, because the token it matches moves.
+            parent = next((x for x in self.regions
+                           if x["id"] == r.get("parent_id")), None)
+            return f"Pattern in {parent['label']}" if parent else "Same pattern"
+        if r.get("presence_only", False):
+            return "Present only"
         if r.get("scope_only", False):
             return "Scope Only (not compared)"
         if r.get("dont_compare_text", False):
@@ -1598,6 +1842,10 @@ class RegionInspectorFrame(ctk.CTkFrame):
                 self.exact_match_var.set(active_r.get("exact_match", False))
                 self.dont_compare_text_var.set(active_r.get("dont_compare_text", False))
                 self.scope_only_var.set(active_r.get("scope_only", False))
+                self.presence_only_var.set(active_r.get("presence_only", False))
+                self.pattern_match_var.set(active_r.get("pattern_match", False))
+                self._sync_pattern_row(active_r)
+                self._sync_region_tune(active_r)
                 self._sync_scope_controls(active_r)
                 x0, y0, x1, y1 = active_r["roi_rect"]
                 self.coords_lbl.configure(text=f"x: {x0:.1f} \u2192 {x1:.1f}, y: {y0:.1f} \u2192 {y1:.1f}")
@@ -1614,6 +1862,10 @@ class RegionInspectorFrame(ctk.CTkFrame):
                 self.exact_match_var.set(False)
                 self.dont_compare_text_var.set(False)
                 self.scope_only_var.set(False)
+                self.presence_only_var.set(False)
+                self.pattern_match_var.set(False)
+                self._sync_pattern_row(None)
+                self._sync_region_tune(None)
                 self._sync_scope_controls(None)
                 self.coords_lbl.configure(text="No region selected")
                 self._text_box_readonly = True
@@ -1668,6 +1920,10 @@ class RegionInspectorFrame(ctk.CTkFrame):
                 self.exact_match_var.set(active_r.get("exact_match", False))
                 self.dont_compare_text_var.set(active_r.get("dont_compare_text", False))
                 self.scope_only_var.set(active_r.get("scope_only", False))
+                self.presence_only_var.set(active_r.get("presence_only", False))
+                self.pattern_match_var.set(active_r.get("pattern_match", False))
+                self._sync_pattern_row(active_r)
+                self._sync_region_tune(active_r)
                 self._sync_scope_controls(active_r)
                 x0, y0, x1, y1 = active_r["roi_rect"]
                 self.coords_lbl.configure(text=f"x: {x0:.1f} \u2192 {x1:.1f}, y: {y0:.1f} \u2192 {y1:.1f}")
@@ -1809,8 +2065,9 @@ class RegionInspectorFrame(ctk.CTkFrame):
         # WHERE ON IT the box goes. Neither can come from the stored numbers:
         # a region saved as "last page, page 20" was drawn on a 20-page manual,
         # and a rectangle saved on A5 is in the wrong place on A3.
-        page_size = ((self.page_width_pt, self.page_height_pt)
-                     if self.page_width_pt and self.page_height_pt else None)
+        # Read off the document being loaded, never off the canvas: the canvas
+        # is still showing the last one. See _page_size_pt.
+        page_size = self._page_size_pt(1)
         total = self.total_pages or 0
 
         self.regions = []
@@ -1835,7 +2092,10 @@ class RegionInspectorFrame(ctk.CTkFrame):
                     r["page_num"] = want
                     r["is_last_page"] = (want == total)
 
-            placed = templates_store.geometry_for_page(r, page_size)
+            # Each region is placed against the size of ITS OWN page.
+            own_size = self._page_size_pt(r.get("page_num") or 1) or page_size
+            placed = templates_store.geometry_for_page(r, own_size)
+            placed = _clamped_to_page(placed, own_size)
             if placed and list(map(lambda v: round(float(v), 1), placed)) != \
                     list(map(lambda v: round(float(v), 1), r.get("roi_rect") or [])):
                 moved_geometry += 1
@@ -2072,6 +2332,189 @@ class RegionInspectorFrame(ctk.CTkFrame):
         else:
             messagebox.showerror("Delete Failed", f"Could not delete '{name}'.")
 
+    def _on_region_tune(self, key):
+        """A per-region tolerance or threshold was typed in."""
+        if self._updating_selection:
+            return
+        r = self._get_active_region()
+        if r is None:
+            return
+        raw = self.region_tune[key].get().strip()
+        if raw == "":
+            r.pop(key, None)                     # blank = inherit the default
+        else:
+            try:
+                r[key] = float(raw)
+            except ValueError:
+                return
+        self._refresh_region_row(r)
+
+    def _clear_region_tune(self):
+        """Hand this region back to the run-wide defaults."""
+        r = self._get_active_region()
+        if r is None:
+            return
+        for key in ("y_tolerance", "x_tolerance", "pass_threshold"):
+            r.pop(key, None)
+        self._sync_region_tune(r)
+        self._refresh_region_row(r)
+        self.status_lbl.configure(
+            text=f"{r['label']} • using the run defaults again",
+            text_color=theme.TEXT_ATTENTION)
+
+    def _sync_region_tune(self, r):
+        """
+        Show this region's own numbers, or the inherited ones greyed in.
+
+        An empty box means "inherit"; the placeholder shows what would be
+        inherited, so the panel never leaves the user guessing what a blank
+        field actually does.
+        """
+        self._updating_selection = True
+        try:
+            fallbacks = {"y_tolerance": self._safe_spin(self.tol_spin, DEFAULT_Y_TOLERANCE),
+                         "x_tolerance": self._safe_spin(self.xtol_spin, DEFAULT_X_TOLERANCE),
+                         "pass_threshold": self._safe_spin(self.thresh_spin, DEFAULT_PASS_THRESHOLD)}
+            for key, sp in self.region_tune.items():
+                sp.delete(0, "end")
+                if r is not None and r.get(key) is not None:
+                    sp.insert(0, f"{float(r[key]):g}")
+                else:
+                    sp.insert(0, f"{fallbacks[key]:g}")
+        except Exception:
+            pass
+        finally:
+            self._updating_selection = False
+
+    @staticmethod
+    def _safe_spin(spin, fallback):
+        try:
+            return float(spin.get())
+        except Exception:
+            return float(fallback)
+
+    def _mode_vars(self):
+        """The five match-mode ticks, by the key each one writes."""
+        return {"exact_match": self.exact_match_var,
+                "scope_only": self.scope_only_var,
+                "dont_compare_text": self.dont_compare_text_var,
+                "presence_only": self.presence_only_var,
+                "pattern_match": self.pattern_match_var}
+
+    def _set_match_mode(self, r, mode, is_checked):
+        """
+        Turn one match mode on and every other one off.
+
+        The exclusion used to be written out inside each handler, which meant
+        adding a fifth mode would have needed four edits in four places to stay
+        correct - and one of them would have been missed.
+        """
+        r[mode] = bool(is_checked)
+        if is_checked:
+            for key, var in self._mode_vars().items():
+                if key != mode:
+                    r[key] = False
+                    var.set(False)
+        self._refresh_region_row(r)
+        self._sync_pattern_row(r)
+
+    def _sync_pattern_row(self, r):
+        """Show the pattern line, and what the master's text works out to."""
+        on = bool(r and r.get("pattern_match"))
+        if not on:
+            self.pattern_row.pack_forget()
+            return
+        self.pattern_row.pack(fill="x", padx=8, pady=(0, 2), before=self._scope_row)
+        self._updating_selection = True
+        try:
+            self.pattern_var.set(r.get("pattern") or "")
+        finally:
+            self._updating_selection = False
+        custom = (r.get("pattern") or "").strip()
+        if custom:
+            self.pattern_desc_lbl.configure(text=f"your own: {custom}")
+            return
+        source = r.get("expected_text")
+        if source is None:
+            source = r.get("master_text") or r.get("eng_text") or ""
+        if not source.strip():
+            # Nothing cached yet - a region drawn a moment ago, or a stylesheet
+            # opened against a different master. Read the master itself, which
+            # is what the run will do anyway, rather than showing the user a
+            # pattern line that says the box is empty when it plainly is not.
+            try:
+                with fitz.open(self.eng_pdf_path) as doc:
+                    source = extract_roi_text(doc, r["page_num"], r["roi_rect"]) or ""
+            except Exception:
+                source = ""
+        _regex, desc = derive_pattern(source)
+        text = (f"from “{' '.join(source.split())[:28]}” → {desc}"
+                if _regex else desc)
+        self.pattern_desc_lbl.configure(text=text)
+
+    def _on_pattern_match_toggle(self):
+        """
+        "It must have the same SHAPE, wherever it sits in the scope."
+
+        Between Present only (something is there) and Exact (the same
+        characters): six digits stay six digits, two letters stay two letters,
+        and the run lengths have to match exactly - that is the whole point of
+        checking a pattern instead of just checking for ink.
+        """
+        active_r = self._get_active_region()
+        if not active_r:
+            return
+        is_checked = self.pattern_match_var.get()
+        self._set_match_mode(active_r, "pattern_match", is_checked)
+        shape = self.pattern_desc_lbl.cget("text") if is_checked else ""
+        parent = next((r for r in self.regions
+                       if r["id"] == active_r.get("parent_id")), None)
+        where = f" anywhere inside “{parent['label']}”" if parent else " in place"
+        self.status_lbl.configure(
+            text=(f"{active_r['label']} • same pattern{where} — {shape}"
+                  if is_checked else
+                  f"{active_r['label']} • back to being compared"),
+            text_color=theme.TEXT_ATTENTION)
+        self._draw_all_rois_on_canvas()
+
+    def _on_pattern_override_change(self):
+        """A hand-written pattern beats the derived one, blank goes back to it."""
+        if getattr(self, "_updating_selection", False):
+            return
+        active_r = self._get_active_region()
+        if not active_r:
+            return
+        typed = self.pattern_var.get().strip()
+        active_r["pattern"] = typed or None
+        if typed:
+            try:
+                re.compile(typed)
+                self.pattern_desc_lbl.configure(text=f"your own: {typed}")
+            except re.error as e:
+                self.pattern_desc_lbl.configure(text=f"not a valid pattern — {e}")
+        else:
+            self._sync_pattern_row(active_r)
+
+    def _on_presence_only_toggle(self):
+        """
+        "It must be there; its contents may differ."
+
+        Mutually exclusive with the other modes, because it answers a different
+        question from all of them: not "is it the same" but "is it still there".
+        """
+        active_r = self._get_active_region()
+        if not active_r:
+            return
+        is_checked = self.presence_only_var.get()
+        self._set_match_mode(active_r, "presence_only", is_checked)
+        self.status_lbl.configure(
+            text=(f"{active_r['label']} • checked for presence only — a code or "
+                  f"a number that differs per language will no longer be scored "
+                  f"on how it looks" if is_checked else
+                  f"{active_r['label']} • back to being compared"),
+            text_color=theme.TEXT_ATTENTION)
+        self._draw_all_rois_on_canvas()
+
     def _on_scope_only_toggle(self):
         """
         Mark a region as a container only.
@@ -2084,64 +2527,33 @@ class RegionInspectorFrame(ctk.CTkFrame):
         """
         active_r = self._get_active_region()
         if active_r:
-            is_checked = self.scope_only_var.get()
-            active_r["scope_only"] = is_checked
-            if is_checked:
-                active_r["exact_match"] = False
-                active_r["dont_compare_text"] = False
-                self.exact_match_var.set(False)
-                self.dont_compare_text_var.set(False)
-
-            if self.region_tree.exists(str(active_r["id"])):
-                x0, y0, x1, y1 = active_r["roi_rect"]
-                type_str = self._get_match_type_string(active_r)
-                display_lbl = f"  \u21b3 {active_r['label']}" if active_r.get("parent_id") is not None else active_r["label"]
-                self.region_tree.item(str(active_r["id"]), values=(
-                        display_lbl, self._page_cell(active_r), type_str,
-                        self._text_cell(active_r),
-                        f"[{x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f}]"))
+            self._set_match_mode(active_r, "scope_only", self.scope_only_var.get())
             self._draw_all_rois_on_canvas()
 
     def _on_exact_match_toggle(self):
         active_r = self._get_active_region()
         if active_r:
             is_checked = self.exact_match_var.get()
-            active_r["exact_match"] = is_checked
-            if is_checked:
-                active_r["dont_compare_text"] = False
-                active_r["scope_only"] = False
-                self.dont_compare_text_var.set(False)
-                self.scope_only_var.set(False)
+            self._set_match_mode(active_r, "exact_match", is_checked)
 
-            if self.region_tree.exists(str(active_r["id"])):
-                x0, y0, x1, y1 = active_r["roi_rect"]
-                type_str = self._get_match_type_string(active_r)
-                display_lbl = f"  ↳ {active_r['label']}" if active_r.get("parent_id") is not None else active_r["label"]
-                self.region_tree.item(str(active_r["id"]), values=(
-                        display_lbl, self._page_cell(active_r), type_str,
-                        self._text_cell(active_r),
-                        f"[{x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f}]"))
+            # Close the loop: this is the tick that turns a sub-region into a
+            # scoped search, and saying so is the only way to know it happened.
+            parent = next((r for r in self.regions
+                           if r["id"] == active_r.get("parent_id")), None)
+            if parent is not None:
+                self.status_lbl.configure(
+                    text=(f"{active_r['label']} • searched for anywhere inside "
+                          f"“{parent['label']}”" if is_checked else
+                          f"{active_r['label']} • back to a fixed position inside "
+                          f"“{parent['label']}”"),
+                    text_color=theme.TEXT_ATTENTION)
             self._draw_all_rois_on_canvas()
 
     def _on_dont_compare_text_toggle(self):
         active_r = self._get_active_region()
         if active_r:
-            is_checked = self.dont_compare_text_var.get()
-            active_r["dont_compare_text"] = is_checked
-            if is_checked:
-                active_r["exact_match"] = False
-                active_r["scope_only"] = False
-                self.exact_match_var.set(False)
-                self.scope_only_var.set(False)
-
-            if self.region_tree.exists(str(active_r["id"])):
-                x0, y0, x1, y1 = active_r["roi_rect"]
-                type_str = self._get_match_type_string(active_r)
-                display_lbl = f"  ↳ {active_r['label']}" if active_r.get("parent_id") is not None else active_r["label"]
-                self.region_tree.item(str(active_r["id"]), values=(
-                        display_lbl, self._page_cell(active_r), type_str,
-                        self._text_cell(active_r),
-                        f"[{x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f}]"))
+            self._set_match_mode(active_r, "dont_compare_text",
+                                 self.dont_compare_text_var.get())
             self._draw_all_rois_on_canvas()
 
     # ──────────────────────────────────────────────────────────
@@ -2397,7 +2809,27 @@ class RegionInspectorFrame(ctk.CTkFrame):
                 ny1 = max(y0 + MIN_REGION_PT, y1 + dy)
             new = (max(0.0, nx0), max(0.0, ny0), min(pw, nx1), min(ph, ny1))
 
+        old = tuple(r["roi_rect"])
         r["roi_rect"] = tuple(round(v, 1) for v in new)
+
+        # Moving a scope takes its sub-regions with it. They are positions
+        # inside that scope, not independent boxes, so leaving them behind
+        # would drop every one of them out of their parent the moment it was
+        # nudged. A resize does not drag them - the scope is being reshaped
+        # around them, and any that no longer fit are re-checked on release.
+        if self._edit_corner is None:
+            # From the unrounded move, not from the rounded rectangle: rounding
+            # the parent first and then diffing loses up to a point per drag,
+            # and enough drags would walk a child out of its own parent.
+            shift_x = new[0] - old[0]
+            shift_y = new[1] - old[1]
+            if shift_x or shift_y:
+                for child in self.regions:
+                    if child.get("parent_id") == r["id"]:
+                        cx0, cy0, cx1, cy1 = child["roi_rect"]
+                        child["roi_rect"] = (round(cx0 + shift_x, 1), round(cy0 + shift_y, 1),
+                                             round(cx1 + shift_x, 1), round(cy1 + shift_y, 1))
+
         self._draw_all_rois_on_canvas()
 
     def _on_canvas_drag(self, event):
@@ -2453,11 +2885,18 @@ class RegionInspectorFrame(ctk.CTkFrame):
                             doc_eng, r["page_num"], r["roi_rect"])
                 except Exception:
                     pass
+                # Dragging a box into a scope is how a person says "this belongs
+                # inside that", so the nesting is worked out again here rather
+                # than only when the box was first drawn.
+                nesting = self._reparent_after_edit(r)
                 x0, y0, x1, y1 = r["roi_rect"]
+                where = (f"{x1 - x0:.0f} × {y1 - y0:.0f} pt at {x0:.0f}, {y0:.0f}")
+                sheet = templates_store.sheet_key(
+                    (self.page_width_pt, self.page_height_pt))
                 self.status_lbl.configure(
-                    text=f"{r['label']} • {x1 - x0:.0f} × {y1 - y0:.0f} pt at "
-                         f"{x0:.0f}, {y0:.0f} • Save As… to keep this for "
-                         f"{templates_store.sheet_key((self.page_width_pt, self.page_height_pt))}",
+                    text=(f"{r['label']} • {nesting} • Save As… to keep this"
+                          if nesting else
+                          f"{r['label']} • {where} • Save As… to keep this for {sheet}"),
                     text_color=theme.TEXT_ATTENTION)
             self._sync_regions_table()
             self._update_region_preview(r)

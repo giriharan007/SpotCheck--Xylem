@@ -38,6 +38,21 @@ def _acceptable(key, value):
         return isinstance(value, dict)
     return isinstance(value, str)
 
+def is_master_path(value):
+    """
+    Is this a usable English master path?
+
+    Either form counts: the PDF itself, or the folder holding it. The master
+    used to be picked as a file and the check here was os.path.isfile, so when
+    the picker moved to folder level the remembered path stopped being saved
+    AND stopped being restored - the field came up blank every launch and the
+    Region Inspector had nothing to open. One predicate, used by the store and
+    by the window, so the two can never disagree about it again.
+    """
+    value = (value or "").strip()
+    return bool(value) and (os.path.isfile(value) or os.path.isdir(value))
+
+
 _settings_path = None
 
 
@@ -129,7 +144,7 @@ def load_paths():
         out["template"] = data["template"]
     if isinstance(data.get("margins"), dict):
         out["margins"] = data["margins"]
-    for key, check in (("english_pdf", os.path.isfile),
+    for key, check in (("english_pdf", is_master_path),
                        ("translated_dir", os.path.exists),
                        ("output_dir", os.path.isdir)):
         val = (data.get(key) or "").strip()

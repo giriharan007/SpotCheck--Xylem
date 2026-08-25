@@ -47,6 +47,8 @@ all_hiddenimports = [
     'core.templates',
     'core.page_diff',
     'core.region_engine',
+    'core.text_overlap',
+    'core.untranslated',
     'gui',
     'gui.theme',
     'gui.app_window',
@@ -54,6 +56,12 @@ all_hiddenimports = [
     'gui.comparison_gallery',
     'gui.page_diff_view',
     'gui.metadata_tab',
+    # Every tab is imported inside a try/except in _build_*_tab, so a module
+    # the analysis missed would not crash the build OR the application - the
+    # tab would just quietly say it was unavailable, and the feature would be
+    # gone from the shipped exe with nothing in the log. Naming them costs
+    # nothing and removes that failure mode.
+    'gui.text_checks_tab',
 ]
 
 all_datas = []
@@ -160,8 +168,16 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    console=False,  # Set to False for clean GUI mode (no black cmd window)
+    # UPX is OFF on purpose. It mangles some Windows DLLs - libzbar-64.dll and
+    # the VC runtime among them - and the failure does not appear at build
+    # time: the exe is produced, looks fine, and then dies on a machine that is
+    # not the one it was built on. The folder is a few tens of MB larger. That
+    # is the better trade for something being handed to other people.
+    upx=False,
+    # A GUI build with no console: a crash before the window opens leaves the
+    # user with nothing at all. Set SPOTCHECK_DEBUG_BUILD=1 before building to
+    # get a console window that shows the traceback.
+    console=bool(os.environ.get('SPOTCHECK_DEBUG_BUILD')),
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
@@ -176,7 +192,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name='SpotCheck',
 )
@@ -188,4 +204,3 @@ if sys.platform == 'darwin':
         icon=None,
         bundle_identifier='com.xylem.spotcheck',
     )
-

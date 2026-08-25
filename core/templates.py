@@ -102,6 +102,24 @@ REGION_FIELDS = (
     # Which edges the region belongs to, so one stylesheet can be used at
     # several trim sizes. See "ONE STYLESHEET, SEVERAL SHEET SIZES" below.
     "anchor", "rects_by_sheet", "scale_with_page",
+    # Per-region matching. Each is None to inherit the value on screen, so a
+    # stylesheet only records the regions that genuinely need their own.
+    # A footer code has to sit exactly where it sits; a paragraph that reflows
+    # needs slack. One pair of numbers for the whole document could only ever
+    # be a compromise between the two.
+    "x_tolerance", "y_tolerance", "pass_threshold",
+    # "Must be there, contents may differ" - a QR whose URL is language
+    # specific, a barcode, a document number. Presence is the only question
+    # that has a true answer for these.
+    "presence_only",
+    # "Must have the SAME SHAPE, not the same characters" - a document number
+    # that is six digits here and six different digits there, a two-letter
+    # language code that is two different letters. The shape is read off the
+    # master's own text (see derive_pattern) so nothing has to be configured;
+    # "pattern" is only written when the user overrode that derivation.
+    # Searched across the parent scope, because the token moves.
+    "pattern_match",
+    "pattern",
     # The text side of a region, in two parts.
     #
     # master_text is ALWAYS written: whatever was clipped out of the master when
@@ -462,6 +480,25 @@ def _clean_region(r, seq, page_size=None):
     out["parent_id"] = r.get("parent_id")
     out["variant_group"] = (r.get("variant_group") or "").strip() or None
     out["scale_with_page"] = bool(r.get("scale_with_page"))
+    out["presence_only"] = bool(r.get("presence_only"))
+    out["pattern_match"] = bool(r.get("pattern_match"))
+    # Only carried when the user typed one. A derived pattern is not stored:
+    # it is re-read from the master every run, so correcting the master
+    # corrects the check instead of leaving a stale regex behind.
+    custom = (r.get("pattern") or "").strip()
+    if custom:
+        out["pattern"] = custom
+    else:
+        out.pop("pattern", None)
+    for key in ("x_tolerance", "y_tolerance", "pass_threshold"):
+        val = r.get(key)
+        if val is None or val == "":
+            out.pop(key, None)          # inherit whatever the run is set to
+        else:
+            try:
+                out[key] = round(float(val), 2)
+            except (TypeError, ValueError):
+                out.pop(key, None)
     by_sheet = r.get("rects_by_sheet") or {}
     out["rects_by_sheet"] = {str(k): [round(float(v), 2) for v in rect]
                              for k, rect in by_sheet.items() if rect}

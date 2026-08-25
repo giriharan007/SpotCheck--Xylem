@@ -90,6 +90,7 @@ TAB_INSPECTION = "  Inspection  "
 TAB_REGION = "  Region Inspector  "
 TAB_METADATA = "  Meta Data  "
 TAB_COMPARISONS = "  Review  "
+TAB_TEXT_CHECKS = "  Text Checks  "
 
 
 # ──────────────────────────────────────────────────────────────
@@ -178,12 +179,12 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 **theme.tabview_colors(),
             )
             self.tabview.pack(fill="both", expand=True, padx=10, pady=(8, 10))
-            # Review sits next to Inspection: those two are the run-and-read
-            # pair a reviewer lives in, while the Region Inspector and Meta Data
-            # are set-up tabs visited far less often.
+            # Left to right in the order the work happens: configure the run,
+            # set up the stylesheet, read the results, look at the documents.
             self._tab_inspection = self.tabview.add(TAB_INSPECTION)
-            self._tab_comparisons = self.tabview.add(TAB_COMPARISONS)
             self._tab_region = self.tabview.add(TAB_REGION)
+            self._tab_text_checks = self.tabview.add(TAB_TEXT_CHECKS)
+            self._tab_comparisons = self.tabview.add(TAB_COMPARISONS)
             self._tab_metadata = self.tabview.add(TAB_METADATA)
             self._body = self._tab_inspection
         else:
@@ -193,6 +194,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
 
         if HAS_CTK:
             self._build_region_tab()
+            self._build_text_checks_tab()
             self._build_metadata_tab()
             self._build_comparisons_tab()
             self._watch_paths()
@@ -969,6 +971,21 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                     self.comparison_gallery.load_region_results(regions)
                 except Exception as e:
                     print(f"[WARN] Could not publish region results: {e}")
+            # The run does the text checks too, so the tab shows what the run
+            # found rather than making the user scan the same documents again.
+            overlaps = self.last_run_results.get("overlap_results") or []
+            missed = self.last_run_results.get("untranslated_results") or []
+            if getattr(self, "text_checks_tab", None) is not None:
+                try:
+                    self.text_checks_tab.show_results(overlaps, missed)
+                except Exception as e:
+                    print(f"[WARN] Could not publish text checks: {e}")
+            if (overlaps or missed) and self.comparison_gallery is not None:
+                try:
+                    self.comparison_gallery.load_text_checks(overlaps, missed)
+                except Exception as e:
+                    print(f"[WARN] Could not publish text checks to the gallery: {e}")
+
             rows = self.last_run_results.get("metadata_rows") or []
             if rows and self.metadata_tab is not None:
                 try:
@@ -1225,7 +1242,10 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         tr = self.tr_dir_var.get().strip().strip('"').strip("'")
         out = self.out_dir_var.get().strip().strip('"').strip("'")
         settings.save_paths(
-            english_pdf=eng if eng and os.path.isfile(eng) else None,
+            # The master may be given either way round - the folder holding it,
+            # which is what the picker offers, or the PDF itself, which is what
+            # a pasted path and every older settings file look like.
+            english_pdf=eng if settings.is_master_path(eng) else None,
             translated_dir=tr if tr and os.path.exists(tr) else None,
             output_dir=out if out and os.path.isdir(out) else None,
         )
@@ -1305,6 +1325,50 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             print(f"[Region Inspector] Loaded {os.path.basename(eng)}")
         except Exception as e:
             print(f"[WARN] Could not load master into the Region Inspector: {e}")
+
+    def _build_text_checks_tab(self):
+        """
+        Colliding text, and English left in a translation.
+
+        Neither question is about a place on the page, so neither belongs in the
+        region stylesheet: a collision happens wherever a line runs long, and a
+        missed segment is wherever the translator's eye slipped.
+        """
+        try:
+            from gui.text_checks_tab import TextChecksFrame
+            self.text_checks_tab = TextChecksFrame(
+                self._tab_text_checks,
+                get_documents=self._text_check_documents,
+                get_margins=self._active_margins,
+                get_output_dir=lambda: (self.out_dir_var.get() or "").strip(),
+                on_results=self._on_text_check_results,
+            )
+            self.text_checks_tab.pack(fill="both", expand=True)
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[ERROR] Failed to build Text Checks tab: {e}\n{tb}")
+            self.text_checks_tab = None
+            ctk.CTkLabel(
+                self._tab_text_checks,
+                text=f"Text checks unavailable:\n{e}",
+                font=self._get_font(12), text_color=VIVID_MAGENTA, justify="left",
+            ).pack(padx=20, pady=20, anchor="w")
+
+    def _text_check_documents(self):
+        """(master, [translations]) - the overlap check reads both sides."""
+        docs = self._documents_in_scope()
+        if not docs:
+            return None, []
+        return docs[0], docs[1:]
+
+    def _on_text_check_results(self, overlaps, missed):
+        """Hand the findings to the Review tab, where they get worked through."""
+        if getattr(self, "comparison_gallery", None) is None:
+            return
+        try:
+            self.comparison_gallery.load_text_checks(overlaps, missed)
+        except Exception as e:
+            print(f"[WARN] Could not show text checks in the Review tab: {e}")
 
     def _build_metadata_tab(self):
         """Embed the document metadata tab beside the Region Inspector."""

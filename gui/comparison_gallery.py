@@ -52,6 +52,8 @@ from gui.theme import (
 
 SOURCE_REGIONS = "Region Checks"
 SOURCE_CROPS = "Images"
+SOURCE_OVERLAP = "Overlap"
+SOURCE_UNTRANSLATED = "Not Translated"
 
 FILTER_ALL = "All"
 FILTER_PASS = "Passed"
@@ -165,6 +167,64 @@ def cards_from_crop_details(details):
     return rows
 
 
+def cards_from_overlaps(findings):
+    """
+    Colliding text, as gallery rows.
+
+    Every one of these is a defect - there is no "passed" overlap - so they all
+    carry passed=False and land under Needs Review, which is where a reviewer
+    looks first. The master is a legitimate target here: an overrun caption in
+    the English original is still an overrun caption.
+    """
+    rows = []
+    for f in findings or []:
+        texts = f.get("texts") or [f.get("text_a", ""), f.get("text_b", "")]
+        rows.append({
+            "source": SOURCE_OVERLAP,
+            "title": f"Overlap · page {f.get('page', '?')}",
+            # No master side: the finding is about one document, which may be
+            # the master itself. "(master) Page —" would be a lie by layout.
+            "eng_name": "—",
+            "eng_page": "—",
+            "tr_name": f.get("document", ""),
+            "tr_page": f.get("page", "-"),
+            "status": f"{f.get('pairs', 1)} COLLISION(S)",
+            "passed": False,
+            "score": f"{f.get('overlap_pt2', 0):.0f} pt²",
+            "detail": "  ✕  ".join(texts)[:300] + "\n" + (f.get("why", "") or ""),
+            "shift": 0.0,
+            "image": f.get("image", ""),
+            "roi_rect": f.get("rect"),
+            # Which document to open, since the row names a file rather than a
+            # master/translation pair.
+            "self_path": f.get("path", ""),
+        })
+    return rows
+
+
+def cards_from_untranslated(findings):
+    """English left in a translation, as gallery rows."""
+    rows = []
+    for f in findings or []:
+        rows.append({
+            "source": SOURCE_UNTRANSLATED,
+            "title": (f.get("text") or "")[:60] or "untranslated",
+            "eng_name": "—",
+            "eng_page": "—",
+            "tr_name": f.get("document", ""),
+            "tr_page": f.get("page", "-"),
+            "status": (f.get("reason", "") or "").upper(),
+            "passed": False,
+            "score": f"{f.get('density', 0):.2f}",
+            "detail": f.get("text", ""),
+            "shift": 0.0,
+            "image": f.get("image", ""),
+            "roi_rect": f.get("rect"),
+            "self_path": f.get("path", ""),
+        })
+    return rows
+
+
 class ComparisonGalleryFrame(ctk.CTkFrame):
     """Verdict-segregated list of comparisons with a single-image preview."""
 
@@ -242,7 +302,9 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         ctk.CTkLabel(controls, text="Source:", font=self._f(10, "bold"),
                      text_color=DEPENDABLE_BLUE).pack(side="left", padx=(12, 4), pady=8)
         self.source_sel = ctk.CTkSegmentedButton(
-            controls, values=[SOURCE_REGIONS, SOURCE_CROPS], font=self._f(10),
+            controls,
+            values=[SOURCE_REGIONS, SOURCE_CROPS, SOURCE_OVERLAP, SOURCE_UNTRANSLATED],
+            font=self._f(10),
             command=self._on_source_change, **theme.segmented_button_colors())
         self.source_sel.set(SOURCE_REGIONS)
         self.source_sel.pack(side="left", padx=4, pady=8)
@@ -581,6 +643,22 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         self.source_sel.set(SOURCE_CROPS)
         self._refresh_list()
 
+    def load_text_checks(self, overlaps, untranslated_rows):
+        """Both text checks at once - they are produced by one scan."""
+        self._replace(SOURCE_OVERLAP, cards_from_overlaps(overlaps))
+        self._replace(SOURCE_UNTRANSLATED, cards_from_untranslated(untranslated_rows))
+        # Show whichever of the two actually found something, the way a run
+        # switches to its own results. Landing on an empty Overlap list after a
+        # scan that found three untranslated lines reads as "nothing found".
+        if overlaps:
+            self._source = SOURCE_OVERLAP
+        elif untranslated_rows:
+            self._source = SOURCE_UNTRANSLATED
+        else:
+            self._source = SOURCE_OVERLAP
+        self.source_sel.set(self._source)
+        self._refresh_list()
+
     def _replace(self, source, rows):
         self._all_rows = [r for r in self._all_rows if r["source"] != source] + rows
 
@@ -635,6 +713,17 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
             return
 
         master_pdf, trans_pdf = self._resolve_paths(row)
+
+        # A text-check row names ONE document - the manual the collision or the
+        # English leftover is in - and that document may be the master itself.
+        # Put it on the right, where the flagged page and its highlight belong,
+        # and the English original on the left to read the passage against.
+        own = row.get("self_path") or ""
+        if own and os.path.isfile(own):
+            trans_pdf = own
+            if not master_pdf or os.path.abspath(master_pdf) == os.path.abspath(own):
+                master_pdf = own
+
         if not master_pdf or not trans_pdf:
             messagebox.showwarning(
                 "Documents Not Found",
@@ -651,7 +740,9 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
             except (TypeError, ValueError):
                 return default
 
-        eng_page = _page(row.get("eng_page"))
+        # "—" for a text-check row: it has one page, not a pair. Open the same
+        # number on the left so the two sides start off aligned.
+        eng_page = _page(row.get("eng_page"), _page(row.get("tr_page")))
 
         # Where to look in the translation when the result itself does not say -
         # a graphic reported NOT FOUND, for instance. Falling back to the same

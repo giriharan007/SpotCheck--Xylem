@@ -34,6 +34,8 @@ from core import margins as PageMargins
 from core import docscan as DocScan
 from core import metadata as MetaData
 from core import region_engine as RegionEngine
+from core import text_overlap as TextOverlap
+from core import untranslated as Untranslated
 
 
 # ============================================================
@@ -50,7 +52,9 @@ def generate_unified_excel_report(
     run_margins=None,
     metadata_rows=None,
     region_results=None,
-    region_note=""
+    region_note="",
+    overlap_results=None,
+    untranslated_results=None
 ):
     """
     Generate ONE single unified Excel report containing 5 worksheets:
@@ -61,7 +65,16 @@ def generate_unified_excel_report(
       5. Image Counts: Symmetric per-topic counts - catches a graphic added to or
                        missing from a translation, which one-directional crop
                        matching cannot see
+      6. Text Overlap: Text printed through other text, in any document
+      7. Not Translated: English left behind in a translation
     """
+    overlap_results = overlap_results or []
+    untranslated_results = untranslated_results or []
+
+    def _count_for(name):
+        """How many of each text finding belong to one document."""
+        return (sum(1 for f in overlap_results if f.get("document") == name),
+                sum(1 for f in untranslated_results if f.get("document") == name))
     wb = openpyxl.Workbook()
 
     # Common Styles
@@ -94,6 +107,8 @@ def generate_unified_excel_report(
         "Images",
         "Image Counts",
         "Barcode & QR",
+        "Text Overlap",
+        "Not Translated",
         "Master Verdict",
     ]
     ws_overview.append(headers_overview)
@@ -108,11 +123,21 @@ def generate_unified_excel_report(
         img_status = img_res["overall_status"]
         cnt_status = count_results[i]["overall_verdict"]
 
+        # Colliding text and untranslated English are defects like any other,
+        # so they carry the master verdict down with them. A manual that reads
+        # PASS while a sentence of English sits in the middle of it is a report
+        # nobody can act on.
+        n_overlap, n_untranslated = _count_for(toc_res["translated_pdf"])
+        overlap_status = "PASS" if not n_overlap else f"FAIL ({n_overlap})"
+        untr_status = "PASS" if not n_untranslated else f"FAIL ({n_untranslated})"
+
         master_pass = (
             toc_status == "PASS" and
             bc_status == "PASS" and
             img_status == "PASS" and
-            cnt_status == "PASS"
+            cnt_status == "PASS" and
+            not n_overlap and
+            not n_untranslated
         )
         master_verdict = "PASS" if master_pass else "FAIL"
 
@@ -123,6 +148,8 @@ def generate_unified_excel_report(
             img_status,
             cnt_status,
             bc_status,
+            overlap_status,
+            untr_status,
             master_verdict,
         ]
         ws_overview.append(row_data)
@@ -130,6 +157,16 @@ def generate_unified_excel_report(
     # A report read a month later has to say what it was run with. The ignored
     # margins change which graphics were extracted at all, so a count of 77 vs
     # 74 between two runs is only explicable if the setting is recorded here.
+    if toc_results:
+        master_name = toc_results[0].get("english_pdf", "")
+        master_overlaps, _ = _count_for(master_name)
+        if master_overlaps:
+            ws_overview.append([])
+            ws_overview.append([
+                master_name, "(the master itself)", "", "", "", "",
+                f"FAIL ({master_overlaps})", "n/a", "FAIL",
+            ])
+
     ws_overview.append([])
     ws_overview.append(["Ignored page margins",
                         PageMargins.describe(run_margins),
@@ -309,6 +346,52 @@ def generate_unified_excel_report(
     else:
         ws_style.append([region_note or "No stylesheet regions were checked."])
 
+    # --------------------------------------------------------
+    # TAB: TEXT OVERLAP
+    # --------------------------------------------------------
+    # Applies to the master as much as the translations: an overrun caption in
+    # the English original is a layout fault, not a translation fault.
+    ws_ov = wb.create_sheet(title="Text Overlap")
+    ws_ov.append([
+        "Manual", "Page", "Colliding Pairs", "Text", "Why", "Area (pt2)", "Status",
+    ])
+    if overlap_results:
+        for f in overlap_results:
+            texts = f.get("texts") or [f.get("text_a", ""), f.get("text_b", "")]
+            ws_ov.append([
+                f.get("document", ""), f.get("page", ""), f.get("pairs", 1),
+                "  X  ".join(t for t in texts if t)[:400],
+                f.get("why", ""), f.get("overlap_pt2", 0), "FAIL",
+            ])
+    else:
+        ws_ov.append(["No text found printed through other text.",
+                      "", "", "", "First and last page are skipped by design.", "", "PASS"])
+
+    # --------------------------------------------------------
+    # TAB: NOT TRANSLATED
+    # --------------------------------------------------------
+    ws_un = wb.create_sheet(title="Not Translated")
+    ws_un.append([
+        "Manual", "Page", "Evidence", "English Text Found", "English Word Density", "Status",
+    ])
+    if untranslated_results:
+        reasons = {
+            "verbatim": "word for word in the English master",
+            "dense": "reads as English by its function words",
+            "verbatim + dense": "in the master AND reads as English",
+        }
+        for f in untranslated_results:
+            ws_un.append([
+                f.get("document", ""), f.get("page", ""),
+                reasons.get(f.get("reason", ""), f.get("reason", "")),
+                (f.get("text", "") or "")[:400],
+                f.get("density", 0), "FAIL",
+            ])
+    else:
+        ws_un.append(["No English text found in any translation.", "",
+                      "First and last page are skipped: covers and back matter "
+                      "are English by design.", "", "", "PASS"])
+
     # Format all sheets with headers, borders, and PASS/Present/Equal/Matched fills
     for ws in wb.worksheets:
         # Style Header Row
@@ -324,7 +407,11 @@ def generate_unified_excel_report(
                 cell = ws.cell(row=row_idx, column=col_idx)
                 cell.border = thin_border
                 cell.alignment = Alignment(
-                    horizontal="left" if (ws.title in ("TOC", "Images") and col_idx in (3, 4)) else "center",
+                    horizontal="left" if (
+                        (ws.title in ("TOC", "Images") and col_idx in (3, 4))
+                        or (ws.title == "Text Overlap" and col_idx in (4, 5))
+                        or (ws.title == "Not Translated" and col_idx in (3, 4))
+                    ) else "center",
                     vertical="center"
                 )
 
@@ -344,6 +431,10 @@ def generate_unified_excel_report(
                 ws.column_dimensions[col_letter].width = 50
             elif ws.title == "Images" and col[0].column in (1, 2, 3):
                 ws.column_dimensions[col_letter].width = 30
+            elif ws.title == "Text Overlap" and col[0].column in (4, 5):
+                ws.column_dimensions[col_letter].width = 60
+            elif ws.title == "Not Translated" and col[0].column in (3, 4):
+                ws.column_dimensions[col_letter].width = 60
             else:
                 ws.column_dimensions[col_letter].width = max(max_len + 3, 14)
 
@@ -495,9 +586,9 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
 
     diff_crops_out_dir = os.path.join(output_dir, "Cropped_Comparison")
 
-    # Documents occupy the bar from 20% to 90%; the report and metadata take
-    # the rest.
-    DOC_BASE, DOC_SPAN = 0.20, 0.70
+    # Documents occupy the bar from 20% to 82%; the text checks, the metadata
+    # and the report share what is left.
+    DOC_BASE, DOC_SPAN = 0.20, 0.62
     doc_slice = DOC_SPAN / max(1, len(translated_files))
 
     for idx, tr_path in enumerate(translated_files, start=1):
@@ -618,7 +709,48 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
         print(region_note)
     print()
 
-    # 5. Document metadata for the master and every translation.
+    # 5. Text checks: colliding text, and English left in a translation.
+    #
+    # Neither is about a place on the page, so neither can be a stylesheet
+    # region: a collision happens wherever a line runs long, and a missed
+    # segment is wherever the translator's eye slipped. Both skip the first and
+    # last page - covers and back matter are English by design and set by hand.
+    #
+    # The overlap scan reads the MASTER as well. An overrun caption in the
+    # English original is a layout fault that every translation will inherit,
+    # and finding it here is cheaper than finding it eleven times.
+    print("Checking for colliding and untranslated text...")
+    say(0.82, "Text checks")
+    text_evidence_dir = os.path.join(diff_crops_out_dir, "Text_Checks")
+    overlap_results, untranslated_results = [], []
+    try:
+        every_document = [source_pdf_path] + translated_files
+        for i, path in enumerate(every_document):
+            say(0.82 + 0.04 * (i / float(len(every_document))),
+                f"Overlap: {os.path.basename(path)}")
+            overlap_results.extend(TextOverlap.find_overlaps(
+                path, skip_first_last=True,
+                evidence_dir=os.path.join(text_evidence_dir, "overlap")))
+        print(f"  {len(overlap_results)} text overlap(s) across "
+              f"{len(every_document)} document(s)")
+    except Exception as e:
+        print(f"  ERROR: the overlap check failed: {e}")
+
+    try:
+        inventory = Untranslated.master_inventory(source_pdf_path)
+        for i, path in enumerate(translated_files):
+            say(0.86 + 0.04 * (i / float(len(translated_files) or 1)),
+                f"Not translated: {os.path.basename(path)}")
+            untranslated_results.extend(Untranslated.find_untranslated(
+                path, inventory, skip_first_last=True,
+                evidence_dir=os.path.join(text_evidence_dir, "untranslated")))
+        print(f"  {len(untranslated_results)} untranslated line(s) across "
+              f"{len(translated_files)} translation(s)")
+    except Exception as e:
+        print(f"  ERROR: the untranslated-text check failed: {e}")
+    print()
+
+    # 6. Document metadata for the master and every translation.
     metadata_rows = []
     if collect_metadata:
         print("Collecting document metadata...")
@@ -633,7 +765,7 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
             print(f"  ERROR: metadata scan failed: {e}")
         print()
 
-    # 6. Generate ONE single Excel report
+    # 7. Generate ONE single Excel report
     unified_report_path = os.path.join(output_dir, "PDF_Quality_Inspection_Report.xlsx")
     say(0.97, "Writing the report")
     generate_unified_excel_report(
@@ -647,6 +779,8 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
         metadata_rows=metadata_rows,
         region_results=region_results,
         region_note=region_note,
+        overlap_results=overlap_results,
+        untranslated_results=untranslated_results,
     )
 
     # The workers have nothing left to do; hand the cores back before the
@@ -670,6 +804,8 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
         "region_results": region_results,
         "region_note": region_note,
         "metadata_rows": metadata_rows,
+        "overlap_results": overlap_results,
+        "untranslated_results": untranslated_results,
     }
 
 
@@ -728,4 +864,3 @@ if __name__ == "__main__":
         output_dir=args.output,
         margins=run_margins,
     )
-
