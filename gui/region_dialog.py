@@ -142,6 +142,137 @@ def _font(size=12, weight="normal", family=None, **kwargs):
     )
 
 
+class _Tooltip:
+    """
+    A hover description for a widget.
+
+    Tkinter has no tooltip of its own, and CustomTkinter widgets are composite
+    (a CTkCheckBox is a frame holding a canvas and a label), so a single
+    <Leave> fires spuriously whenever the pointer crosses from the checkbox onto
+    its own inner canvas. This watches the real pointer position on leave rather
+    than trusting that one event, which is what stops the tip flickering.
+
+    Bound to the widget AND its children so entering any part of the control
+    keeps the tip up; a short delay on show keeps it from flashing as the mouse
+    sweeps across the row.
+    """
+
+    _OPEN = []            # every tip currently on screen, so a new one closes the rest
+
+    def __init__(self, widget, text, delay=400, wrap=340):
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self.wrap = wrap
+        self._tip = None
+        self._show_job = None
+        self._hide_job = None
+        self._bind_tree(widget)
+
+    def _bind_tree(self, w):
+        try:
+            w.bind("<Enter>", self._on_enter, add="+")
+            w.bind("<Leave>", self._on_leave, add="+")
+            w.bind("<ButtonPress>", lambda _e: self._hide(), add="+")
+        except Exception:
+            return
+        for child in w.winfo_children():
+            self._bind_tree(child)
+
+    def _cancel_job(self, attr):
+        job = getattr(self, attr)
+        if job is not None:
+            try:
+                self.widget.after_cancel(job)
+            except Exception:
+                pass
+            setattr(self, attr, None)
+
+    def _on_enter(self, _e=None):
+        self._cancel_job("_hide_job")
+        if self._tip is None and self._show_job is None:
+            self._show_job = self.widget.after(self.delay, self._show)
+
+    def _on_leave(self, _e=None):
+        # Grace period, then only hide if the pointer really left the control.
+        self._cancel_job("_hide_job")
+        self._hide_job = self.widget.after(140, self._hide_if_outside)
+
+    def _hide_if_outside(self):
+        self._hide_job = None
+        try:
+            px, py = self.widget.winfo_pointerxy()
+            wx, wy = self.widget.winfo_rootx(), self.widget.winfo_rooty()
+            ww, wh = self.widget.winfo_width(), self.widget.winfo_height()
+            if wx <= px <= wx + ww and wy <= py <= wy + wh:
+                return
+        except Exception:
+            pass
+        self._hide()
+
+    def _show(self):
+        self._show_job = None
+        if self._tip is not None or not self.text:
+            return
+        # Only one tip at a time.
+        for other in list(_Tooltip._OPEN):
+            other._hide()
+        try:
+            x = self.widget.winfo_rootx()
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        except Exception:
+            return
+        tip = tk.Toplevel(self.widget)
+        tip.wm_overrideredirect(True)
+        try:
+            tip.attributes("-topmost", True)
+        except Exception:
+            pass
+        border = tk.Frame(tip, background=DEPENDABLE_BLUE)
+        border.pack()
+        tk.Label(
+            border, text=self.text, justify="left",
+            background=DEPENDABLE_BLUE, foreground=NEUTRAL_WHITE,
+            font=(theme.resolve_font_family(), 9), wraplength=self.wrap,
+            padx=10, pady=7,
+        ).pack(padx=1, pady=1)
+        # Nudge left if it would run off the right edge of the screen.
+        try:
+            tip.update_idletasks()
+            sw = tip.winfo_screenwidth()
+            if x + tip.winfo_width() > sw - 8:
+                x = max(8, sw - tip.winfo_width() - 8)
+            tip.wm_geometry(f"+{x}+{y}")
+        except Exception:
+            tip.wm_geometry(f"+{x}+{y}")
+        self._tip = tip
+        _Tooltip._OPEN.append(self)
+
+    def _hide(self):
+        if self._show_job is not None:
+            try:
+                self.widget.after_cancel(self._show_job)
+            except Exception:
+                pass
+            self._show_job = None
+        if self._hide_job is not None:
+            try:
+                self.widget.after_cancel(self._hide_job)
+            except Exception:
+                pass
+            self._hide_job = None
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except Exception:
+                pass
+            self._tip = None
+        try:
+            _Tooltip._OPEN.remove(self)
+        except ValueError:
+            pass
+
+
 # ==============================================================================
 # CUSTOMTKINTER MULTI-REGION SELECTOR & INSPECTOR DIALOG
 # ==============================================================================
@@ -529,7 +660,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
         self.exact_match_var = ctk.BooleanVar(value=False)
         self.exact_match_chk = ctk.CTkCheckBox(
             edit_row,
-            text="Exact match",
+            text="Exact Text match",
             variable=self.exact_match_var,
             font=_font(size=10, weight="bold"),
             fg_color=XYLEM_BLUE, hover_color=UI_HOVER_BLUE,
@@ -596,6 +727,48 @@ class RegionInspectorFrame(ctk.CTkFrame):
             command=self._on_pattern_match_toggle
         )
         self.pattern_match_chk.pack(side="left", padx=4)
+
+        # Hover help: each match mode gets a full description on hover, so the
+        # difference between them can be read at the point of choosing rather
+        # than guessed from a two-word label. Kept as attributes so they are not
+        # garbage-collected while the dialog is alive.
+        self._checkbox_tips = [
+            _Tooltip(self.exact_match_chk,
+                     "Exact match\n\n"
+                     "The text in this region must be identical to the master's, "
+                     "character for character (after trimming surrounding spaces). "
+                     "Use it for strings that must never change in translation — "
+                     "part numbers, model names, standards like “EN 809”, "
+                     "trademarks. Any different character fails the check."),
+            _Tooltip(self.scope_only_chk,
+                     "Scope only\n\n"
+                     "Marks an area without scoring it — this box is never passed "
+                     "or failed itself. Use it as a container: to group related "
+                     "regions, or to limit the area in which a sub-region drawn "
+                     "inside it is searched. It shapes where other checks look; it "
+                     "is not a check on its own."),
+            _Tooltip(self.dont_compare_text_chk,
+                     "Visual only (no text)\n\n"
+                     "Ignore the words and compare the picture instead. Use it for "
+                     "logos, icons, hazard symbols, diagrams and other artwork — "
+                     "anything whose text layer is missing or irrelevant. The "
+                     "region passes when the image matches the master's."),
+            _Tooltip(self.presence_only_chk,
+                     "Present only\n\n"
+                     "The region just has to exist — its contents may differ. Use "
+                     "it for things that are SUPPOSED to change per language: a QR "
+                     "code or barcode that encodes a language-specific URL, or a "
+                     "value that varies by market. It passes as long as something "
+                     "is there, and never fails just because the content differs."),
+            _Tooltip(self.pattern_match_chk,
+                     "Same pattern\n\n"
+                     "The translation must keep the master's SHAPE, not its value. "
+                     "The pattern is read from the master's own text — 6 digits "
+                     "stays 6 digits, a 2-letter language code stays 2 letters — "
+                     "and the translation has to match that shape. Use it for "
+                     "document numbers, codes and IDs whose format is fixed but "
+                     "whose exact value changes per language."),
+        ]
 
         # What the shape actually came out as, and a way to overrule it. Shown
         # only while "Same pattern" is on: a derived regex that nobody can see
@@ -2061,12 +2234,15 @@ class RegionInspectorFrame(ctk.CTkFrame):
                 messagebox.showerror("Template Not Found",
                                      f"Could not read template: {name_or_data}")
             return False
-        # The document in hand decides both WHICH PAGE a region belongs on and
-        # WHERE ON IT the box goes. Neither can come from the stored numbers:
-        # a region saved as "last page, page 20" was drawn on a 20-page manual,
-        # and a rectangle saved on A5 is in the wrong place on A3.
-        # Read off the document being loaded, never off the canvas: the canvas
-        # is still showing the last one. See _page_size_pt.
+        # The document in hand decides WHICH PAGE a region belongs on - a region
+        # saved as "last page, page 20" was drawn on a 20-page manual and has to
+        # follow onto the last page of whatever manual is open now. WHERE ON THE
+        # PAGE the box goes does NOT change: a loaded stylesheet keeps the exact
+        # coordinates it was saved with, and only a manual drag or resize moves
+        # it. This matches what the run actually checks (it reads the stored
+        # rectangle verbatim too), so what is drawn is what is verified.
+        # Read the size off the document being loaded, never off the canvas: the
+        # canvas is still showing the last one. See _page_size_pt.
         page_size = self._page_size_pt(1)
         total = self.total_pages or 0
 
@@ -2092,12 +2268,17 @@ class RegionInspectorFrame(ctk.CTkFrame):
                     r["page_num"] = want
                     r["is_last_page"] = (want == total)
 
-            # Each region is placed against the size of ITS OWN page.
+            # The box keeps its saved coordinates exactly - it is NOT re-placed
+            # from the page edges on load. The only adjustment is the clamp, and
+            # that only ever rescues a box that would otherwise sit entirely off
+            # a smaller sheet where it could not be seen or dragged back; a box
+            # that already fits is never nudged. So on a document the stylesheet
+            # was drawn for, nothing moves at all.
             own_size = self._page_size_pt(r.get("page_num") or 1) or page_size
-            placed = templates_store.geometry_for_page(r, own_size)
-            placed = _clamped_to_page(placed, own_size)
+            stored = r.get("roi_rect")
+            placed = _clamped_to_page(stored, own_size) if stored else stored
             if placed and list(map(lambda v: round(float(v), 1), placed)) != \
-                    list(map(lambda v: round(float(v), 1), r.get("roi_rect") or [])):
+                    list(map(lambda v: round(float(v), 1), stored or [])):
                 moved_geometry += 1
             if placed:
                 r["roi_rect"] = tuple(float(v) for v in placed)
@@ -2121,7 +2302,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
         if moved_pages:
             adjust.append(f"{moved_pages} re-pointed at this document's pages")
         if moved_geometry:
-            adjust.append(f"{moved_geometry} re-placed for this sheet size")
+            adjust.append(f"{moved_geometry} slid onto a smaller sheet to stay visible")
         print(f"[Template] Loaded '{data.get('name')}' with {len(self.regions)} region(s), "
               f"margins {page_margins.describe(self.margins)}"
               + (f"  ({', '.join(adjust)})" if adjust else ""))
@@ -2140,8 +2321,8 @@ class RegionInspectorFrame(ctk.CTkFrame):
         if moved_pages:
             bits.append(f"{moved_pages} region(s) moved to this document's pages")
         if moved_geometry:
-            bits.append(f"{moved_geometry} box(es) re-placed from their page edges "
-                        f"— drag or resize to correct, then Save As to remember it")
+            bits.append(f"{moved_geometry} box(es) slid onto this smaller sheet so "
+                        f"they stay visible — drag to adjust, then Save As to remember it")
         try:
             if bits:
                 self.status_lbl.configure(text="Stylesheet fitted \u2022 " + "  \u00b7  ".join(bits),

@@ -9,6 +9,7 @@ and fonts come from gui.theme, so the two windows can no longer drift apart.
 """
 
 import os
+import re
 import sys
 import shutil
 import threading
@@ -85,6 +86,10 @@ from gui.theme import FONT_FAMILY_PREFERRED, FONT_FAMILY_FALLBACK
 # Resolved once, shared with the Region Inspector.
 FONT_FAMILY = theme.resolve_font_family()
 
+# The results folder, created inside the batch folder so a run's report and
+# evidence land right beside the PDFs they were measured against.
+OUTPUT_SUBDIR_NAME = "SpotCheck_Output"
+
 # Tab labels (also used as CTkTabview keys)
 TAB_INSPECTION = "  Inspection  "
 TAB_REGION = "  Region Inspector  "
@@ -149,6 +154,15 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         # Fix 6: Track browse buttons for disable/enable during inspection
         self._browse_buttons = []
 
+        # The report and its evidence are written inside the batch folder by
+        # default - one folder holds the master, its translations, and their
+        # results - so nothing is scattered. _output_user_set flips true once the
+        # user browses to a location of their own, after which we stop moving it;
+        # _output_batch_folder remembers the folder we last derived from, so
+        # typing a path by hand isn't clobbered while the master is unchanged.
+        self._output_user_set = False
+        self._output_batch_folder = None
+
         # Whatever was configured last time, so the user does not re-pick the
         # same three paths on every launch. Stale entries are dropped by
         # load_paths(), so a deleted folder falls back to the built-in default.
@@ -183,7 +197,6 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             # set up the stylesheet, read the results, look at the documents.
             self._tab_inspection = self.tabview.add(TAB_INSPECTION)
             self._tab_region = self.tabview.add(TAB_REGION)
-            self._tab_text_checks = self.tabview.add(TAB_TEXT_CHECKS)
             self._tab_comparisons = self.tabview.add(TAB_COMPARISONS)
             self._tab_metadata = self.tabview.add(TAB_METADATA)
             self._body = self._tab_inspection
@@ -194,9 +207,14 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
 
         if HAS_CTK:
             self._build_region_tab()
-            self._build_text_checks_tab()
+            self.text_checks_tab = None
             self._build_metadata_tab()
             self._build_comparisons_tab()
+            # Resolve the batch from the remembered master PDF: its folder is the
+            # batch, the PDFs beside it the translations. Done before the path
+            # watcher so the batch is in place when the inspector and metadata
+            # first sync.
+            self._sync_batch_from_master()
             self._watch_paths()
             names = self.refresh_template_dropdown(
                 select=self._remembered.get("template"))
@@ -317,18 +335,23 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             )
             card_title.grid(row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(12, 6))
 
-            # Row 1: English Master PDF
+            # Row 1: the English master, picked as a single FILE. Its own folder
+            # is the batch: every OTHER PDF sitting beside it is a translation,
+            # discovered automatically. So the user selects one PDF and nothing
+            # else. eng_pdf_var is that file; tr_dir_var is derived as its folder
+            # (still what the run scans, with the master excluded downstream), so
+            # everything further along is untouched.
             ctk.CTkLabel(
                 config_card,
-                text="English Master Folder:",
+                text="English Master PDF:",
                 font=self._get_font(12, "bold"),
                 text_color=DEPENDABLE_BLUE
             ).grid(row=1, column=0, sticky="w", padx=16, pady=6)
 
-            default_eng = self._remembered.get("english_pdf") or (
-                os.path.abspath(r"Input\English\894387_5.0_en-US_2026-04_IOM.Start350.pdf")
-                if os.path.exists(r"Input\English\894387_5.0_en-US_2026-04_IOM.Start350.pdf") else "")
-            self.eng_pdf_var = ctk.StringVar(value=default_eng)
+            self.eng_pdf_var = ctk.StringVar(value=self._remembered.get("english_pdf") or "")
+            # Derived from the master's folder; no field of its own any more.
+            self.tr_dir_var = ctk.StringVar(value="")
+
             self.eng_entry = ctk.CTkEntry(
                 config_card,
                 textvariable=self.eng_pdf_var,
@@ -340,63 +363,29 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             )
             self.eng_entry.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=6)
 
-            btn_eng = ctk.CTkButton(
+            btn_master = ctk.CTkButton(
                 config_card,
-                text="Browse Folder",
+                text="Browse PDF",
                 font=self._get_font(11, "bold"),
                 fg_color=XYLEM_BLUE,
                 hover_color=UI_HOVER_BLUE,
                 text_color=NEUTRAL_WHITE,
                 width=110,
                 height=34,
-                command=self._browse_eng_pdf
+                command=self._browse_master_pdf
             )
-            btn_eng.grid(row=1, column=2, padx=(0, 16), pady=6)
-            self._browse_buttons.append(btn_eng)
+            btn_master.grid(row=1, column=2, padx=(0, 16), pady=6)
+            self._browse_buttons.append(btn_master)
 
-            # Which PDF in that folder will actually be used, said before the
-            # run rather than discovered afterwards in the report.
-            self.master_lbl = ctk.CTkLabel(
-                config_card, text="", font=self._get_font(10),
-                text_color=NEUTRAL_DARK_GR, anchor="w", justify="left")
-            self.master_lbl.grid(row=2, column=1, columnspan=2, sticky="w",
-                                 padx=(0, 16), pady=(0, 4))
-
-            # Row 2: Translated Target Folder
-            ctk.CTkLabel(
+            # Row 2: confirms the batch - how many other PDFs in the master's
+            # folder will be checked as translations - before anything runs.
+            self.batch_hint_lbl = ctk.CTkLabel(
                 config_card,
-                text="Translated PDFs Folder:",
-                font=self._get_font(12, "bold"),
-                text_color=DEPENDABLE_BLUE
-            ).grid(row=3, column=0, sticky="w", padx=16, pady=6)
-
-            default_tr = self._remembered.get("translated_dir") or (
-                os.path.abspath(r"Input\Translated") if os.path.exists(r"Input\Translated") else "")
-            self.tr_dir_var = ctk.StringVar(value=default_tr)
-            self.tr_entry = ctk.CTkEntry(
-                config_card,
-                textvariable=self.tr_dir_var,
-                font=self._get_font(11),
-                fg_color=UI_CARD_WELL,
-                border_color=UI_BORDER,
-                text_color=DEPENDABLE_BLUE,
-                height=34
-            )
-            self.tr_entry.grid(row=3, column=1, sticky="ew", padx=(0, 10), pady=6)
-
-            btn_tr = ctk.CTkButton(
-                config_card,
-                text="Browse Folder",
-                font=self._get_font(11, "bold"),
-                fg_color=XYLEM_BLUE,
-                hover_color=UI_HOVER_BLUE,
-                text_color=NEUTRAL_WHITE,
-                width=110,
-                height=34,
-                command=self._browse_tr_dir
-            )
-            btn_tr.grid(row=3, column=2, padx=(0, 16), pady=6)
-            self._browse_buttons.append(btn_tr)
+                text="pick the English PDF — the other PDFs in its folder are the translations",
+                font=self._get_font(10), text_color=NEUTRAL_DARK_GR,
+                anchor="w", justify="left")
+            self.batch_hint_lbl.grid(row=2, column=1, columnspan=2, sticky="w",
+                                     padx=(0, 16), pady=(0, 4))
 
             # Row 3: Output Directory
             ctk.CTkLabel(
@@ -404,11 +393,13 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 text="Output Directory:",
                 font=self._get_font(12, "bold"),
                 text_color=DEPENDABLE_BLUE
-            ).grid(row=4, column=0, sticky="w", padx=16, pady=(6, 14))
+            ).grid(row=3, column=0, sticky="w", padx=16, pady=(6, 14))
 
             self.template_var = ctk.StringVar(value=self._remembered.get("template") or "")
+            # Left blank on purpose: it fills itself in from the master's folder
+            # the moment a master is chosen (SpotCheck_Output inside the batch).
             self.out_dir_var = ctk.StringVar(
-                value=self._remembered.get("output_dir") or os.path.abspath(r"Output"))
+                value=self._remembered.get("output_dir") or "")
             self.out_entry = ctk.CTkEntry(
                 config_card,
                 textvariable=self.out_dir_var,
@@ -418,7 +409,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 text_color=DEPENDABLE_BLUE,
                 height=34
             )
-            self.out_entry.grid(row=4, column=1, sticky="ew", padx=(0, 10), pady=(6, 14))
+            self.out_entry.grid(row=3, column=1, sticky="ew", padx=(0, 10), pady=(6, 4))
 
             btn_out = ctk.CTkButton(
                 config_card,
@@ -431,8 +422,19 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 height=34,
                 command=self._browse_out_dir
             )
-            btn_out.grid(row=4, column=2, padx=(0, 16), pady=(6, 14))
+            btn_out.grid(row=3, column=2, padx=(0, 16), pady=(6, 4))
             self._browse_buttons.append(btn_out)
+
+            # Row 4: says where results land - inside the batch folder by default,
+            # right beside the PDFs, unless the user browses somewhere else.
+            self.output_hint_lbl = ctk.CTkLabel(
+                config_card,
+                text=(f"results go in a “{OUTPUT_SUBDIR_NAME}” folder beside the "
+                      f"PDFs — Browse Output only to change that"),
+                font=self._get_font(10), text_color=NEUTRAL_DARK_GR,
+                anchor="w", justify="left")
+            self.output_hint_lbl.grid(row=4, column=1, columnspan=2, sticky="w",
+                                      padx=(0, 16), pady=(0, 12))
 
             config_card.columnconfigure(1, weight=1)
 
@@ -489,10 +491,10 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 text="Stylesheet Template:",
                 font=self._get_font(12, "bold"),
                 text_color=DEPENDABLE_BLUE
-            ).grid(row=5, column=0, sticky="w", padx=16, pady=(0, 14))
+            ).grid(row=4, column=0, sticky="w", padx=16, pady=(0, 14))
 
             tmpl_cell = ctk.CTkFrame(config_card, fg_color="transparent")
-            tmpl_cell.grid(row=5, column=1, columnspan=2, sticky="ew", padx=(0, 16), pady=(0, 14))
+            tmpl_cell.grid(row=4, column=1, columnspan=2, sticky="ew", padx=(0, 16), pady=(0, 14))
             self.template_menu = ctk.CTkOptionMenu(
                 tmpl_cell, variable=self.template_var, values=["(none)"], width=300, height=34,
                 font=self._get_font(11), fg_color=UI_CARD_BG, button_color=XYLEM_BLUE,
@@ -584,9 +586,26 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             )
             open_log_dir_btn.pack(side="right")
 
+            # Clears what is on screen only - the on-disk log file keeps every
+            # line, so nothing is actually lost by tidying the live view.
+            clear_console_btn = ctk.CTkButton(
+                log_header,
+                text="🧹 Clear Console",
+                font=self._get_font(11, "bold"),
+                fg_color=UI_CARD_BG,
+                hover_color=UI_CARD_WELL,
+                text_color=DEPENDABLE_BLUE,
+                border_width=1,
+                border_color=UI_BORDER,
+                height=26,
+                width=120,
+                command=self._clear_console
+            )
+            clear_console_btn.pack(side="right", padx=(0, 6))
+
             self.log_textbox = ctk.CTkTextbox(
                 log_frame,
-                font=ctk.CTkFont(family="Consolas", size=11),
+                font=ctk.CTkFont(family="Consolas", size=15),
                 fg_color=DEPENDABLE_BLUE,
                 text_color=NEUTRAL_WHITE,
                 border_width=0,
@@ -673,8 +692,9 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             log_bar.pack(fill="x", pady=(0, 4))
             tk.Button(log_bar, text="Open Log File", font=(FONT_FAMILY_FALLBACK, 9), bg=DEPENDABLE_BLUE, fg=NEUTRAL_WHITE, command=self._open_log_file).pack(side="right", padx=3)
             tk.Button(log_bar, text="Log Folder", font=(FONT_FAMILY_FALLBACK, 9), bg=UI_CARD_WELL, fg=DEPENDABLE_BLUE, command=self._open_log_folder).pack(side="right", padx=3)
+            tk.Button(log_bar, text="Clear Console", font=(FONT_FAMILY_FALLBACK, 9), bg=UI_CARD_WELL, fg=DEPENDABLE_BLUE, command=self._clear_console).pack(side="right", padx=3)
 
-            self.log_textbox = tk.Text(log_frame, font=("Consolas", 10), bg=DEPENDABLE_BLUE, fg=NEUTRAL_WHITE)
+            self.log_textbox = tk.Text(log_frame, font=("Consolas", 14), bg=DEPENDABLE_BLUE, fg=NEUTRAL_WHITE)
             self.log_textbox.pack(fill="both", expand=True)
 
     # ──────────────────────────────────────────────────────────
@@ -717,7 +737,110 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
     def _browse_out_dir(self):
         d = filedialog.askdirectory(title="Select Output Directory")
         if d:
+            # A deliberate choice: from here on, don't move the output into the
+            # batch folder for them. Picking a new master won't re-point it.
+            self._output_user_set = True
             self.out_dir_var.set(os.path.abspath(d))
+
+    # ──────────────────────────────────────────────────────────
+    # One batch = one folder. The user picks the English master as a
+    # single PDF; every OTHER PDF sitting beside it is a translation,
+    # discovered automatically. tr_dir_var (what the run scans, master
+    # excluded downstream) is derived from the master's own folder, so
+    # nothing further along the pipeline has to change.
+    # ──────────────────────────────────────────────────────────
+    def _browse_master_pdf(self):
+        """Pick the English master as one PDF file; its folder becomes the batch."""
+        f = filedialog.askopenfilename(
+            title="Select the English master PDF",
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")])
+        if f:
+            self.eng_pdf_var.set(os.path.abspath(f))
+            self._sync_batch_from_master()
+
+    def _sync_batch_from_master(self):
+        """
+        Derive the batch folder from the chosen master and report what was found.
+
+        The master is one PDF; its own folder is the batch, and every OTHER PDF
+        in that folder is a translation. tr_dir_var is kept as that folder so the
+        run (which already excludes the master) needs no change. Idempotent - it
+        writes tr_dir_var only when the value truly changes - so the path watcher
+        can call it without looping.
+        """
+        eng = (self.eng_pdf_var.get() or "").strip().strip('"').strip("'")
+        folder = ""
+        n_tr = 0
+        if eng and os.path.isfile(eng):
+            folder = os.path.dirname(os.path.abspath(eng))
+            try:
+                master_abs = os.path.abspath(eng)
+                n_tr = sum(1 for f in os.listdir(folder)
+                           if f.lower().endswith(".pdf")
+                           and os.path.abspath(os.path.join(folder, f)) != master_abs)
+            except OSError:
+                n_tr = 0
+        elif eng and os.path.isdir(eng):
+            # A folder pasted or restored from an older settings file: keep its
+            # old meaning - the folder is the batch, and one of its PDFs the
+            # master - so an upgrade never comes up blank.
+            folder = os.path.abspath(eng)
+            try:
+                n_tr = max(0, sum(1 for f in os.listdir(folder)
+                                  if f.lower().endswith(".pdf")) - 1)
+            except OSError:
+                n_tr = 0
+
+        if hasattr(self, "tr_dir_var") and (self.tr_dir_var.get() or "") != folder:
+            self.tr_dir_var.set(folder)
+
+        self._derive_output_from_batch(folder)
+        self._update_batch_hint(eng, n_tr)
+
+    def _derive_output_from_batch(self, folder):
+        """
+        Point the output at a results folder inside the batch, so the report and
+        its evidence sit beside the PDFs they came from.
+
+        Two guards keep this from fighting the user:
+          - once they browse to an output of their own, _output_user_set is set
+            and we never move it again.
+          - while the batch folder is unchanged we don't re-derive, so a path
+            typed by hand into the output field survives - only a new master
+            (a new batch folder) re-points it.
+        """
+        if not folder or getattr(self, "_output_user_set", False):
+            return
+        if getattr(self, "_output_batch_folder", None) == folder:
+            return
+        derived = os.path.join(folder, OUTPUT_SUBDIR_NAME)
+        if hasattr(self, "out_dir_var") and (self.out_dir_var.get() or "") != derived:
+            self.out_dir_var.set(derived)
+        self._output_batch_folder = folder
+
+    def _update_batch_hint(self, eng, n_tr):
+        """One line under the picker: what the chosen master resolves to."""
+        if not hasattr(self, "batch_hint_lbl"):
+            return
+        if not eng:
+            txt = ("pick the English PDF — the other PDFs in its folder are the "
+                   "translations")
+            color = NEUTRAL_DARK_GR
+        elif not (os.path.isfile(eng) or os.path.isdir(eng)):
+            txt = "that path no longer exists — pick the English PDF again"
+            color = theme.TEXT_ATTENTION
+        elif n_tr <= 0:
+            txt = ("no other PDFs sit beside this one — add the translated PDFs "
+                   "to its folder")
+            color = theme.TEXT_ATTENTION
+        else:
+            txt = (f"master: {os.path.basename(eng)}  •  "
+                   f"{n_tr} translation(s) beside it")
+            color = NEUTRAL_DARK_GR
+        try:
+            self.batch_hint_lbl.configure(text=txt, text_color=color)
+        except Exception:
+            pass
 
     # ──────────────────────────────────────────────────────────
     # Log Console
@@ -726,6 +849,17 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
     # nobody reads, and a Tk text widget holding it repaints slowly enough to
     # be felt everywhere else in the window.
     MAX_LOG_LINES = 4000
+
+    def _clear_console(self):
+        """
+        Empty the live console view. The on-disk log file is untouched - it
+        keeps the full record - so this only tidies what is on screen, and stays
+        available during a run (the next line simply appends to the empty view).
+        """
+        try:
+            self.log_textbox.delete("1.0", "end")
+        except Exception:
+            pass
 
     def _append_log(self, text):
         """Add one chunk. Prefer _append_log_batch while a run is producing."""
@@ -818,29 +952,31 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
     # ──────────────────────────────────────────────────────────
     # Fix 6: Lock / Unlock all input controls during inspection
     # ──────────────────────────────────────────────────────────
+    def _set_input_state(self, state):
+        """Enable or disable every path control together (guarded per widget)."""
+        for btn in self._browse_buttons:
+            try:
+                btn.configure(state=state)
+            except Exception:
+                pass
+        # eng_entry is the master-PDF field in the CTk UI and the English field
+        # in the plain-Tk fallback; tr_entry exists only in the fallback. Guard
+        # each by name so either layout works.
+        for name in ("eng_entry", "tr_entry", "out_entry", "clear_output_btn"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                try:
+                    widget.configure(state=state)
+                except Exception:
+                    pass
+
     def _lock_inputs(self):
         """Disable all entries and browse buttons to prevent edits during inspection."""
-        for btn in self._browse_buttons:
-            btn.configure(state="disabled")
-        self.eng_entry.configure(state="disabled")
-        self.tr_entry.configure(state="disabled")
-        self.out_entry.configure(state="disabled")
-        try:
-            self.clear_output_btn.configure(state="disabled")
-        except Exception:
-            pass
+        self._set_input_state("disabled")
 
     def _unlock_inputs(self):
         """Re-enable all entries and browse buttons after inspection completes."""
-        for btn in self._browse_buttons:
-            btn.configure(state="normal")
-        self.eng_entry.configure(state="normal")
-        self.tr_entry.configure(state="normal")
-        self.out_entry.configure(state="normal")
-        try:
-            self.clear_output_btn.configure(state="normal")
-        except Exception:
-            pass
+        self._set_input_state("normal")
 
     # ──────────────────────────────────────────────────────────
     # Inspection Launch (with Fix 3 + Fix 4)
@@ -849,27 +985,50 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         if self.is_running:
             return
 
-        eng_pdf = self.eng_pdf_var.get().strip()
-        tr_target = self.tr_dir_var.get().strip()
-        out_dir = self.out_dir_var.get().strip()
+        eng_pdf = self.eng_pdf_var.get().strip().strip('"').strip("'")
 
-        # Fix 4: Validate empty/whitespace inputs with clear messages
+        # The master is the only thing the user picks. Validate it first, then
+        # derive everything else from where it lives.
         if not eng_pdf:
-            messagebox.showerror("Input Required", "Please select the English master folder.\nUse the 'Browse Folder' button to choose it.")
-            return
-        if not tr_target:
-            messagebox.showerror("Input Required", "Please select a Translated PDFs folder.\nUse the 'Browse Folder' button to select a directory.")
-            return
-        if not out_dir:
-            messagebox.showerror("Input Required", "Please specify an Output Directory.\nUse the 'Browse Output' button to select a directory.")
+            messagebox.showerror(
+                "Input Required",
+                "Please select the English master PDF.\n"
+                "Use the 'Browse PDF' button to choose it — the other PDFs in "
+                "its folder are checked as translations.")
             return
 
         master_pdf, master_err = spotcheck_engine.resolve_master_pdf(eng_pdf)
         if master_err:
             messagebox.showerror("English Master", master_err)
             return
-        if not os.path.exists(tr_target):
-            messagebox.showerror("Path Not Found", f"Translated target path does not exist:\n{tr_target}\n\nPlease verify the path and try again.")
+
+        # The master's own folder is the batch, and that is what the run scans.
+        tr_target = os.path.dirname(os.path.abspath(master_pdf))
+        self.tr_dir_var.set(tr_target)
+
+        # Make sure the output points inside the batch folder even if the user
+        # hit Run before the path watcher's derive fired (respects a chosen one).
+        self._derive_output_from_batch(tr_target)
+        out_dir = self.out_dir_var.get().strip()
+
+        if not out_dir:
+            messagebox.showerror("Input Required", "Please specify an Output Directory.\nUse the 'Browse Output' button to select a directory.")
+            return
+
+        # Everything in the folder except the master is a translation; make sure
+        # there is at least one, otherwise the run has nothing to compare.
+        try:
+            others = [f for f in os.listdir(tr_target)
+                      if f.lower().endswith(".pdf")
+                      and os.path.abspath(os.path.join(tr_target, f)) != os.path.abspath(master_pdf)]
+        except OSError:
+            others = []
+        if not others:
+            messagebox.showerror(
+                "No Translations Found",
+                "There are no other PDFs beside the master to check.\n\n"
+                "Put the English master and all its translated PDFs in the one "
+                "folder, then pick the English master with 'Browse PDF'.")
             return
 
         # Fix 3: Auto-create output directory if it doesn't exist
@@ -962,6 +1121,56 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             except Exception as e:
                 print(f"[WARN] Could not publish crop results to the gallery: {e}")
 
+            # The one-directional crop hunt above cannot see a graphic that was
+            # simply deleted when a near-identical sibling exists elsewhere in
+            # the manual - it still matches the sibling and reports PASS. The
+            # symmetric per-topic count check catches exactly that, and used to
+            # be Excel-only; publishing it here is what makes a deleted graphic
+            # show up as something to review instead of nothing at all.
+            try:
+                self.comparison_gallery.load_image_counts(
+                    self.last_run_results.get("count_results", []))
+            except Exception as e:
+                print(f"[WARN] Could not publish image-count results to the gallery: {e}")
+
+            # A count agreeing on both sides does not mean nothing broke - two
+            # icons can trade places, or one can render corrupted in place,
+            # while the tally and the one-directional hunt both still pass.
+            # This pairs graphics by what they look like rather than by
+            # reading order, so it stays correct even when translated text
+            # reflows a graphic onto a later page or a different column.
+            try:
+                self.comparison_gallery.load_matched_images(
+                    self.last_run_results.get("matched_results", []))
+            except Exception as e:
+                print(f"[WARN] Could not publish content-matched image results: {e}")
+
+            # The actual table-of-contents check: does the translation's
+            # section numbering match the master's, in the same order. Used
+            # to be Excel-only like Image Counts was.
+            try:
+                self.comparison_gallery.load_toc_results(
+                    self.last_run_results.get("toc_results", []))
+            except Exception as e:
+                print(f"[WARN] Could not publish TOC numbering results: {e}")
+
+            # Barcode & QR-code counts, per translated file - a barcode or QR
+            # code dropped in a translation. Used to be Excel-only.
+            try:
+                self.comparison_gallery.load_barcode_qr(
+                    self.last_run_results.get("bc_qr_results", []))
+            except Exception as e:
+                print(f"[WARN] Could not publish barcode/QR results: {e}")
+
+            # How long each document took, shown in the file list plus the
+            # end-to-end total in its header.
+            try:
+                self.comparison_gallery.load_timings(
+                    self.last_run_results.get("timing_rows", []),
+                    self.last_run_results.get("total_seconds"))
+            except Exception as e:
+                print(f"[WARN] Could not publish timing to the gallery: {e}")
+
         # One run now feeds every tab, so the results land where the user will
         # look for them rather than only in the Excel file.
         if success and self.last_run_results:
@@ -975,16 +1184,21 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             # found rather than making the user scan the same documents again.
             overlaps = self.last_run_results.get("overlap_results") or []
             missed = self.last_run_results.get("untranslated_results") or []
-            if getattr(self, "text_checks_tab", None) is not None:
-                try:
-                    self.text_checks_tab.show_results(overlaps, missed)
-                except Exception as e:
-                    print(f"[WARN] Could not publish text checks: {e}")
             if (overlaps or missed) and self.comparison_gallery is not None:
                 try:
                     self.comparison_gallery.load_text_checks(overlaps, missed)
                 except Exception as e:
                     print(f"[WARN] Could not publish text checks to the gallery: {e}")
+
+            # Text running past the left/right margin - a geometry fault the
+            # count and text checks cannot see, shown under its own check in the
+            # per-file Review breakdown.
+            overflows = self.last_run_results.get("overflow_results") or []
+            if overflows and self.comparison_gallery is not None:
+                try:
+                    self.comparison_gallery.load_overflows(overflows)
+                except Exception as e:
+                    print(f"[WARN] Could not publish margin overflows to the gallery: {e}")
 
             rows = self.last_run_results.get("metadata_rows") or []
             if rows and self.metadata_tab is not None:
@@ -1269,14 +1483,18 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         """Point the inspector at the currently configured paths, if usable."""
         self._path_reload_job = None
 
+        # A master path typed or pasted into the field (rather than browsed)
+        # still re-derives its batch folder and refreshes the hint. Idempotent -
+        # it writes a variable only when the value truly changes - so it cannot
+        # loop with the path trace that called us.
+        try:
+            self._sync_batch_from_master()
+        except Exception as e:
+            print(f"[WARN] Could not resolve the batch from the master: {e}")
+
         # Persist first: the output folder is worth remembering even when no
         # master has been chosen yet, and the reload below returns early then.
         self._persist_paths()
-
-        # The metadata figures belong to whichever documents were configured
-        # when the scan ran, so say so rather than leaving stale numbers looking
-        # current.
-        self._describe_master()
 
         if self.metadata_tab is not None:
             try:

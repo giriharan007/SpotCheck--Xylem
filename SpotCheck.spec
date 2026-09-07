@@ -49,6 +49,7 @@ all_hiddenimports = [
     'core.region_engine',
     'core.text_overlap',
     'core.untranslated',
+    'core.margin_overflow',
     'gui',
     'gui.theme',
     'gui.app_window',
@@ -109,8 +110,34 @@ except Exception as e:
     print(f"[SPEC WARNING] PyMuPDF collect_all failed: {e}")
 
 # 4. OpenCV (cv2) Collection
+#
+# collect_all('cv2') pulls in the entire opencv-python wheel, including two
+# pieces this app never uses and that account for most of its weight:
+#   - opencv_videoio_ffmpeg*.dll (~28 MB) - the FFmpeg backend behind
+#     cv2.VideoCapture / cv2.VideoWriter. Nothing here reads or writes video;
+#     every cv2 call in this codebase is image-array template matching, ink
+#     density, and colour conversion (grep for VideoCapture/VideoWriter turns
+#     up nothing).
+#   - cv2/data/*.xml (~10 MB) - the bundled Haar cascade classifiers for face,
+#     eye and body detection. Nothing here uses CascadeClassifier either; the
+#     manuals this tool inspects are PDFs, not photographs of people.
+# Cut, that is about 38 MB of dead weight this build was carrying for
+# features it never calls. If a future check ever needs real video decoding
+# or face detection, this filter is exactly where to stop excluding them.
 try:
     cv2_datas, cv2_binaries, cv2_hidden = collect_all('cv2')
+
+    def _cv2_is_unused_bloat(path):
+        # Backslash or forward slash depending on the host OS running the
+        # build - normalise before matching rather than relying on
+        # os.path.join to reproduce whatever separator the path actually uses.
+        lower = path.lower().replace('\\', '/')
+        return ('opencv_videoio_ffmpeg' in lower and lower.endswith('.dll')) or \
+               ('cv2/data/' in lower and lower.endswith('.xml'))
+
+    cv2_binaries = [b for b in cv2_binaries if not _cv2_is_unused_bloat(b[0])]
+    cv2_datas = [d for d in cv2_datas if not _cv2_is_unused_bloat(d[0])]
+
     all_datas.extend(cv2_datas)
     all_binaries.extend(cv2_binaries)
     all_hiddenimports.extend(cv2_hidden)

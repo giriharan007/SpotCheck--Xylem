@@ -637,6 +637,30 @@ def ink_clusters(fitz_page, table_rects=None, gap_pt=CLUSTER_GAP_PT, dpi=INK_DPI
     mask = _strip_isolated_rules(mask, rule_px)
 
     k = max(3, int(round(gap_pt * scale)) | 1)          # odd, so it is centred
+
+    # Inside a table, icons in adjacent rows can sit close enough that the
+    # dilation bridges them into one cluster - the DANGER and WARNING triangles
+    # on page 6 of the Start 350 manual, where the row gap after rule removal
+    # is smaller than the clustering kernel.  Erasing the horizontal row
+    # dividers (found from the ORIGINAL ink, before any stripping) acts as a
+    # barrier: the dilation cannot cross a line that is no longer there.
+    # Only horizontal rules are erased, because they separate rows; vertical
+    # column dividers are left alone (icons in the same row but different
+    # columns are already far enough apart).
+    for rx0, ry0, rx1, ry1 in regions:
+        sub = ink_before[ry0:ry1, rx0:rx1]
+        if sub.size == 0:
+            continue
+        horiz = cv2.morphologyEx(sub, cv2.MORPH_OPEN,
+                                 cv2.getStructuringElement(cv2.MORPH_RECT, (rule_px, 1)))
+        if not horiz.any():
+            continue
+        # The barrier is slightly thicker than the clustering kernel so that
+        # ink on opposite sides of a row divider cannot touch after dilation.
+        barrier = cv2.dilate(horiz, np.ones((max(3, k + 2), 1), np.uint8))
+        region_slice = mask[ry0:ry1, rx0:rx1]
+        mask[ry0:ry1, rx0:rx1] = cv2.bitwise_and(region_slice,
+                                                  cv2.bitwise_not(barrier))
     grown = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
     count, _labels, stats, _cent = cv2.connectedComponentsWithStats(grown, 8)
 
