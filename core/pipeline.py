@@ -21,6 +21,7 @@ Generates:
 
 import os
 import sys
+import time
 import argparse
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -36,11 +37,34 @@ from core import metadata as MetaData
 from core import region_engine as RegionEngine
 from core import text_overlap as TextOverlap
 from core import untranslated as Untranslated
+from core import margin_overflow as MarginOverflow
 
 
 # ============================================================
 # EXCEL REPORT GENERATORS
 # ============================================================
+
+def format_duration(seconds):
+    """
+    A run time in words: seconds under a minute, minutes-and-seconds over it.
+
+    Under 60s it stays as seconds with one decimal ('5.8s') - at that scale the
+    tenths are the interesting part. From a minute up it reads as '2m 27s':
+    rounded to whole seconds first, then divided, so 119.8s can never come out
+    as the nonsense '1m 60s'.
+    """
+    if seconds is None or seconds == "":
+        return ""
+    try:
+        s = float(seconds)
+    except (TypeError, ValueError):
+        return str(seconds)
+    if s < 60:
+        return f"{s:.1f}s"
+    total = int(round(s))
+    m, sec = divmod(total, 60)
+    return f"{m}m {sec:02d}s"
+
 
 def generate_unified_excel_report(
     toc_results,
@@ -54,7 +78,9 @@ def generate_unified_excel_report(
     region_results=None,
     region_note="",
     overlap_results=None,
-    untranslated_results=None
+    untranslated_results=None,
+    timing_rows=None,
+    total_seconds=None
 ):
     """
     Generate ONE single unified Excel report containing 5 worksheets:
@@ -70,6 +96,8 @@ def generate_unified_excel_report(
     """
     overlap_results = overlap_results or []
     untranslated_results = untranslated_results or []
+    timing_rows = timing_rows or []
+    timing_map = {r.get("filename"): r.get("seconds") for r in timing_rows}
 
     def _count_for(name):
         """How many of each text finding belong to one document."""
@@ -110,6 +138,7 @@ def generate_unified_excel_report(
         "Text Overlap",
         "Not Translated",
         "Master Verdict",
+        "Time",
     ]
     ws_overview.append(headers_overview)
 
@@ -151,6 +180,7 @@ def generate_unified_excel_report(
             overlap_status,
             untr_status,
             master_verdict,
+            format_duration(timing_map.get(toc_res["translated_pdf"], "")),
         ]
         ws_overview.append(row_data)
 
@@ -171,6 +201,16 @@ def generate_unified_excel_report(
     ws_overview.append(["Ignored page margins",
                         PageMargins.describe(run_margins),
                         "Elements lying entirely inside these bands are not extracted or counted."])
+
+    # How long the run took, per document and end to end. The total covers the
+    # shared stages (text checks, metadata, the report itself) that are not
+    # charged to any single file, so it is larger than the per-file sum.
+    master_row = next((r for r in timing_rows if r.get("role") == "master"), None)
+    if master_row is not None:
+        ws_overview.append([])
+        ws_overview.append(["Master scan time", format_duration(master_row.get("seconds", ""))])
+    if total_seconds is not None:
+        ws_overview.append(["Total run time", format_duration(total_seconds)])
 
     # --------------------------------------------------------
     # TAB 2: TOC
@@ -518,6 +558,7 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
         return cb
 
     say(0.0, "Starting")
+    run_started = time.perf_counter()
 
     print("=" * 80)
     print("UNIFIED PDF QUALITY & VISUAL INSPECTION ENGINE (MAIN)")
@@ -533,12 +574,22 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     if os.path.isfile(translated_path_or_folder):
         translated_files.append(translated_path_or_folder)
     elif os.path.isdir(translated_path_or_folder):
-        for f in os.listdir(translated_path_or_folder):
+        for f in sorted(os.listdir(translated_path_or_folder)):
             if f.lower().endswith(".pdf"):
                 translated_files.append(os.path.join(translated_path_or_folder, f))
     else:
         print(f"ERROR: Invalid translated path or folder: {translated_path_or_folder}")
         return
+
+    # One folder per batch now holds the master alongside its translations: the
+    # user points at a single folder and names which PDF is the English master,
+    # and every other PDF in it is a translation. So the master must be dropped
+    # from this list - a document is never inspected as a translation of itself,
+    # which would otherwise report a spurious 100%-match "translation" and skew
+    # every per-file tally.
+    master_abs = os.path.abspath(source_pdf_path)
+    translated_files = [p for p in translated_files
+                        if os.path.abspath(p) != master_abs]
 
     if not translated_files:
         print("ERROR: No translated PDF files found to inspect!")
@@ -552,6 +603,7 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     # translations, which on a 92-page manual was most of the run.
     print("Extracting Master Models for Source PDF...")
     say(0.01, "Scanning the master")
+    master_t0 = time.perf_counter()
     DocScan.forget()
     DocScan.prepare(source_pdf_path, tables=False, codes=True,
                     progress=stage_progress(0.01, 0.12, "Scanning the master"))
@@ -569,9 +621,12 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
         source_pdf_path, eng_crops_out_dir, margins=active_margins,
         progress=stage_progress(0.13, 0.07, "Cropping the master"))
 
+    master_seconds = time.perf_counter() - master_t0
+
     print(f"  Source Topics        : {len(source_toc_numerics)} sections")
     print(f"  Source Images        : {source_count_model['total']} "
           f"({'per-topic' if source_count_model['has_toc'] else 'document total - no TOC'})")
+    print(f"  Master scanned in    : {master_seconds:.1f}s")
     print()
 
     # 3. Inspect each translated PDF across all modules
@@ -581,10 +636,15 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     toc_results = []
     bc_qr_results = []
     count_results = []
+    matched_results = []
     img_results_summary = []
     img_crop_details_list = []
+    # Wall-clock time spent on each translated PDF, keyed by filename, so the
+    # report and the Review tab can show how long every document took.
+    timing_by_file = {}
 
     diff_crops_out_dir = os.path.join(output_dir, "Cropped_Comparison")
+    matched_evidence_dir = os.path.join(output_dir, "Matched_Images")
 
     # Documents occupy the bar from 20% to 82%; the text checks, the metadata
     # and the report share what is left.
@@ -593,6 +653,7 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
 
     for idx, tr_path in enumerate(translated_files, start=1):
         tr_filename = os.path.basename(tr_path)
+        doc_t0 = time.perf_counter()
         here = DOC_BASE + doc_slice * (idx - 1)
         say(here, f"{tr_filename}  ({idx} of {len(translated_files)})")
         # Scan this translation once, up front, for the three stages below.
@@ -631,6 +692,24 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
                        "rows": [], "overall_verdict": "FAIL", "status": f"FAIL ({e})"}
         count_results.append(cnt_res)
 
+        # 3b. Content-matched pairing within topics whose count already
+        # agrees - catches a graphic broken or swapped in place, which a
+        # count agreeing on both sides and a one-directional hunt that finds
+        # a near-identical sibling elsewhere would both otherwise miss.
+        # Scoped to topics compare_image_counts already calls a match on
+        # count, so this never fires without that context, and it never
+        # depends on reading order - it re-pairs by content, so translated
+        # text reflowing a graphic onto a later page or a different column
+        # does not get reported as a false mismatch.
+        try:
+            matched_findings = ImageCounts.compare_images_matched(
+                source_pdf_path, tr_path, margins=active_margins,
+                evidence_dir=matched_evidence_dir)
+        except Exception as e:
+            print(f"  [WARN] Content-matched image check failed for {tr_filename}: {e}")
+            matched_findings = []
+        matched_results.extend(matched_findings)
+
         # 4. Pure Visual Graphic Images Comparison
         try:
             img_res = Compare_cropped_images.compare_english_crops_with_translated_pdf(
@@ -662,13 +741,18 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
                 "match_img": cd.get("match_img", ""),
             })
 
+        matched_pass = all(f["passed"] for f in matched_findings)
         master_pass = (
             toc_res["status"] == "PASS" and
             bc_res["overall_verdict"] == "PASS" and
             img_res["overall_status"] == "PASS" and
-            cnt_res["overall_verdict"] == "PASS"
+            cnt_res["overall_verdict"] == "PASS" and
+            matched_pass
         )
         master_verdict = "PASS" if master_pass else "FAIL"
+
+        elapsed = time.perf_counter() - doc_t0
+        timing_by_file[tr_filename] = elapsed
 
         print(
             f"  [{idx:02d}/{len(translated_files):02d}] {tr_filename[:34]:<34} | "
@@ -676,7 +760,9 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
             f"BC/QR: {bc_res['overall_verdict']:<4} | "
             f"Img: {img_res['overall_status']:<4} | "
             f"Count: {cnt_res['overall_verdict']:<4} | "
-            f"Master: {master_verdict}"
+            f"Match: {'PASS' if matched_pass else 'FAIL':<4} | "
+            f"Master: {master_verdict} | "
+            f"{format_duration(elapsed)}"
         )
 
     print()
@@ -713,8 +799,13 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     #
     # Neither is about a place on the page, so neither can be a stylesheet
     # region: a collision happens wherever a line runs long, and a missed
-    # segment is wherever the translator's eye slipped. Both skip the first and
-    # last page - covers and back matter are English by design and set by hand.
+    # segment is wherever the translator's eye slipped. The untranslated-text
+    # check still skips the first and last page - covers and back matter carry
+    # addresses, trademarks and a copyright line that are English by design,
+    # and would otherwise flag as missed translation on every single document.
+    # The overlap check does NOT skip them: a cover or back-cover layout can
+    # overrun just like a body page can, and by request this now covers the
+    # whole document, first and last page included.
     #
     # The overlap scan reads the MASTER as well. An overrun caption in the
     # English original is a layout fault that every translation will inherit,
@@ -722,14 +813,14 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     print("Checking for colliding and untranslated text...")
     say(0.82, "Text checks")
     text_evidence_dir = os.path.join(diff_crops_out_dir, "Text_Checks")
-    overlap_results, untranslated_results = [], []
+    overlap_results, untranslated_results, overflow_results = [], [], []
     try:
         every_document = [source_pdf_path] + translated_files
         for i, path in enumerate(every_document):
             say(0.82 + 0.04 * (i / float(len(every_document))),
                 f"Overlap: {os.path.basename(path)}")
             overlap_results.extend(TextOverlap.find_overlaps(
-                path, skip_first_last=True,
+                path, skip_first_last=False,
                 evidence_dir=os.path.join(text_evidence_dir, "overlap")))
         print(f"  {len(overlap_results)} text overlap(s) across "
               f"{len(every_document)} document(s)")
@@ -748,6 +839,24 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
               f"{len(translated_files)} translation(s)")
     except Exception as e:
         print(f"  ERROR: the untranslated-text check failed: {e}")
+
+    # Text that runs past the left/right margin - the same ignored-margin block
+    # the run extracts with decides what counts as the live area, so the header,
+    # the footer and any edge-anchored thumb tab are furniture and are skipped.
+    # The master is scanned too: an overrun in the English original is a real
+    # layout fault, and it is one every translation is liable to inherit.
+    try:
+        every_document = [source_pdf_path] + translated_files
+        for i, path in enumerate(every_document):
+            say(0.86 + 0.04 * (i / float(len(every_document))),
+                f"Margin overflow: {os.path.basename(path)}")
+            overflow_results.extend(MarginOverflow.find_overflows(
+                path, margins=active_margins, skip_first_last=False,
+                evidence_dir=os.path.join(text_evidence_dir, "overflow")))
+        print(f"  {len(overflow_results)} margin overflow(s) across "
+              f"{len(every_document)} document(s)")
+    except Exception as e:
+        print(f"  ERROR: the margin-overflow check failed: {e}")
     print()
 
     # 6. Document metadata for the master and every translation.
@@ -765,6 +874,41 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
             print(f"  ERROR: metadata scan failed: {e}")
         print()
 
+    # Per-document timing, master first, ready for the report and the GUI. The
+    # total is measured end to end, so it also covers the shared stages (text
+    # checks, metadata) that are not charged to any single file.
+    total_seconds = time.perf_counter() - run_started
+    timing_rows = [{
+        "filename": os.path.basename(source_pdf_path),
+        "role": "master",
+        "seconds": round(master_seconds, 1),
+    }]
+    for tr_path in translated_files:
+        nm = os.path.basename(tr_path)
+        timing_rows.append({
+            "filename": nm,
+            "role": "translation",
+            "seconds": round(timing_by_file.get(nm, 0.0), 1),
+        })
+
+    # One clearly separated line per figure, colons aligned, so the three are
+    # easy to tell apart at a glance instead of running together on one line.
+    tr_total = sum(timing_by_file.values())
+    n_tr = len(translated_files)
+    timing_lines = [
+        ("Master scan", format_duration(master_seconds)),
+        (f"Translations ({n_tr})", format_duration(tr_total)),
+        ("Avg per translation", format_duration(tr_total / n_tr) if n_tr else "-"),
+        ("Total run", format_duration(total_seconds)),
+    ]
+    label_w = max(len(lbl) for lbl, _ in timing_lines)
+    print("=" * 80)
+    print("TIMING")
+    for lbl, val in timing_lines:
+        print(f"   {lbl:<{label_w}}  :  {val}")
+    print("=" * 80)
+    print()
+
     # 7. Generate ONE single Excel report
     unified_report_path = os.path.join(output_dir, "PDF_Quality_Inspection_Report.xlsx")
     say(0.97, "Writing the report")
@@ -781,6 +925,8 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
         region_note=region_note,
         overlap_results=overlap_results,
         untranslated_results=untranslated_results,
+        timing_rows=timing_rows,
+        total_seconds=round(total_seconds, 1),
     )
 
     # The workers have nothing left to do; hand the cores back before the
@@ -801,11 +947,15 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
         "img_results_summary": img_results_summary,
         "img_crop_details": img_crop_details_list,
         "count_results": count_results,
+        "matched_results": matched_results,
         "region_results": region_results,
         "region_note": region_note,
         "metadata_rows": metadata_rows,
         "overlap_results": overlap_results,
         "untranslated_results": untranslated_results,
+        "overflow_results": overflow_results,
+        "timing_rows": timing_rows,
+        "total_seconds": round(total_seconds, 1),
     }
 
 

@@ -22,10 +22,13 @@ Godwin output/
 models/
 *.safetensors
 *.bin
-
+Document/
 # Temporary / OS / Office lock files
 ~$*
 *.tmp
 .DS_Store
 Thumbs.db
 *.log
+Template annotation/
+templates/
+build_venv/

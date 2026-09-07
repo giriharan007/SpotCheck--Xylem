@@ -32,8 +32,11 @@ Measured on the Start 350 set:
 The second row is the case worth having: a caption that runs long in German and
 lands on the line below it. That is what this is for.
 
-The first and last page are skipped - cover and back matter are set by hand and
-their furniture legitimately sits closer together than body text ever does.
+skip_first_last defaults to True here, but the pipeline calls this with it set
+to False: an overrun cover or back-cover layout is a real defect too, and by
+request the running inspection now checks every page, first and last
+included. The default stays True for any other caller that wants the old
+cover/back-matter-is-hand-set behaviour.
 """
 
 import os

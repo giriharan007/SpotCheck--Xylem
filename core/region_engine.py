@@ -1010,6 +1010,15 @@ def run_batch_multiple_regions_check(
                 if f.lower().endswith(".pdf"):
                     tr_files.append(os.path.join(root, f))
 
+    # The batch folder now holds the master alongside its translations, so the
+    # master would otherwise be region-checked against itself - a guaranteed
+    # 100% pass on every region that only pads the results. Drop it.
+    try:
+        master_abs = os.path.abspath(eng_pdf_path)
+        tr_files = [p for p in tr_files if os.path.abspath(p) != master_abs]
+    except Exception:
+        pass
+
     # Regions flagged scope_only exist purely to bound their sub-regions'
     # searches. They still resolve as parents above, but are never verified.
     checkable = [r for r in regions if not r.get("scope_only", False)]

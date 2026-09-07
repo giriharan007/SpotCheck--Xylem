@@ -64,7 +64,7 @@ class PageDiffWindow(ctk.CTkToplevel):
     """Two pages, one scroll, differences boxed on both."""
 
     def __init__(self, parent, master_pdf, master_page, trans_pdf, trans_page,
-                 focus_rect=None, margins=None, title_hint=""):
+                 focus_rect=None, focus_side="master", margins=None, title_hint=""):
         super().__init__(parent)
 
         self.master_pdf = master_pdf
@@ -72,6 +72,13 @@ class PageDiffWindow(ctk.CTkToplevel):
         self.master_page = int(master_page)
         self.trans_page = int(trans_page)
         self.focus_rect = focus_rect            # the reviewed region, in points
+        # Which pane focus_rect was actually measured on. A stylesheet region
+        # check measures on the master page, so "master" is the historical
+        # default - but an untranslated-text or text-overlap finding is
+        # measured on the TRANSLATED page only, and drawing that rect on the
+        # master page lands it wherever those same raw coordinates happen to
+        # fall there, which is rarely the same sentence.
+        self.focus_side = focus_side if focus_side in ("master", "trans") else "master"
         self.margins = margins
         self.title_hint = title_hint
 
@@ -321,11 +328,18 @@ class PageDiffWindow(ctk.CTkToplevel):
         for cv in (p["canvas"] for p in self.panes.values()):
             cv.delete("mark")
 
-        # The region this review is actually about, so it is findable at a glance.
+        # The region this review is actually about, so it is findable at a
+        # glance. Solid + labelled on the side it was actually measured on;
+        # a dashed echo at the same raw coordinates on the other side is only
+        # meaningful when both pages share a layout, which a stylesheet
+        # region does (same template, both languages) and a free-floating
+        # text-check finding does not - so the echo is master-only.
         if self.focus_rect:
-            self._box("master", self.focus_rect, FOCUS_COLOR, width=2,
+            other = "trans" if self.focus_side == "master" else "master"
+            self._box(self.focus_side, self.focus_rect, FOCUS_COLOR, width=2,
                       label="reviewed here")
-            self._box("trans", self.focus_rect, FOCUS_COLOR, width=2, dash=(5, 3))
+            if self.focus_side == "master":
+                self._box(other, self.focus_rect, FOCUS_COLOR, width=2, dash=(5, 3))
 
         for i, d in enumerate(self.result["diffs"]):
             colour = DIFF_COLORS.get(d["kind"], RADIANT_ORANGE)
@@ -403,14 +417,14 @@ class PageDiffWindow(ctk.CTkToplevel):
 
 
 def open_page_diff(parent, master_pdf, master_page, trans_pdf, trans_page,
-                   focus_rect=None, margins=None, title_hint=""):
+                   focus_rect=None, focus_side="master", margins=None, title_hint=""):
     """Open the comparison window, or return None with a reason if it cannot."""
     for path, what in ((master_pdf, "master"), (trans_pdf, "translated")):
         if not path or not os.path.isfile(path):
             return None, f"The {what} PDF could not be found:\n{path or '(not set)'}"
     try:
         win = PageDiffWindow(parent, master_pdf, master_page, trans_pdf, trans_page,
-                             focus_rect=focus_rect, margins=margins,
+                             focus_rect=focus_rect, focus_side=focus_side, margins=margins,
                              title_hint=title_hint)
         win.after(120, win.lift)
         return win, None

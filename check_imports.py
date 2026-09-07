@@ -39,6 +39,7 @@ MODULES = [
     "core.region_engine",
     "core.text_overlap",
     "core.untranslated",
+    "core.margin_overflow",
     "gui.theme",
     "gui.app_window",
     "gui.region_dialog",
