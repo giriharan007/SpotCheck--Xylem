@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import shutil
+import stat
 import threading
 import queue
 import traceback
@@ -1141,15 +1142,6 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             # A count agreeing on both sides does not mean nothing broke - two
             # icons can trade places, or one can render corrupted in place,
             # while the tally and the one-directional hunt both still pass.
-            # This pairs graphics by what they look like rather than by
-            # reading order, so it stays correct even when translated text
-            # reflows a graphic onto a later page or a different column.
-            try:
-                self.comparison_gallery.load_matched_images(
-                    self.last_run_results.get("matched_results", []))
-            except Exception as e:
-                print(f"[WARN] Could not publish content-matched image results: {e}")
-
             # The actual table-of-contents check: does the translation's
             # section numbering match the master's, in the same order. Used
             # to be Excel-only like Image Counts was.
@@ -1267,6 +1259,35 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         except Exception:
             return False        # different drives, or an unresolvable path
 
+    def _release_output_previews(self):
+        """
+        Drop every preview image the tabs are holding.
+
+        The thumbnails come out of the output folder, so while one is on screen
+        its file - and every folder above it - is in use. Each tab is asked
+        separately and failures are ignored: a tab that was never built, or has
+        no preview showing, is not a reason to abandon the clear.
+        """
+        for tab in (getattr(self, "comparison_gallery", None),
+                    getattr(self, "text_checks_tab", None),
+                    getattr(self, "region_tab", None)):
+            if tab is None:
+                continue
+            for attr in ("det_image", "crop_thumb_lbl", "region_preview_lbl"):
+                widget = getattr(tab, attr, None)
+                if widget is None:
+                    continue
+                try:
+                    widget.configure(image="")
+                    widget.image = None
+                except Exception:
+                    pass
+            for attr in ("preview_tk_img", "_preview_img", "tk_image"):
+                try:
+                    setattr(tab, attr, None)
+                except Exception:
+                    pass
+
     def _clear_output_folder(self):
         """
         Empty the configured output directory, after an explicit confirmation.
@@ -1298,9 +1319,19 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         eng = self.eng_pdf_var.get().strip().strip('"').strip("'")
         tr = self.tr_dir_var.get().strip().strip('"').strip("'")
         clashes = []
+        # Only one direction is dangerous. Clearing deletes what is INSIDE the
+        # output folder, so an input is at risk exactly when it sits inside it -
+        # which _is_inside also reports for the two being the same folder.
+        #
+        # The reverse was refused too, and should not have been: an output
+        # folder nested in the folder holding the PDFs is the normal way to
+        # arrange this (Input\English\SpotCheck_Output beside the manuals), and
+        # the PDFs are that folder's SIBLINGS. Nothing inside the output folder
+        # is a source document, so nothing was ever at risk, and refusing left
+        # no way to clear the output at all.
         if eng and self._is_inside(eng, real_out):
             clashes.append(f"the English master PDF ({os.path.basename(eng)})")
-        if tr and (self._is_inside(tr, real_out) or self._is_inside(real_out, tr)):
+        if tr and self._is_inside(tr, real_out):
             clashes.append("the translated PDFs folder")
         if clashes:
             messagebox.showerror(
@@ -1336,14 +1367,38 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         ):
             return
 
+        # Anything this window is still previewing is read from the folder about
+        # to be deleted. Dropping the previews first releases them, so a
+        # thumbnail the reviewer happened to click last does not keep its whole
+        # topic folder undeletable.
+        self._release_output_previews()
+
+        def _retry_readonly(func, path, _exc):
+            """
+            rmtree's error hook: clear the read-only bit and try that one again.
+
+            Windows refuses to unlink a read-only file, and reports it as a
+            permission error indistinguishable from the file being open. This
+            settles the half that is actually fixable.
+            """
+            try:
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
+            except OSError:
+                raise
+
         removed, failed = 0, []
         for name in entries:
             target = os.path.join(real_out, name)
             try:
                 if os.path.isdir(target) and not os.path.islink(target):
-                    shutil.rmtree(target)
+                    shutil.rmtree(target, onerror=_retry_readonly)
                 else:
-                    os.remove(target)
+                    try:
+                        os.remove(target)
+                    except PermissionError:
+                        os.chmod(target, stat.S_IWRITE)
+                        os.remove(target)
                 removed += 1
             except OSError as e:
                 failed.append(f"{name}: {e}")

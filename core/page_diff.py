@@ -85,14 +85,23 @@ MATCH_THRESHOLD = 0.86
 KIND_MISSING = "missing"
 KIND_EXTRA = "extra"
 KIND_MOVED = "moved"
+KIND_REFLOWED = "reflowed"
 
 KIND_LABELS = {
     KIND_MISSING: "missing from the translation",
     KIND_EXTRA: "extra in the translation",
     KIND_MOVED: "moved",
+    KIND_REFLOWED: "moved to an adjacent page",
 }
 
-KIND_ORDER = (KIND_MISSING, KIND_EXTRA, KIND_MOVED)
+KIND_ORDER = (KIND_MISSING, KIND_EXTRA, KIND_MOVED, KIND_REFLOWED)
+
+# How far either side of the paired page to look before calling a graphic
+# missing or extra. Translated text runs a different length, so a warning that
+# sat at the foot of one page routinely lands at the head of the next - which
+# on a strictly page-to-page comparison shows up twice, once as a deletion here
+# and once as an addition there, and both are false.
+NEIGHBOUR_PAGES = 1
 
 
 def _mask_text(page):
@@ -140,6 +149,15 @@ def _ink(img):
     return (gray < INK_LEVEL).astype(np.uint8)
 
 
+def page_count(pdf_path):
+    """How many pages a document has, or 0 if it cannot be opened."""
+    try:
+        with fitz.open(pdf_path) as doc:
+            return len(doc)
+    except Exception:
+        return 0
+
+
 def page_graphics(pdf_path, page_no, margins=None):
     """
     The graphics on a page, in points, exactly as the cropper sees them.
@@ -153,11 +171,12 @@ def page_graphics(pdf_path, page_no, margins=None):
     and flagging it here would be a permanent false alarm on every cover page.
     barcode_qr.py checks those on their own terms.
     """
-    from core.crop_images import get_all_image_candidates, is_blank_region
+    from core.crop_images import (MASK_TEXT_IN_CROPS, get_all_image_candidates,
+                                  is_blank_region, mask_text_inside_rect,
+                                  survives_text_masking)
     from core import barcode_qr as Barcode_QR_Check
     from core import margins as page_margins
 
-    out = []
     with fitz.open(pdf_path) as doc:
         if not 1 <= page_no <= len(doc):
             return []
@@ -166,6 +185,8 @@ def page_graphics(pdf_path, page_no, margins=None):
             codes = [c["rect"] for c in Barcode_QR_Check.detect_barcodes_and_qr_codes(page)]
         except Exception:
             codes = []
+
+        kept = []
         for r in get_all_image_candidates(
                 page, margins=page_margins.margins_for_page(margins, page_no, len(doc))):
             if any(fitz.Rect(c.x0 - 5, c.y0 - 5, c.x1 + 5, c.y1 + 5).intersects(r)
@@ -173,8 +194,20 @@ def page_graphics(pdf_path, page_no, margins=None):
                 continue
             if is_blank_region(page, r):
                 continue
-            out.append((float(r.x0), float(r.y0), float(r.x1), float(r.y1)))
-    return out
+            kept.append(r)
+
+        # The last two filters the cropper applies: a region that is empty once
+        # its text is masked, and a piece of table ruling. Without them this
+        # view boxed table grids as graphics and reported a row-height change -
+        # which every correct translation has - as a difference. The claim in
+        # this docstring that all three checks share one definition of "a
+        # graphic" was only true down to here.
+        if kept and MASK_TEXT_IN_CROPS:
+            for r in kept:
+                mask_text_inside_rect(page, r)
+
+        return [(float(r.x0), float(r.y0), float(r.x1), float(r.y1))
+                for r in kept if survives_text_masking(page, r)]
 
 
 def _px(rect_pt, px_per_pt, bounds, pad_px=2):
@@ -280,6 +313,43 @@ def compare_pages(master_pdf, master_page, trans_pdf, trans_page,
         x, y, w, h = box
         return (x * scale_pt, y * scale_pt, (x + w) * scale_pt, (y + h) * scale_pt)
 
+    # Neighbouring pages, rendered only if something actually goes looking for
+    # them, and only once each. Both documents are needed: a graphic can flow
+    # forward out of the master page, or into the translated one.
+    _neighbours = {}
+
+    def neighbour_gray(pdf_path, page_no, total_hint=None):
+        key = (pdf_path, page_no)
+        if key not in _neighbours:
+            try:
+                img, _pt = render_page(pdf_path, page_no, dpi=dpi, mask_text=True,
+                                       size=master_img.size)
+                _neighbours[key] = np.asarray(img.convert("L"))
+            except Exception:
+                _neighbours[key] = None          # no such page, or unreadable
+        return _neighbours[key]
+
+    def found_nearby(patch, pdf_path, centre_page):
+        """
+        The adjacent page carrying this graphic, or None.
+
+        Nearest page first, so a graphic present on both neighbours is
+        reported against the one it most likely flowed to.
+        """
+        for step in range(1, NEIGHBOUR_PAGES + 1):
+            for page_no in (centre_page - step, centre_page + step):
+                if page_no < 1:
+                    continue
+                gray = neighbour_gray(pdf_path, page_no)
+                if gray is None:
+                    continue
+                if patch.shape[0] > gray.shape[0] or patch.shape[1] > gray.shape[1]:
+                    continue
+                score, _fx, _fy = _find(patch, gray)
+                if score >= MATCH_THRESHOLD:
+                    return page_no, score
+        return None
+
     diffs = []
     for (x, y, w, h) in m_boxes:
         if w < 4 or h < 4:
@@ -287,6 +357,22 @@ def compare_pages(master_pdf, master_page, trans_pdf, trans_page,
         patch = m_gray[y:y + h, x:x + w]
         score, fx, fy = _find(patch, t_work)
         if score < MATCH_THRESHOLD:
+            # Not on this page - but reflow may simply have carried it onto the
+            # next or previous one, which is not a deletion and must not be
+            # reported as one.
+            near = found_nearby(patch, trans_pdf, trans_page)
+            if near:
+                near_page, near_score = near
+                diffs.append({
+                    "kind": KIND_REFLOWED,
+                    "rect_master": as_pt((x, y, w, h)),
+                    "rect_trans": None,
+                    "shift_pt": None,
+                    "score": near_score,
+                    "found_on_page": near_page,
+                    "found_side": "trans",
+                })
+                continue
             diffs.append({
                 "kind": KIND_MISSING,
                 "rect_master": as_pt((x, y, w, h)),
@@ -309,12 +395,27 @@ def compare_pages(master_pdf, master_page, trans_pdf, trans_page,
             })
         # Matched in place: nothing to report.
 
-    # Anything on the translation that no master graphic claimed is an addition.
+    # Anything on the translation that no master graphic claimed is an addition -
+    # unless the master simply carries it on the page before or after, which is
+    # the same reflow seen from the other side.
     for (x, y, w, h) in t_boxes:
         if w < 4 or h < 4:
             continue
         covered = float(claimed[y:y + h, x:x + w].mean())
         if covered >= 0.5:
+            continue
+        near = found_nearby(t_gray[y:y + h, x:x + w], master_pdf, master_page)
+        if near:
+            near_page, near_score = near
+            diffs.append({
+                "kind": KIND_REFLOWED,
+                "rect_master": None,
+                "rect_trans": as_pt((x, y, w, h)),
+                "shift_pt": None,
+                "score": near_score,
+                "found_on_page": near_page,
+                "found_side": "master",
+            })
             continue
         diffs.append({
             "kind": KIND_EXTRA,

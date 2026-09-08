@@ -39,6 +39,160 @@ def extract_toc_numerics(pdf_path):
 TOPIC_CODE = re.compile(r"^\s*(\d+(?:\.\d+)*)")
 
 
+# A numbered heading as it is PRINTED on the page: the code, whitespace, then
+# the title. The whitespace matters - it is what separates "4.7.3 Prepare the
+# SUBCAB cables" from the list item "3. Check the functionality", whose code is
+# followed by a full stop.
+_PRINTED_HEADING = re.compile(r"^(\d+(?:\.\d+)*)\s+(\S.*)$")
+
+# A contents listing looks exactly like a run of headings, so a page carrying
+# this many numbered-heading lines is taken to BE the contents page and skipped.
+# Real body pages in these manuals carry one or two headings; the contents page
+# carries dozens.
+_CONTENTS_PAGE_HEADINGS = 6
+
+# How much larger than the body text a line must be set to count as a heading.
+# Section headings in these manuals run 1.15x body and up; a numbered list item
+# is set at body size exactly.
+_HEADING_SIZE_RATIO = 1.06
+
+# Deeper than this is a part number or a measurement, not a section.
+_MAX_TOPIC_DEPTH = 4
+
+_text_topics_cache = {}
+
+
+def _page_lines(doc):
+    """Every text line in the document as (page_no, y, x, size, text)."""
+    for p_idx in range(len(doc)):
+        try:
+            blocks = doc[p_idx].get_text("dict").get("blocks", [])
+        except Exception:
+            continue
+        for b in blocks:
+            if b.get("type") != 0:
+                continue
+            for line in b.get("lines", []):
+                spans = line.get("spans", [])
+                if not spans:
+                    continue
+                text = "".join(s.get("text", "") for s in spans).strip()
+                if not text:
+                    continue
+                # The size of the span carrying the most characters: a heading
+                # with a trailing footnote marker is still a heading.
+                size = max(spans, key=lambda s: len(s.get("text", "") or ""))\
+                    .get("size", 0.0)
+                bbox = line.get("bbox") or (0, 0, 0, 0)
+                yield p_idx + 1, float(bbox[1]), float(bbox[0]), float(size), text
+
+
+def _body_size(lines):
+    """The document's dominant text size, weighted by how much text is set in it."""
+    weight = {}
+    for _p, _y, _x, size, text in lines:
+        if size > 0:
+            weight[round(size, 1)] = weight.get(round(size, 1), 0) + len(text)
+    if not weight:
+        return 0.0
+    return max(weight.items(), key=lambda kv: kv[1])[0]
+
+
+def _code_key(code):
+    return tuple(int(p) for p in code.split("."))
+
+
+def topics_from_text(pdf_path):
+    """
+    Numbered headings read off the printed page, for a document with no outline.
+
+    Every topic-aware check in this application - which pages a topic spans,
+    which topic a graphic belongs to, which translated page a master page
+    became - was built on doc.get_toc(), the PDF's bookmarks. A translation
+    that came back from DTP without its bookmarks therefore had no topics at
+    all, and every one of those checks quietly fell back to "page N is page N".
+    Once reflow has pushed the Spanish rendering two topics further on, that
+    puts English 1.5.2 against Spanish 1.8 and reports the entire page as
+    changed.
+
+    The section NUMBER survives translation even when the bookmarks do not:
+    "4.7.3 Prepare the SUBCAB cables" is "4.7.3 Prepare los cables SUBCAB".
+    So when there is no outline, the headings are read from the page text
+    instead, which restores topic alignment for a document that has lost them.
+
+    Returns the same shape as crop_images.extract_topics_with_positions:
+    [{"level", "title", "start_page", "top_y"}], in reading order.
+    """
+    try:
+        key = (os.path.abspath(pdf_path), os.path.getmtime(pdf_path))
+    except OSError:
+        key = (os.path.abspath(pdf_path), None)
+    if key in _text_topics_cache:
+        return _text_topics_cache[key]
+
+    try:
+        with pymupdf.open(pdf_path) as doc:
+            lines = list(_page_lines(doc))
+    except Exception as e:
+        print(f"  [TOC] Could not read printed headings from "
+              f"{os.path.basename(pdf_path)}: {e}")
+        return []
+
+    body = _body_size(lines)
+    min_size = body * _HEADING_SIZE_RATIO if body else 0.0
+
+    # Candidates, and how many each page carries - a contents page is nothing
+    # but candidates, and must not be mistaken for the sections themselves.
+    per_page = {}
+    for page_no, y, x, size, text in lines:
+        m = _PRINTED_HEADING.match(text)
+        if not m:
+            continue
+        code, title = m.group(1), m.group(2)
+        if len(code.split(".")) > _MAX_TOPIC_DEPTH:
+            continue
+        if size < min_size:
+            continue
+        per_page.setdefault(page_no, []).append((y, x, code, title))
+
+    candidates = []
+    for page_no, found in sorted(per_page.items()):
+        if len(found) >= _CONTENTS_PAGE_HEADINGS:
+            continue                       # the contents listing itself
+        for y, x, code, title in found:
+            candidates.append((page_no, y, code, title))
+
+    candidates.sort(key=lambda c: (c[0], c[1]))
+
+    # A section number printed inside a cross-reference ("see 4.7.3") or a
+    # table cell breaks the ascending order the real headings keep. Taking only
+    # codes that advance drops those without needing to know what they were.
+    topics, seen, last = [], set(), None
+    for page_no, y, code, title in candidates:
+        if code in seen:
+            continue
+        try:
+            k = _code_key(code)
+        except ValueError:
+            continue
+        if last is not None and k <= last:
+            continue
+        seen.add(code)
+        last = k
+        topics.append({
+            "level": len(code.split(".")),
+            "title": f"{code} {title}".strip(),
+            "start_page": page_no,
+            "top_y": y,
+        })
+
+    if topics:
+        print(f"  [TOC] {os.path.basename(pdf_path)} has no usable outline - "
+              f"{len(topics)} topic(s) read from the printed headings")
+    _text_topics_cache[key] = topics
+    return topics
+
+
 def topic_page_spans(pdf_path):
     """
     Which pages each numbered topic occupies, keyed by its numeric code.
@@ -73,6 +227,20 @@ def topic_page_spans(pdf_path):
     except Exception as e:
         print(f"  [TOC] Could not read topic spans from {os.path.basename(pdf_path)}: {e}")
         return {}
+
+    # No bookmarks is not the same as no topics. A translation that lost its
+    # outline in DTP still prints its section numbers, and without this the
+    # whole document collapses to one span and every caller falls back to
+    # pairing page N with page N.
+    if not entries:
+        printed = topics_from_text(pdf_path)
+        entries = [(TOPIC_CODE.match(t["title"]).group(1), t["start_page"])
+                   for t in printed if TOPIC_CODE.match(t["title"])]
+        try:
+            with pymupdf.open(pdf_path) as doc:
+                total = len(doc)
+        except Exception:
+            return {}
 
     if not entries:
         return {}
@@ -147,6 +315,56 @@ def page_mapper(master_pdf_path, target_pdf_path):
     mapped.shifts = shifts
     mapped.usable = bool(shifts)
     return mapped
+
+
+def topic_at_page(pdf_path, page_no):
+    """
+    The numeric code of the topic that owns a page, or None.
+
+    Where two topics share a page the later one wins, because that is the one
+    a reader turning to that page is looking at.
+    """
+    spans = topic_page_spans(pdf_path)
+    if not spans:
+        return None
+    best, best_start = None, -1
+    for code, (lo, hi) in spans.items():
+        if lo <= page_no <= hi and lo >= best_start:
+            best, best_start = code, lo
+    return best
+
+
+def matching_page(master_pdf_path, target_pdf_path, master_page):
+    """
+    The page of the translation holding the same TOPIC as this master page.
+
+    Pairing page N with page N is only right until the first paragraph grows.
+    By the middle of a manual the Spanish rendering is two pages further on, so
+    "the same page number" shows a reviewer two unrelated pages and reports the
+    whole spread as changed. Topic 4.6 is topic 4.6 in every language, so the
+    topic is what the two documents actually have in common.
+
+    Returns (page, topic_code, why). `why` is "topic" when the pairing came from
+    a topic both documents carry, "drift" when it was interpolated from the
+    nearest topic boundary, and "same page" when neither document has a usable
+    outline and there was nothing better to go on.
+    """
+    src = topic_page_spans(master_pdf_path)
+    dst = topic_page_spans(target_pdf_path)
+    code = topic_at_page(master_pdf_path, master_page)
+
+    if code and code in src and code in dst:
+        # Where the page sits inside its topic, carried across. Clamped to the
+        # topic's extent in the translation so a longer section cannot push the
+        # pairing past its end.
+        offset = master_page - src[code][0]
+        lo, hi = dst[code]
+        return max(lo, min(hi, lo + offset)), code, "topic"
+
+    mapped = page_mapper(master_pdf_path, target_pdf_path)
+    if mapped.usable:
+        return mapped(master_page), code, "drift"
+    return master_page, code, "same page"
 
 
 def topic_code_of(title):

@@ -3312,7 +3312,12 @@ class RegionInspectorFrame(ctk.CTkFrame):
             comp_img_path = r.get("comparison_img_path", "")
             if comp_img_path and os.path.exists(comp_img_path):
                 try:
-                    c_img = Image.open(comp_img_path)
+                    # Closed as soon as the pixels are read. Image.open is lazy
+                    # and holds the file until it is, and on Windows an open
+                    # handle is enough to make Clear Output Folder fail on that
+                    # file and every folder above it.
+                    with Image.open(comp_img_path) as raw:
+                        c_img = raw.copy()
                     c_img.thumbnail((200, 70))
                     self.preview_tk_img = ImageTk.PhotoImage(c_img, master=self)
                     self.crop_thumb_lbl.config(image=self.preview_tk_img, text="")

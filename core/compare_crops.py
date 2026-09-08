@@ -152,6 +152,42 @@ def _iter_english_crops(eng_crop_dir):
     return rows
 
 
+def imread_unicode(path, flags=cv2.IMREAD_GRAYSCALE):
+    """
+    Read an image from a path that may contain non-ASCII characters.
+
+    cv2.imread goes through the ANSI file API on Windows and simply returns
+    None for a path it cannot represent in the local code page. Every crop is
+    filed under its topic title, and a translated title is full of characters
+    that qualify - "1.1 Einfuehrung" is fine but "1.1 Einführung" is not,
+    nor is "4.1 Vorsichtsmaßnahmen", nor anything at all in Greek. The
+    read failed, the crop looked empty, and every graphic in those topics was
+    reported NOT FOUND while the ASCII-titled topics beside them passed. Going
+    through numpy sidesteps the code page entirely.
+    """
+    try:
+        data = np.fromfile(path, dtype=np.uint8)
+    except OSError:
+        return None
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, flags)
+
+
+def imwrite_unicode(path, img):
+    """Write an image to a path that may contain non-ASCII characters."""
+    ext = os.path.splitext(path)[1] or ".png"
+    try:
+        ok, buf = cv2.imencode(ext, img)
+        if not ok:
+            return False
+        buf.tofile(path)
+        return True
+    except Exception as e:
+        print(f"  [WARN] could not write {path}: {e}")
+        return False
+
+
 def _score_on_page(crop, page_gray):
     """Best template score for one crop on one page, or None if it will not fit."""
     if crop.shape[0] > page_gray.shape[0] or crop.shape[1] > page_gray.shape[1]:
@@ -220,8 +256,92 @@ def _crop_signature(crop):
     return (crop.shape, small.tobytes())
 
 
+# How far off the master's scale a translation's artwork may be drawn and still
+# be recognised. A DTP round trip that places a figure at 99% of its original
+# size changes nothing a reviewer would call a difference, but normalised
+# correlation on thin-line artwork collapses: 1% out takes identical artwork
+# from 100% to 56%, well under the pass mark, and reports it as CHECK. Measured
+# on this manual's pump illustrations.
+SCALE_SWEEP = tuple(round(0.90 + i * 0.01, 2) for i in range(21))   # 0.90 .. 1.10
+
+# A light blur before the retry. Rendering the same line at a fractionally
+# different offset lands it on different pixels, which costs a further ~15
+# points on thin strokes; softening both sides removes that without blunting a
+# genuine difference, which is a change of shape rather than of phase.
+_REFINE_BLUR = (3, 3)
+
+
+def _refine_scale(pages, crop, page_no, threshold):
+    """
+    Re-hunt one crop on one page, allowing for artwork drawn at a different size.
+
+    Only ever called when the straight search has already failed, so the cost
+    falls on the handful of crops that would otherwise be reported as CHECK,
+    never on the ones that matched first time.
+
+    Returns (score, loc, scale) for the best scale tried, or None.
+    """
+    page = cv2.GaussianBlur(pages.gray[page_no - 1], _REFINE_BLUR, 0)
+    base = cv2.GaussianBlur(crop, _REFINE_BLUR, 0)
+
+    best = None
+    for f in SCALE_SWEEP:
+        t = base if f == 1.0 else cv2.resize(base, None, fx=f, fy=f,
+                                             interpolation=cv2.INTER_AREA)
+        if t.shape[0] > page.shape[0] or t.shape[1] > page.shape[1]:
+            continue
+        if t.shape[0] < 8 or t.shape[1] < 8:
+            continue
+        res = cv2.matchTemplate(page, t, cv2.TM_CCOEFF_NORMED)
+        _, score, _, loc = cv2.minMaxLoc(res)
+        if best is None or score > best[0]:
+            best = (score, loc, f)
+        if score * 100 >= threshold:
+            break
+    return best
+
+
+def _locate_crop(pages, crop_img, crop_small, scope_pages, scope_desc, span, topic_code,
+                 expect, total_trans_pages, threshold):
+    """
+    One crop's full hunt: its own scope first, the whole document if that is dry.
+
+    A topic-scoped search that found nothing widens rather than reporting a
+    false deletion: an outline entry can be wrong, and a graphic that genuinely
+    moved section is a finding worth naming, not one worth hiding behind "not
+    found".
+
+    Returns (score, page, loc, scope_desc).
+    """
+    best_score, best_page, best_loc = _search(
+        pages, crop_img, crop_small, scope_pages, threshold, expect_page=expect)
+
+    if span and best_score * 100 < threshold:
+        rest = [p for p in range(1, total_trans_pages + 1) if p not in set(scope_pages)]
+        w_score, w_page, w_loc = _search(pages, crop_img, crop_small, rest, threshold,
+                                         expect_page=expect)
+        if w_score > best_score:
+            best_score, best_page, best_loc = w_score, w_page, w_loc
+            scope_desc = f"topic {topic_code}, then widened"
+
+    # Everything above assumes the artwork is drawn at the same size in both
+    # documents. When that fails, the figure being a percent or two out is far
+    # more likely than it having actually changed, so ask that question before
+    # reporting a difference. Only the losing crops pay for this.
+    scale = 1.0
+    if best_page != -1 and best_score * 100 < threshold:
+        hit = _refine_scale(pages, crop_img, best_page, threshold)
+        if hit and hit[0] > best_score:
+            best_score, best_loc, scale = hit
+            if abs(scale - 1.0) > 0.001:
+                scope_desc = f"{scope_desc}, at {scale:.0%} scale"
+
+    return best_score, best_page, best_loc, scope_desc, scale
+
+
 def create_crop_match_image(crop_img_gray, target_page_bgr, max_loc, max_val, eng_page,
-                            trans_page, threshold=SIMILARITY_THRESHOLD, status=None):
+                            trans_page, threshold=SIMILARITY_THRESHOLD, status=None,
+                            scale=1.0):
     """
     Generate side-by-side comparison image of English crop vs Matched Translated region.
 
@@ -232,7 +352,11 @@ def create_crop_match_image(crop_img_gray, target_page_bgr, max_loc, max_val, en
     """
     h_c, w_c = crop_img_gray.shape
     x0, y0 = max_loc
-    x1, y1 = min(target_page_bgr.shape[1], x0 + w_c), min(target_page_bgr.shape[0], y0 + h_c)
+    # A match found at another scale occupies a correspondingly bigger or
+    # smaller piece of the translated page; lifting the master's own width
+    # would crop the figure in half in the side-by-side.
+    h_t, w_t = max(1, int(round(h_c * scale))), max(1, int(round(w_c * scale)))
+    x1, y1 = min(target_page_bgr.shape[1], x0 + w_t), min(target_page_bgr.shape[0], y0 + h_t)
 
     trans_crop_bgr = target_page_bgr[y0:y1, x0:x1].copy()
 
@@ -291,14 +415,15 @@ def compare_english_crops_with_translated_pdf(eng_crop_dir, trans_pdf_path, outp
     total_crops_checked = 0
     total_matches_found = 0
     crop_details = []
-    seen = {}                      # crop fingerprint -> result, for repeated graphics
+    seen = {}                      # crop fingerprint -> one shared hunt, for repeated graphics
+    queued = []                    # per-crop context, reported once the hunts are settled
 
     all_crops = _iter_english_crops(eng_crop_dir)
     for crop_idx, (folder_path, eng_page_num, topic_name, crop_file) in enumerate(all_crops, start=1):
         if progress:
             progress(crop_idx, len(all_crops), "comparing")
         crop_path = os.path.join(folder_path, crop_file)
-        crop_img = cv2.imread(crop_path, cv2.IMREAD_GRAYSCALE)
+        crop_img = imread_unicode(crop_path)
 
         if crop_img is None or crop_img.shape[0] < 8 or crop_img.shape[1] < 8:
             continue
@@ -311,8 +436,6 @@ def compare_english_crops_with_translated_pdf(eng_crop_dir, trans_pdf_path, outp
         if float(crop_img.std()) < 1.0:
             print(f"  Eng Pg {eng_page_num:2d} | {crop_file:24s} -> skipped (blank crop)")
             continue
-
-        total_crops_checked += 1
 
         # Which pages of the translation to search, and why.
         #
@@ -344,27 +467,40 @@ def compare_english_crops_with_translated_pdf(eng_crop_dir, trans_pdf_path, outp
         # and reusing the answer is what keeps a manual full of repeated symbols
         # from costing twenty full-document hunts.
         sig = (_crop_signature(crop_img), tuple(scope_pages))
-        cached = seen.get(sig)
-        if cached is not None:
-            best_score, best_page, best_loc, scope_desc = cached
-        else:
+        group = seen.get(sig)
+        if group is None:
             expect = scope_pages[0] if scope_pages else eng_page_num
-            best_score, best_page, best_loc = _search(
-                pages, crop_img, crop_small, scope_pages, threshold,
-                expect_page=expect)
+            best_score, best_page, best_loc, scope_desc, scale = _locate_crop(
+                pages, crop_img, crop_small, scope_pages, scope_desc, span, topic_code,
+                expect, total_trans_pages, threshold)
+            group = {
+                "scope_desc": scope_desc,
+                "best_score": best_score, "best_page": best_page, "best_loc": best_loc,
+                "scale": scale,
+            }
+            seen[sig] = group
 
-            # A topic-scoped search that found nothing widens to the whole
-            # document rather than reporting a false deletion: an outline entry
-            # can be wrong, and a graphic that genuinely moved section is a
-            # finding worth naming, not one worth hiding behind "not found".
-            if span and best_score * 100 < threshold:
-                rest = [p for p in range(1, total_trans_pages + 1) if p not in set(scope_pages)]
-                w_score, w_page, w_loc = _search(pages, crop_img, crop_small, rest,
-                                                 threshold, expect_page=expect)
-                if w_score > best_score:
-                    best_score, best_page, best_loc = w_score, w_page, w_loc
-                    scope_desc = f"topic {topic_code}, then widened"
-            seen[sig] = (best_score, best_page, best_loc, scope_desc)
+        queued.append({
+            "eng_page_num": eng_page_num, "topic_name": topic_name,
+            "crop_file": crop_file, "crop_path": crop_path,
+            "scope_pages": scope_pages, "group": group,
+        })
+
+    for item in queued:
+        eng_page_num = item["eng_page_num"]
+        topic_name = item["topic_name"]
+        crop_file = item["crop_file"]
+        scope_pages = item["scope_pages"]
+        group = item["group"]
+        best_score = group["best_score"]
+        best_page = group["best_page"]
+        best_loc = group["best_loc"]
+        scope_desc = group["scope_desc"]
+        scale = group.get("scale", 1.0)
+        crop_img = imread_unicode(item["crop_path"])
+        if crop_img is None:
+            continue
+        total_crops_checked += 1
 
         match_pct = best_score * 100
         is_match = match_pct >= threshold
@@ -398,10 +534,11 @@ def compare_english_crops_with_translated_pdf(eng_crop_dir, trans_pdf_path, outp
                 crop_img, pages.bgr(show_page),
                 best_loc if found_at_all else (0, 0),
                 best_score, eng_page_num, show_page, threshold=threshold,
-                status=None if found_at_all else "NOT FOUND")
+                status=None if found_at_all else "NOT FOUND",
+                scale=scale if found_at_all else 1.0)
             os.makedirs(out_dir_for_match, exist_ok=True)
             match_save_path = os.path.join(out_dir_for_match, f"match_{crop_file}")
-            cv2.imwrite(match_save_path, match_img)
+            imwrite_unicode(match_save_path, match_img)
 
         crop_details.append({
             "eng_page": eng_page_num,
@@ -486,3 +623,346 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ==============================================================================
+# CROP-TO-CROP COMPARISON
+#
+# The older path takes each master crop and hunts for it across the whole
+# translated PDF. That asks the translation a question it is badly shaped to
+# answer: the search can land on a look-alike elsewhere, it cannot see a
+# graphic the translation ADDED, and because it matches a fixed-size template
+# against a rendered page it collapses when the artwork is placed at 99% of its
+# original size - identical figures scored 56%.
+#
+# Cropping both documents through the SAME extractor and comparing crop against
+# crop removes all three. Both sides are filtered identically, so the counts are
+# comparable by construction; pairing happens inside a topic, so 4.6 is only
+# ever compared with 4.6; and a pair is scaled to a common size before it is
+# scored, so how big the figure was placed stops mattering.
+# ==============================================================================
+
+# Two crops are scaled to a common size before scoring, so a figure placed at a
+# slightly different size is no longer a difference. Aspect ratio is not
+# normalised away: a figure that changed shape HAS changed.
+ASPECT_TOLERANCE = 1.35
+
+# Softens the sub-pixel differences left by rendering the same artwork at two
+# different offsets, which cost ~15 points on thin-line drawings.
+_PAIR_BLUR = (3, 3)
+
+
+def crop_similarity(a, b):
+    """
+    How alike two crops are, 0..1, independent of the size they were placed at.
+
+    `b` is scaled onto `a`'s shape before scoring. A pair whose aspect ratios
+    disagree by more than ASPECT_TOLERANCE is reported as no match at all
+    rather than squashed into agreement.
+    """
+    if a is None or b is None or a.size == 0 or b.size == 0:
+        return 0.0
+    ah, aw = a.shape[:2]
+    bh, bw = b.shape[:2]
+    if ah < 4 or aw < 4 or bh < 4 or bw < 4:
+        return 0.0
+
+    ar_a, ar_b = aw / float(ah), bw / float(bh)
+    if max(ar_a, ar_b) / max(1e-6, min(ar_a, ar_b)) > ASPECT_TOLERANCE:
+        return 0.0
+
+    bb = cv2.resize(b, (aw, ah), interpolation=cv2.INTER_AREA)
+    aa = cv2.GaussianBlur(a, _PAIR_BLUR, 0)
+    bb = cv2.GaussianBlur(bb, _PAIR_BLUR, 0)
+
+    # A constant crop has no variation for correlation to work on; the cropper
+    # drops these, but an older output folder can still hold one.
+    if float(aa.std()) < 1e-6 or float(bb.std()) < 1e-6:
+        return 1.0 if abs(float(aa.mean()) - float(bb.mean())) < 1.0 else 0.0
+
+    return float(cv2.matchTemplate(aa, bb, cv2.TM_CCOEFF_NORMED)[0][0])
+
+
+# The fallback comparison, used only on a pair the strict one has already
+# failed. Both crops are reduced to this many pixels on their longest side and
+# blurred, which compares where the ink IS rather than which pixels it is on.
+COARSE_PAIR_SIZE = 48
+_COARSE_PAIR_BLUR = (7, 7)
+
+
+def crop_similarity_coarse(a, b):
+    """
+    A structural comparison, for artwork whose proportions changed.
+
+    Some figures are drawn to fit their own text. The data plate in topic 2.2
+    is the same drawing in every language - same logo, same CE mark, same boxes
+    - but its rows are set to the wording inside them, so the German plate is
+    149x77pt against the English 149x83. Rescaling one onto the other then puts
+    every internal rule several pixels out, and correlation on thin-line
+    artwork reads that as a different picture: 35%, against a pass mark of 80.
+
+    Reducing both to a thumbnail and blurring compares the arrangement of the
+    ink instead of the placement of individual strokes. On this manual that
+    lifts the plate to 89% while unrelated graphics stay near 26%, so it is
+    only ever consulted after the strict comparison has already said no.
+    """
+    if a is None or b is None or a.size == 0 or b.size == 0:
+        return 0.0
+    ah, aw = a.shape[:2]
+    if ah < 4 or aw < 4 or b.shape[0] < 4 or b.shape[1] < 4:
+        return 0.0
+
+    bb = cv2.resize(b, (aw, ah), interpolation=cv2.INTER_AREA)
+    scale = COARSE_PAIR_SIZE / float(max(ah, aw))
+    if scale < 1.0:
+        a = cv2.resize(a, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        bb = cv2.resize(bb, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    a = cv2.GaussianBlur(a, _COARSE_PAIR_BLUR, 0)
+    bb = cv2.GaussianBlur(bb, _COARSE_PAIR_BLUR, 0)
+    if float(a.std()) < 1e-6 or float(bb.std()) < 1e-6:
+        return 0.0
+    return float(cv2.matchTemplate(a, bb, cv2.TM_CCOEFF_NORMED)[0][0])
+
+
+# A crop must be at least this share of the other's area before one is checked
+# for being contained in the other. Without it any small element - a circle, a
+# bracket - would be found somewhere inside any large diagram and pass.
+CONTAINMENT_MIN_AREA_RATIO = 0.30
+
+
+def crop_similarity_contained(a, b):
+    """
+    Is the smaller of two crops simply a tighter framing of the larger?
+
+    Clustering does not always draw the same box around the same artwork in two
+    languages. A leader line that reaches out of the figure in one rendering
+    and stops short in another, or a neighbouring element that merges on one
+    side only, changes where the crop ends - so the pictures match but the
+    rectangles do not. Measured on the 3315 manual: the English CSA plate is
+    cropped just before its right-hand mounting hole while the German one keeps
+    it, and comparing the two rectangles scores 31%.
+
+    Both documents render at the same resolution, so the same artwork occupies
+    the same number of pixels in both. That makes the question answerable
+    directly - look for the smaller crop inside the larger - and the same three
+    plates score 98% that way.
+
+    Guarded by area, because "found somewhere inside" is a weak claim when the
+    thing being looked for is tiny.
+    """
+    if a is None or b is None or a.size == 0 or b.size == 0:
+        return 0.0
+    big, small = (a, b) if a.size >= b.size else (b, a)
+    if small.shape[0] > big.shape[0] or small.shape[1] > big.shape[1]:
+        return 0.0                      # not contained in either direction
+    if min(small.shape[:2]) < 8:
+        return 0.0
+    if (small.size / float(big.size)) < CONTAINMENT_MIN_AREA_RATIO:
+        return 0.0
+    if float(small.std()) < 1e-6 or float(big.std()) < 1e-6:
+        return 0.0
+    res = cv2.matchTemplate(cv2.GaussianBlur(big, _PAIR_BLUR, 0),
+                            cv2.GaussianBlur(small, _PAIR_BLUR, 0),
+                            cv2.TM_CCOEFF_NORMED)
+    return float(cv2.minMaxLoc(res)[1])
+
+
+def _group_by_topic(rows):
+    """
+    Crops keyed by the thing both documents share.
+
+    The topic CODE, because titles are translated and numbering is not -
+    "1.2 Safety terminology and symbols" and "1.2 Veiligheidstermen en
+    symbolen" are the same section. Without an outline there is no code, and
+    the page number is the only handle left.
+    """
+    out = {}
+    for folder, page, topic, fname in rows:
+        code = TOC.topic_code_of(topic) if topic else None
+        key = f"topic:{code}" if code else f"page:{page}"
+        out.setdefault(key, []).append((folder, page, topic, fname))
+    return out
+
+
+def create_pair_image(a_gray, b_gray, eng_page, trans_page, score_pct,
+                      threshold=SIMILARITY_THRESHOLD, status=None):
+    """Master crop beside its translated counterpart, captioned with the score."""
+    box = (0, 180, 0) if score_pct >= threshold else (0, 0, 220)
+    a_bgr = cv2.cvtColor(a_gray, cv2.COLOR_GRAY2BGR)
+    if b_gray is None:
+        b_bgr = np.full((max(40, a_gray.shape[0]), max(60, a_gray.shape[1]), 3),
+                        245, np.uint8)
+        cv2.putText(b_bgr, "none", (6, b_bgr.shape[0] // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 200), 1)
+    else:
+        b_bgr = cv2.cvtColor(b_gray, cv2.COLOR_GRAY2BGR)
+
+    h = max(a_bgr.shape[0], b_bgr.shape[0], 50)
+    w1, w2 = a_bgr.shape[1], b_bgr.shape[1]
+    canvas = np.full((h + 40, w1 + w2 + 30, 3), 255, np.uint8)
+    canvas[35:35 + a_bgr.shape[0], 10:10 + w1] = a_bgr
+    canvas[35:35 + b_bgr.shape[0], 20 + w1:20 + w1 + w2] = b_bgr
+    cv2.rectangle(canvas, (20 + w1, 35), (20 + w1 + w2 - 1, 35 + b_bgr.shape[0] - 1),
+                  box, 2)
+
+    f = cv2.FONT_HERSHEY_SIMPLEX
+    label = status or ("PASS" if score_pct >= threshold else "CHECK")
+    cv2.putText(canvas, f"English Graphic (Pg {eng_page})", (10, 22), f, 0.45,
+                (0, 100, 0), 1)
+    right = (f"Translated: [{label}]" if b_gray is None
+             else f"Translated (Pg {trans_page}): {score_pct:.1f}% [{label}]")
+    cv2.putText(canvas, right, (20 + w1, 22), f, 0.45, box, 1)
+    return canvas
+
+
+def _load_crop(folder, fname):
+    """One crop as greyscale, or None when it carries nothing to compare."""
+    img = imread_unicode(os.path.join(folder, fname))
+    if img is None or img.shape[0] < 8 or img.shape[1] < 8:
+        return None
+    if float(img.std()) < 1.0:          # blank: matches anything at random
+        return None
+    return img
+
+
+def compare_crop_sets(eng_crop_dir, tr_crop_dir, output_dir, trans_name=None,
+                      threshold=SIMILARITY_THRESHOLD, progress=None):
+    """
+    Compare the master's crops against the translation's own crops, topic by topic.
+
+    Both documents are cropped by the same extractor, so the two sides are
+    filtered identically and their counts mean the same thing. Within a topic -
+    4.6 against 4.6, never "the same page number" - every master crop is scored
+    against every translation crop and the one-to-one pairing with the best
+    total is taken. Nothing depends on where on the page a graphic ended up, so
+    reflow moving it to another column or the next page is not a finding.
+
+    A master crop left without a partner is missing from the translation; a
+    translation crop left over is one the translation has added.
+    """
+    trans_name = trans_name or os.path.basename(tr_crop_dir.rstrip("\/"))
+    print(f"\n==========================================================================================")
+    print(f"Comparing Master Crops vs Translated Crops: {trans_name}")
+    print(f"==========================================================================================")
+
+    eng_rows = _iter_english_crops(eng_crop_dir)
+    tr_rows = _iter_english_crops(tr_crop_dir)
+    eng_groups = _group_by_topic(eng_rows)
+    tr_groups = _group_by_topic(tr_rows)
+
+    shared = sum(1 for k in eng_groups if k in tr_groups)
+    print(f"  Master crops {len(eng_rows)} in {len(eng_groups)} group(s); "
+          f"translation {len(tr_rows)} in {len(tr_groups)}; {shared} shared")
+
+    diff_out_dir = os.path.join(output_dir, trans_name)
+    os.makedirs(diff_out_dir, exist_ok=True)
+
+    from core.image_counts import _best_assignment
+
+    crop_details, extras = [], []
+    checked = matched = 0
+    keys = sorted(set(eng_groups) | set(tr_groups))
+
+    for gi, key in enumerate(keys, start=1):
+        if progress:
+            progress(gi, len(keys), "comparing")
+
+        e_items, t_items = eng_groups.get(key, []), tr_groups.get(key, [])
+        e_loaded = [(f, p, tp, n, _load_crop(f, n)) for f, p, tp, n in e_items]
+        t_loaded = [(f, p, tp, n, _load_crop(f, n)) for f, p, tp, n in t_items]
+        e_loaded = [x for x in e_loaded if x[4] is not None]
+        t_loaded = [x for x in t_loaded if x[4] is not None]
+
+        n, m = len(e_loaded), len(t_loaded)
+        size = max(n, m)
+        pairing = []
+        if size:
+            # Square, so every crop on the longer side gets a slot; the padding
+            # scores zero and is what a missing or added graphic falls into.
+            scores = [[0.0] * size for _ in range(size)]
+            for i in range(n):
+                for j in range(m):
+                    scores[i][j] = crop_similarity(e_loaded[i][4], t_loaded[j][4])
+            pairing = _best_assignment(scores)
+
+        taken = set()
+        for i, j in pairing:
+            if i >= n:
+                if j < m:
+                    taken.add(j)
+                    extras.append(t_loaded[j])
+                continue
+            folder, page, topic, fname, img = e_loaded[i]
+            checked += 1
+            if j < m:
+                t_folder, t_page, _t_topic, t_fname, t_img = t_loaded[j]
+                pct = crop_similarity(img, t_img) * 100
+                # Pairing stays on the strict comparison; only the verdict is
+                # allowed the coarse one, and only for a pair that has already
+                # failed. A figure redrawn to fit its own text is not a
+                # difference worth reporting.
+                if pct < threshold:
+                    pct = max(pct,
+                              crop_similarity_coarse(img, t_img) * 100,
+                              crop_similarity_contained(img, t_img) * 100)
+            else:
+                t_page, t_fname, t_img, pct = -1, "", None, 0.0
+
+            found = t_img is not None and pct >= MIN_CREDIBLE_MATCH
+            # A pairing that scores nothing is not a pairing. The assignment
+            # has to give every crop on the longer side a partner, so a graphic
+            # the translation dropped gets handed whatever was left over -
+            # usually the one it added. Claiming that leftover would report the
+            # deletion and silently swallow the addition, when they are two
+            # separate findings.
+            if found and j < m:
+                taken.add(j)
+            is_match = found and pct >= threshold
+            if is_match:
+                matched += 1
+
+            if not found:
+                status, shift = "NOT FOUND", "Not found in this topic"
+            else:
+                status = "MATCH (PASS)" if is_match else "CHECK"
+                shift = ("Same Page" if t_page == page
+                         else f"Moved to Page {t_page}")
+
+            out_dir = os.path.join(diff_out_dir, topic if topic else f"page_{page:03d}")
+            os.makedirs(out_dir, exist_ok=True)
+            save_to = os.path.join(out_dir, f"match_{fname}")
+            imwrite_unicode(save_to, create_pair_image(
+                img, t_img, page, t_page, pct, threshold=threshold,
+                status=None if found else "NOT FOUND"))
+
+            crop_details.append({
+                "eng_page": page, "topic": topic, "crop_file": fname,
+                "trans_page": t_page if found else -1, "shift_info": shift,
+                "scope": key.replace("topic:", "topic ").replace("page:", "page "),
+                "match_pct": pct, "status": status, "match_img": save_to,
+            })
+            print(f"  Eng Pg {page:2d} | {fname:28s} -> Trans Pg "
+                  f"{(t_page if found else -1):2d} ({shift:24s} via {key:14s}) | "
+                  f"Match: {pct:6.2f}% | {status}")
+
+        for j, item in enumerate(t_loaded):
+            if j not in taken:
+                extras.append(item)
+
+    for folder, page, topic, fname, _img in extras:
+        print(f"  {'':7s} | {fname:28s} -> EXTRA in the translation (Pg {page})")
+
+    pct = (matched / checked * 100) if checked else 0.0
+    status = "PASS" if pct >= threshold and not extras else "CHECK"
+    print(f"\nResult for {trans_name}: {matched} / {checked} crops matched "
+          f"({pct:.2f}%), {len(extras)} extra in the translation [{status}]\n")
+
+    return {
+        "trans_name": trans_name,
+        "total_crops": checked,
+        "matched_crops": matched,
+        "match_pct": pct,
+        "extra_crops": len(extras),
+        "overall_status": status,
+        "crop_details": crop_details,
+    }

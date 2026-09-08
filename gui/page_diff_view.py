@@ -48,6 +48,7 @@ DIFF_COLORS = {
     page_diff.KIND_MISSING: "#D0021B",      # gone from the translation
     page_diff.KIND_EXTRA: RADIANT_ORANGE,   # only in the translation
     page_diff.KIND_MOVED: XYLEM_BLUE,       # same graphic, different place
+    page_diff.KIND_REFLOWED: "#8E8E93",     # same graphic, page either side
 }
 FOCUS_COLOR = DYNAMIC_GREEN                 # the region this review is about
 
@@ -55,9 +56,31 @@ LEGEND = [
     (page_diff.KIND_MISSING, "Missing from the translation"),
     (page_diff.KIND_EXTRA, "Extra in the translation"),
     (page_diff.KIND_MOVED, "Moved"),
+    (page_diff.KIND_REFLOWED, "Moved to an adjacent page"),
 ]
 
+# Pixels of page per wheel notch. The canvases are built with a 1px scroll
+# increment, so this is a real distance rather than a fraction of the window.
 PAGE_WHEEL_STEP = 60
+
+
+def _wheel_step(event):
+    """
+    One wheel notch as +1 (down/away) or -1 (up/towards), or 0.
+
+    X11 reports the wheel as buttons 4 and 5; Windows and macOS report a delta
+    on the event, in multiples of 120 on Windows and in small numbers on a
+    trackpad. All three shapes reduce to the same notch here.
+    """
+    num = getattr(event, "num", 0)
+    if num in (4, 5):
+        return -1 if num == 4 else 1
+    delta = getattr(event, "delta", 0)
+    if not delta:
+        return 0
+    if abs(delta) >= 120:
+        return -int(delta / 120)
+    return -1 if delta > 0 else 1
 
 
 class PageDiffWindow(ctk.CTkToplevel):
@@ -82,12 +105,25 @@ class PageDiffWindow(ctk.CTkToplevel):
         self.margins = margins
         self.title_hint = title_hint
 
+        # How far the pages can be stepped. Taken from the documents rather
+        # than from the caller, which only ever names one pair.
+        self.master_pages = page_diff.page_count(master_pdf)
+        self.trans_pages = page_diff.page_count(trans_pdf)
+
         self.result = None
-        self.zoom = 1.0
+        # One zoom per pane. They start locked together and the toolbar moves
+        # both, but ctrl+wheel over a pane zooms only that pane, so a small
+        # detail on one page can be enlarged against the other at 100%.
+        self.zooms = {"master": 1.0, "trans": 1.0}
         self.ignore_text = tk.BooleanVar(value=True)
         self._photos = {}                       # keep PhotoImages alive
         self._current = -1                      # index of the highlighted diff
         self._busy = False
+        # Every comparison is stamped, and a result is only accepted if its
+        # stamp is still the current one. Without it a page step had to wait
+        # for the comparison it interrupted: the second click of a double
+        # click was swallowed and the view stayed where it was.
+        self._gen = 0
         self._queue = queue.Queue()
 
         self.title(f"Master ↔ Translated  •  "
@@ -105,7 +141,29 @@ class PageDiffWindow(ctk.CTkToplevel):
         self.configure(fg_color=UI_BG_CANVAS)
 
         self._build_ui()
+        self._update_page_label()
+        self._bind_keys()
         self.after(60, self._recompare)
+
+    def _bind_keys(self):
+        """
+        Keyboard for the two kinds of stepping this window does.
+
+        PageUp/PageDown move through the document; the arrow keys move through
+        the findings on the page being shown. Bound on the window rather than
+        on a canvas so they work wherever the focus happens to be.
+        """
+        for seq, fn in (("<Prior>", lambda _e: self._go_page(-1)),
+                        ("<Next>", lambda _e: self._go_page(1)),
+                        ("<Control-Left>", lambda _e: self._go_page(-1)),
+                        ("<Control-Right>", lambda _e: self._go_page(1)),
+                        ("<Up>", lambda _e: self._step(-1)),
+                        ("<Down>", lambda _e: self._step(1)),
+                        ("<Escape>", lambda _e: self.destroy())):
+            try:
+                self.bind(seq, fn)
+            except Exception:
+                pass
 
     def _f(self, size=11, weight="normal"):
         return ctk.CTkFont(family=theme.resolve_font_family(), size=size, weight=weight)
@@ -128,10 +186,29 @@ class PageDiffWindow(ctk.CTkToplevel):
         bar = ctk.CTkFrame(self, fg_color=UI_CARD_WELL, corner_radius=8)
         bar.pack(fill="x", padx=12, pady=(0, 6))
 
+        # Page navigation, kept visually apart from the difference stepper
+        # beside it: one moves through the document, the other through the
+        # findings on the page it is showing.
+        self.prev_page_btn = ctk.CTkButton(
+            bar, text="◀◀ Page", width=76, height=26,
+            fg_color=DEPENDABLE_BLUE, text_color=NEUTRAL_WHITE,
+            font=self._f(10, "bold"),
+            command=lambda: self._go_page(-1))
+        self.prev_page_btn.pack(side="left", padx=(12, 3), pady=7)
+        self.page_lbl = ctk.CTkLabel(bar, text="", font=self._f(10, "bold"),
+                                     text_color=DEPENDABLE_BLUE)
+        self.page_lbl.pack(side="left", padx=2, pady=7)
+        self.next_page_btn = ctk.CTkButton(
+            bar, text="Page ▶▶", width=76, height=26,
+            fg_color=DEPENDABLE_BLUE, text_color=NEUTRAL_WHITE,
+            font=self._f(10, "bold"),
+            command=lambda: self._go_page(1))
+        self.next_page_btn.pack(side="left", padx=(3, 14), pady=7)
+
         ctk.CTkButton(bar, text="◀ Previous", width=86, height=26,
                       fg_color=XYLEM_BLUE, text_color=NEUTRAL_WHITE,
                       font=self._f(10, "bold"),
-                      command=lambda: self._step(-1)).pack(side="left", padx=(12, 3), pady=7)
+                      command=lambda: self._step(-1)).pack(side="left", padx=(0, 3), pady=7)
         ctk.CTkButton(bar, text="Next ▶", width=76, height=26,
                       fg_color=XYLEM_BLUE, text_color=NEUTRAL_WHITE,
                       font=self._f(10, "bold"),
@@ -189,13 +266,40 @@ class PageDiffWindow(ctk.CTkToplevel):
             cap.pack(fill="x", padx=10, pady=(7, 2))
             ctk.CTkLabel(cap, text=caption, font=self._f(10, "bold"),
                          text_color=colour).pack(side="left")
+
+            # This pane's own paging. The toolbar pair moves the two together
+            # and keeps them on one topic, which is the right default; these
+            # break that deliberately, for the times when the pairing itself is
+            # what needs checking - reflow has put the counterpart a page out,
+            # and the only way to see it is to move one side alone.
+            nav = ctk.CTkFrame(cap, fg_color="transparent")
+            nav.pack(side="left", padx=(10, 0))
+            prev_b = ctk.CTkButton(nav, text="◀", width=26, height=22,
+                                   fg_color=UI_CARD_WELL, text_color=DEPENDABLE_BLUE,
+                                   font=self._f(10, "bold"),
+                                   command=lambda sd=side: self._go_page_side(sd, -1))
+            prev_b.pack(side="left", padx=1)
+            side_lbl = ctk.CTkLabel(nav, text="", font=self._f(9, "bold"),
+                                    text_color=DEPENDABLE_BLUE, width=52)
+            side_lbl.pack(side="left", padx=2)
+            next_b = ctk.CTkButton(nav, text="▶", width=26, height=22,
+                                   fg_color=UI_CARD_WELL, text_color=DEPENDABLE_BLUE,
+                                   font=self._f(10, "bold"),
+                                   command=lambda sd=side: self._go_page_side(sd, 1))
+            next_b.pack(side="left", padx=1)
+
             name_lbl = ctk.CTkLabel(cap, text="", font=self._f(9),
                                     text_color=NEUTRAL_DARK_GR)
             name_lbl.pack(side="right")
 
             holder = tk.Frame(card, bg=UI_CARD_BG)
             holder.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-            cv = tk.Canvas(holder, bg="#3A3A3A", highlightthickness=0)
+            # yscrollincrement makes "units" mean PIXELS. Left at Tk's default
+            # of 0 a unit is a tenth of the window, so one wheel notch of
+            # PAGE_WHEEL_STEP units jumped six screens - which is what made
+            # this pane feel like it was teleporting rather than scrolling.
+            cv = tk.Canvas(holder, bg="#3A3A3A", highlightthickness=0,
+                           yscrollincrement=1, xscrollincrement=1)
             hsb = tk.Scrollbar(holder, orient="horizontal", command=cv.xview)
             cv.configure(xscrollcommand=hsb.set,
                          yscrollcommand=self._on_pane_yscroll)
@@ -203,7 +307,17 @@ class PageDiffWindow(ctk.CTkToplevel):
             cv.pack(side="left", fill="both", expand=True)
             for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
                 cv.bind(seq, self._on_wheel)
-            self.panes[side] = {"canvas": cv, "name": name_lbl}
+            # Ctrl+wheel zooms, the way every document viewer does it. Bound
+            # per pane so the pane under the pointer is the one that changes.
+            for seq in ("<Control-MouseWheel>", "<Control-Button-4>",
+                        "<Control-Button-5>"):
+                cv.bind(seq, lambda e, sd=side: self._on_zoom_wheel(e, sd))
+            cv.bind("<Shift-MouseWheel>",
+                    lambda e, c=cv: (c.xview("scroll",
+                                             -_wheel_step(e) * PAGE_WHEEL_STEP,
+                                             "units"), "break")[1])
+            self.panes[side] = {"canvas": cv, "name": name_lbl, "page_lbl": side_lbl,
+                                "prev": prev_b, "next": next_b}
 
         # One scrollbar drives both pages. Scrolling them independently would
         # defeat the point: the eye has to land on the same place twice.
@@ -227,26 +341,119 @@ class PageDiffWindow(ctk.CTkToplevel):
         self.vsb.set(first, last)
 
     def _on_wheel(self, event):
-        num = getattr(event, "num", 0)
-        delta = getattr(event, "delta", 0)
-        if num in (4, 5):
-            step = -1 if num == 4 else 1
-        elif delta:
-            step = -int(delta / 120) if abs(delta) >= 120 else -int(delta)
-        else:
-            return "break"
-        self._yview_both("scroll", step * PAGE_WHEEL_STEP, "units")
+        step = _wheel_step(event)
+        if step:
+            self._yview_both("scroll", step * PAGE_WHEEL_STEP, "units")
+        return "break"
+
+    def _on_zoom_wheel(self, event, side):
+        """Ctrl+wheel over one pane: zoom that pane about the pointer."""
+        step = _wheel_step(event)
+        if step:
+            self._zoom(-step * 0.1, side=side, anchor=(event.x, event.y))
         return "break"
 
     # ──────────────────────────────────────────────────────────
     # Comparing
     # ──────────────────────────────────────────────────────────
-    def _recompare(self):
-        if self._busy:
+    def _go_page(self, delta):
+        """
+        Step both panes to the next or previous page.
+
+        The master page moves by one; the translated page is then looked up by
+        TOPIC rather than moved alongside it. Stepping both by one would drift
+        apart the moment a section runs to a different length - which is the
+        whole reason these two documents cannot be compared page-for-page - and
+        after a few steps the panes would be showing unrelated sections.
+        """
+        if not self.master_pages:
             return
+        target = self.master_page + delta
+        if not 1 <= target <= self.master_pages:
+            return
+
+        self.master_page = target
+        try:
+            from core import toc as TOC
+            mapped, _code, _why = TOC.matching_page(
+                self.master_pdf, self.trans_pdf, target)
+        except Exception:
+            mapped = target
+        if self.trans_pages:
+            mapped = max(1, min(self.trans_pages, mapped))
+        self.trans_page = mapped
+
+        # The reviewed region belonged to the page we have just left; drawing it
+        # here would box whatever happens to sit at those coordinates now.
+        self.focus_rect = None
+        self._current = -1
+
+        self.title(f"Master ↔ Translated  •  "
+                   f"page {self.master_page} vs {self.trans_page}")
+        self._update_page_label()
+        self._recompare()
+
+    def _go_page_side(self, side, delta):
+        """
+        Step ONE pane, leaving the other where it is.
+
+        No topic lookup here, deliberately: the point of moving a single pane
+        is to look at a page the topic mapping would not have chosen.
+        """
+        pages = self.master_pages if side == "master" else self.trans_pages
+        current = self.master_page if side == "master" else self.trans_page
+        if not pages:
+            return
+        target = current + delta
+        if not 1 <= target <= pages:
+            return
+
+        if side == "master":
+            self.master_page = target
+        else:
+            self.trans_page = target
+
+        self.focus_rect = None
+        self._current = -1
+        self.title(f"Master ↔ Translated  •  "
+                   f"page {self.master_page} vs {self.trans_page}")
+        self._update_page_label()
+        self._recompare()
+
+    def _update_page_label(self):
+        if self.master_pages:
+            self.page_lbl.configure(
+                text=f"{self.master_page} / {self.master_pages}")
+        else:
+            self.page_lbl.configure(text=str(self.master_page))
+        first, last = self.master_page <= 1, self.master_page >= self.master_pages
+        try:
+            self.prev_page_btn.configure(state="disabled" if first else "normal")
+            self.next_page_btn.configure(state="disabled" if last else "normal")
+        except Exception:
+            pass
+
+        for side, page, total in (("master", self.master_page, self.master_pages),
+                                  ("trans", self.trans_page, self.trans_pages)):
+            pane = self.panes.get(side)
+            if not pane:
+                continue
+            try:
+                pane["page_lbl"].configure(
+                    text=f"{page} / {total}" if total else str(page))
+                pane["prev"].configure(state="disabled" if page <= 1 else "normal")
+                pane["next"].configure(
+                    state="disabled" if total and page >= total else "normal")
+            except Exception:
+                pass
+
+    def _recompare(self):
+        self._gen += 1
+        gen = self._gen
         self._busy = True
         self.summary_lbl.configure(text="Comparing…", text_color=DYNAMIC_GREEN)
         ignore = bool(self.ignore_text.get())
+        master_page, trans_page = self.master_page, self.trans_page
 
         # The worker must not touch Tk at all - not even self.after(), which
         # registers a command on the interpreter and raises "main thread is not
@@ -256,22 +463,27 @@ class PageDiffWindow(ctk.CTkToplevel):
         def work():
             try:
                 res = page_diff.compare_pages(
-                    self.master_pdf, self.master_page,
-                    self.trans_pdf, self.trans_page,
+                    self.master_pdf, master_page,
+                    self.trans_pdf, trans_page,
                     ignore_text=ignore, margins=self.margins)
-                self._queue.put((res, None))
+                self._queue.put((gen, res, None))
             except Exception as e:
-                self._queue.put((None, e))
+                self._queue.put((gen, None, e))
 
         threading.Thread(target=work, daemon=True).start()
         self.after(80, self._poll)
 
     def _poll(self):
         try:
-            res, err = self._queue.get_nowait()
+            gen, res, err = self._queue.get_nowait()
         except queue.Empty:
             if self._busy:
                 self.after(80, self._poll)
+            return
+        if gen != self._gen:
+            # A later page step has already superseded this one; its own
+            # result is still on its way.
+            self.after(80, self._poll)
             return
         self._done(res, err)
 
@@ -289,18 +501,24 @@ class PageDiffWindow(ctk.CTkToplevel):
         self.summary_lbl.configure(
             text=page_diff.summarize(result),
             text_color=DYNAMIC_GREEN if n == 0 else RADIANT_ORANGE)
+        # The section each page belongs to, so the pairing can be checked at a
+        # glance. Two panes showing the same topic code is the whole basis on
+        # which these pages are comparable; two different codes means reflow
+        # has moved something and every "difference" below is suspect.
         self.panes["master"]["name"].configure(
-            text=f"{os.path.basename(self.master_pdf)}  ·  page {self.master_page}")
+            text=f"{os.path.basename(self.master_pdf)}  ·  page {self.master_page}"
+                 f"{self._topic_suffix(self.master_pdf, self.master_page)}")
         self.panes["trans"]["name"].configure(
-            text=f"{os.path.basename(self.trans_pdf)}  ·  page {self.trans_page}")
+            text=f"{os.path.basename(self.trans_pdf)}  ·  page {self.trans_page}"
+                 f"{self._topic_suffix(self.trans_pdf, self.trans_page)}")
 
         notes = list(result["notes"])
         if result["counts"].get(page_diff.KIND_MOVED):
             notes.append("A graphic reported as moved is usually translation reflow, "
                          "not a defect - the shift is shown beside it.")
-        if result["counts"].get(page_diff.KIND_MISSING):
-            notes.append("A graphic missing here and extra on the next page has "
-                         "reflowed across the page break.")
+        if result["counts"].get(page_diff.KIND_REFLOWED):
+            notes.append("A graphic marked as being on an adjacent page was carried "
+                         "there by reflow - it is present, not missing.")
         self.note_lbl.configure(text="  ".join(notes))
         self._render()
         self._update_pos()
@@ -308,10 +526,53 @@ class PageDiffWindow(ctk.CTkToplevel):
     # ──────────────────────────────────────────────────────────
     # Drawing
     # ──────────────────────────────────────────────────────────
-    def _zoom(self, delta):
-        self.zoom = max(0.4, min(3.0, self.zoom + delta))
-        self.zoom_lbl.configure(text=f"{int(self.zoom * 100)}%")
+    def _zoom(self, delta, side=None, anchor=None):
+        """
+        Change zoom, on one pane or on both.
+
+        With an anchor - the pointer, for ctrl+wheel - the point under the
+        cursor is kept still, so zooming walks INTO the detail being looked at
+        instead of drifting away from it.
+        """
+        sides = (side,) if side else tuple(self.zooms)
+        keep = {}
+        for sd in sides:
+            cv = self.panes[sd]["canvas"]
+            before = self.zooms[sd]
+            after = max(0.4, min(3.0, before + delta))
+            if after == before:
+                continue
+            if anchor is not None:
+                # Where the pointer sits on the page, in unzoomed pixels.
+                doc_x = (cv.canvasx(anchor[0])) / before
+                doc_y = (cv.canvasy(anchor[1])) / before
+                keep[sd] = (doc_x, doc_y, anchor)
+            self.zooms[sd] = after
+
+        self._update_zoom_label()
         self._render()
+
+        for sd, (doc_x, doc_y, (px, py)) in keep.items():
+            cv = self.panes[sd]["canvas"]
+            cv.xview_moveto(0); cv.yview_moveto(0)
+            cv.xview("scroll", int(doc_x * self.zooms[sd] - px), "units")
+            cv.yview("scroll", int(doc_y * self.zooms[sd] - py), "units")
+
+    @staticmethod
+    def _topic_suffix(pdf_path, page_no):
+        """'  ·  4.6' for a page inside a numbered section, else nothing."""
+        try:
+            from core import toc as TOC
+            code = TOC.topic_at_page(pdf_path, page_no)
+            return f"  ·  {code}" if code else ""
+        except Exception:
+            return ""
+
+    def _update_zoom_label(self):
+        m, t = self.zooms["master"], self.zooms["trans"]
+        self.zoom_lbl.configure(
+            text=f"{int(m * 100)}%" if m == t
+            else f"{int(m * 100)}% / {int(t * 100)}%")
 
     def _render(self):
         if not self.result:
@@ -321,17 +582,18 @@ class PageDiffWindow(ctk.CTkToplevel):
             cv = self.panes[side]["canvas"]
             cv.delete("all")
             img = r[img_key]
-            if self.zoom != 1.0:
-                img = img.resize((max(1, int(img.width * self.zoom)),
-                                  max(1, int(img.height * self.zoom))))
+            z = self.zooms[side]
+            if z != 1.0:
+                img = img.resize((max(1, int(img.width * z)),
+                                  max(1, int(img.height * z))))
             photo = ImageTk.PhotoImage(img, master=cv)
             self._photos[side] = photo          # a live reference per pane
             cv.create_image(0, 0, anchor="nw", image=photo)
             cv.config(scrollregion=(0, 0, img.width, img.height))
         self._draw_boxes()
 
-    def _pt_to_px(self, value):
-        return value * self.result["px_per_pt"] * self.zoom
+    def _pt_to_px(self, value, side="master"):
+        return value * self.result["px_per_pt"] * self.zooms[side]
 
     def _draw_boxes(self):
         if not self.result:
@@ -360,6 +622,9 @@ class PageDiffWindow(ctk.CTkToplevel):
             if d["kind"] == page_diff.KIND_MOVED and d.get("shift_pt"):
                 dx, dy = d["shift_pt"]
                 label = f"moved {dx:+.0f},{dy:+.0f} pt"
+            elif d["kind"] == page_diff.KIND_REFLOWED and d.get("found_on_page"):
+                where = "translation" if d.get("found_side") == "trans" else "master"
+                label = f"on page {d['found_on_page']} of the {where}"
 
             # Solid where it is; dashed at the same coordinates on the other
             # side, which is what makes the pair findable without hunting.
@@ -379,7 +644,7 @@ class PageDiffWindow(ctk.CTkToplevel):
 
     def _box(self, side, rect_pt, colour, width=2, dash=(), label=""):
         cv = self.panes[side]["canvas"]
-        x0, y0, x1, y1 = (self._pt_to_px(v) for v in rect_pt)
+        x0, y0, x1, y1 = (self._pt_to_px(v, side) for v in rect_pt)
         cv.create_rectangle(x0, y0, x1, y1, outline=colour, width=width,
                             dash=dash, tags="mark")
         if label:

@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+from collections import Counter
 import argparse
 import cv2
 import numpy as np
@@ -44,10 +45,23 @@ def extract_topics_with_positions(pdf_path):
     """
     TOC entries with the page and vertical position each one starts at.
 
-    Returns [] when the document has no outline, which is the signal to fall
-    back to page-wise cropping.
+    Falls back to the headings printed on the page when the document carries no
+    outline - a translation that came back from DTP without its bookmarks still
+    prints "4.7.3", and reading it there keeps the graphic filed under the same
+    topic as its master counterpart. Returns [] only when neither is available,
+    which is the signal to fall back to page-wise cropping.
+
+    The bookmark is trusted for the PAGE and the printed heading for the
+    POSITION on it. A bookmark destination is frequently generic - a default
+    Point(72, 36) is common, which converts to near the foot of the page - and
+    taking that literally puts the topic's start below everything on its own
+    first page. Every graphic there then reads as sitting BEFORE the topic and
+    is filed under front matter, which quietly empties the topics the whole
+    comparison pairs on.
     """
     topics = []
+    heights = {}
+    raw_ys = []
     try:
         with fitz.open(pdf_path) as doc:
             toc = doc.get_toc(simple=False)
@@ -61,7 +75,10 @@ def extract_topics_with_positions(pdf_path):
                     if pt is not None:
                         try:
                             # TOC destinations are bottom-up; convert to top-down.
-                            top_y = float(doc[page - 1].rect.height - pt.y)
+                            page_h = float(doc[page - 1].rect.height)
+                            heights[int(page)] = page_h
+                            top_y = page_h - float(pt.y)
+                            raw_ys.append(round(float(pt.y), 1))
                         except Exception:
                             top_y = 0.0
                 topics.append({
@@ -73,8 +90,128 @@ def extract_topics_with_positions(pdf_path):
     except Exception as e:
         print(f"  [TOC] Could not read outline: {e}")
         return []
+
+    if not topics:
+        from core import toc as _toc
+        topics = list(_toc.topics_from_text(pdf_path))
+    else:
+        page_h = next(iter(heights.values()), 0.0)
+        if _destinations_are_generic(raw_ys, page_h):
+            for t in topics:
+                t["top_y"] = 0.0
+        _correct_topic_positions(pdf_path, topics, heights)
+        _enforce_bookmark_order(topics)
+
     topics.sort(key=lambda t: (t["start_page"], t["top_y"]))
     return topics
+
+
+def _enforce_bookmark_order(topics):
+    """
+    Keep the outline's own sequence, whatever the positions say.
+
+    The outline lists sections in document order, and that order is reliable
+    even where the position on the page is not. A topic whose position could
+    not be recovered is parked at the top of its page, which is safe only if
+    nothing else starts on that page - and on a dense manual something usually
+    does. 4.7.6.3 landed at y=0 on the page where 4.7.6.2 starts at y=271, so
+    it sorted in FRONT of it, and every graphic between them was filed one
+    section out: 26 of the 31 crops in 4.7.6.2 were attributed to 4.7.6.3 in
+    one language and not the other, so nothing in either paired.
+
+    Nudging a topic to just after its predecessor rather than trusting a
+    fabricated position costs nothing - the sections are still in the right
+    order, which is all the pairing needs - and cannot reorder them.
+    """
+    prev = None
+    for t in topics:                      # still in outline order here
+        here = (t["start_page"], t["top_y"])
+        if prev is not None and here < prev:
+            if t["start_page"] < prev[0]:
+                t["start_page"] = prev[0]
+            t["top_y"] = prev[1] + 0.1
+            here = (t["start_page"], t["top_y"])
+        prev = here
+
+
+# When this share of the outline points at the SAME spot on the page, the
+# destinations are a default rather than real positions...
+_GENERIC_DEST_SHARE = 0.8
+
+# ...but only if that spot is this far down the page. A repeated destination at
+# the TOP is what a manual full of sections that start on a fresh page actually
+# looks like, and believing it costs nothing.
+_GENERIC_DEST_DEPTH = 0.5
+
+
+def _destinations_are_generic(raw_ys, page_height=0.0):
+    """
+    True when the outline's destinations are a boilerplate value, not positions.
+
+    Whether a destination can be believed is not something a single entry can
+    answer. Judging them one at a time - "anything below three quarters of the
+    page must be a default" - threw away positions that were perfectly good,
+    because a subsection routinely starts near the foot of a page: 4.7.6.3
+    begins at 0.79 of its page and 4.7.5.4 at 0.86. Zeroing those parked them
+    at the top of their page ahead of sections that really do start there, and
+    every graphic in between was filed one section out.
+
+    Tightening the cutoff cannot work either - a generic Point(72, 36) lands at
+    about 0.945, which is nearer 0.86 than any threshold can safely split.
+
+    What actually distinguishes them is repetition. A real outline points at a
+    different spot for nearly every entry; a generated one points every entry at
+    the same place. In the 3315 manual the commonest destination covers 19% of
+    the outline, and its positions agree with the printed headings to within a
+    point. A generated outline covers 100%.
+    """
+    if len(raw_ys) < 2:
+        return False
+    value, count = Counter(raw_ys).most_common(1)[0]
+    if (count / float(len(raw_ys))) < _GENERIC_DEST_SHARE:
+        return False
+
+    # Repetition on its own is not enough, and neither is position. Plenty of
+    # real sections start at the top of a page, so a destination repeated there
+    # is both common and harmless - trusting it files nothing wrongly. The
+    # damaging case is a repeated destination LOW on the page, which would put
+    # every topic below the content it owns. Only that combination is treated
+    # as boilerplate.
+    if not page_height:
+        return True
+    return ((page_height - value) / page_height) > _GENERIC_DEST_DEPTH
+
+
+def _correct_topic_positions(pdf_path, topics, heights):
+    """
+    Replace unusable bookmark positions with where the heading is actually printed.
+
+    The printed heading is ground truth for position: "4.6 Install the pump" is
+    set at the top of its section whatever the bookmark says. Where the printed
+    scan finds the same code on the same page, its y wins; where it does not, an
+    implausible position is pulled back to the top of the page rather than left
+    at the foot of it.
+    """
+    from core import toc as _toc
+
+    printed = {}
+    try:
+        for t in _toc.topics_from_text(pdf_path):
+            m = _toc.TOPIC_CODE.match(t.get("title") or "")
+            if m:
+                printed[(m.group(1), t["start_page"])] = t["top_y"]
+    except Exception:
+        printed = {}
+
+    for t in topics:
+        m = _toc.TOPIC_CODE.match(t.get("title") or "")
+        code = m.group(1) if m else None
+        hit = printed.get((code, t["start_page"])) if code else None
+        if hit is not None:
+            t["top_y"] = float(hit)
+            continue
+        # Nothing else to do: with a real outline the destination stands, and
+        # with a generated one it has already been cleared.
 
 
 # Device names Windows reserves whatever the extension. A topic will almost
@@ -182,11 +319,159 @@ def find_topic_for_rect(page_num, rect, topics):
 # which a purely geometric check would still count as present.
 BLANK_INK_THRESHOLD = 0.002
 
+# A pixel counts as ink below this grey level. is_blank_region has always used
+# this value; naming it lets the ruling test below measure the same ink.
+INK_LEVEL = 220
+
 
 # A rendered crop with less variation than this carries no shape a template
 # match could ever find. Pure white measures 0.0; the faintest real hairline on
 # a white ground measures well above 1.
 MIN_CROP_VARIATION = 1.0
+
+
+# The cropper renders a little outside each candidate so a stroke on the
+# boundary is not clipped, and will not write anything smaller than this once
+# that padding is in. Both live here because the count check has to make the
+# same two decisions - see survives_text_masking.
+CROP_PAD_PT = 2.0
+MIN_CROP_SIDE_PT = 5.0
+
+
+def padded_crop_rect(rect, page_rect, pad=CROP_PAD_PT):
+    """The rect the cropper actually renders: padded, and clamped to the page."""
+    return fitz.Rect(max(0, rect.x0 - pad),
+                     max(0, rect.y0 - pad),
+                     min(page_rect.width, rect.x1 + pad),
+                     min(page_rect.height, rect.y1 + pad))
+
+
+def survives_text_masking(page, rect, dpi=DPI, pad=CROP_PAD_PT):
+    """
+    True when a candidate still holds ink once the text inside it is masked.
+
+    is_blank_region looks at the page BEFORE the text is masked, so a rect
+    holding nothing but a caption passes it. The cropper then masks the text,
+    renders the rect white and drops it - but the count check had already
+    counted it. That gap is why "Images" and "Image Counts" disagreed about how
+    many graphics a page holds, and why they disagreed by a different amount in
+    every language: how much text sits in a region is precisely what
+    translation changes. On a page of terminal-connection labels - PT100, FLS10,
+    CT, TH - that is most of the candidates on the page.
+
+    The caller must already have masked the text inside every candidate on the
+    page, exactly as crop_pdf_elements does before it renders any of them.
+    """
+    r = padded_crop_rect(rect, page.rect, pad)
+    if r.width <= MIN_CROP_SIDE_PT or r.height <= MIN_CROP_SIDE_PT:
+        return False
+    try:
+        pix = page.get_pixmap(dpi=dpi, clip=r)
+        if _is_blank_pixmap(pix):
+            return False
+        return not _is_ruling_not_artwork(pix, r, float(page.rect.width), dpi)
+    except Exception:
+        return True          # unreadable: keep it rather than silently drop it
+
+
+def _is_ruling_not_artwork(pix, rect, page_width, dpi=DPI):
+    """
+    True when a rule-dominated crop is grid rather than a drawing.
+
+    Rule dominance alone is not enough to decide. Measured on these manuals:
+
+        data plate, Start 350 p9      0.71 rules   - artwork, must be kept
+        Ex/FM/CSA plates, 3315 3.7    0.25-0.36    - artwork, never in doubt
+        two empty table cells, 1.5.2  0.90         - grid, must go
+        leader-line strip, 3.7        0.75         - grid, must go
+
+    So the plates and the grid overlap on that number alone, and an earlier
+    attempt to separate them on width let both of the last two through - they
+    are narrow. Three things distinguish grid instead: it runs the width of
+    the text column, or it is nothing BUT rules, or it is a thin strip. A plate
+    is none of those - it is a self-contained box with a logo or a symbol in
+    it, which is exactly the ink that keeps it below RULE_PURE.
+    """
+    if not _is_mostly_ruling(pix, dpi=dpi):
+        return False
+
+    w_pt, h_pt = float(rect.width), float(rect.height)
+    if page_width and (w_pt / page_width) >= RULING_MIN_WIDTH_FRAC:
+        return True                       # as wide as the column: the table
+    if min(w_pt, h_pt) < RULING_MIN_SIDE_PT:
+        return True                       # a strip of ruling, not a figure
+    return _rule_fraction(pix, dpi=dpi) >= RULE_PURE
+
+
+def _rule_fraction(pix, dpi=DPI):
+    """How much of a crop's ink is long straight lines, 0..1."""
+    try:
+        a = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    except Exception:
+        return 0.0
+    gray = a[:, :, 0] if pix.n == 1 else cv2.cvtColor(a[:, :, :3], cv2.COLOR_RGB2GRAY)
+    ink = (gray < INK_LEVEL).astype(np.uint8)
+    total = int(ink.sum())
+    if not total:
+        return 0.0
+    min_len_px = max(3, int(round(RULE_MIN_LENGTH_PT * dpi / 72.0)))
+    if min_len_px > max(ink.shape):
+        return 0.0
+    horiz = cv2.morphologyEx(ink, cv2.MORPH_OPEN,
+                             cv2.getStructuringElement(cv2.MORPH_RECT, (min_len_px, 1)))
+    vert = cv2.morphologyEx(ink, cv2.MORPH_OPEN,
+                            cv2.getStructuringElement(cv2.MORPH_RECT, (1, min_len_px)))
+    return int(cv2.bitwise_or(horiz, vert).sum()) / float(total)
+
+
+def _is_mostly_ruling(pix, dpi=DPI):
+    """
+    True when a crop is a piece of table grid rather than a picture.
+
+    _strip_rules already empties a ruled region while it is still a mask, so
+    a text-only table normally produces no candidate at all. It only strips
+    where it is confident the region IS a grid, though, and a fragment that
+    the grid finder never framed - a couple of columns off the side of a
+    parts table, say - comes through as a candidate and is then compared as
+    if it were artwork. Row heights move with the length of the translated
+    text, so that fragment mismatches on every correct translation.
+
+    This is the same dominance test, applied once more to the finished crop:
+    if what is left after text masking is overwhelmingly long straight lines,
+    it is grid. A hazard icon is curves and short strokes and is never close
+    to the threshold, and on a crop too small to contain a rule of the
+    minimum length nothing is detected at all, so small symbols are untouched.
+    """
+    try:
+        a = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    except Exception:
+        return False
+    gray = a[:, :, 0] if pix.n == 1 else cv2.cvtColor(
+        a[:, :, :3], cv2.COLOR_RGB2GRAY)
+
+    ink = (gray < INK_LEVEL).astype(np.uint8)
+    total = int(ink.sum())
+    if not total:
+        return False
+
+    min_len_px = max(3, int(round(RULE_MIN_LENGTH_PT * dpi / 72.0)))
+    if min_len_px > max(ink.shape):
+        return False          # too small to hold a rule: nothing to judge
+
+    # A rule is not just long, it is THIN. A filled disc or a solid arrow head
+    # is full of long horizontal runs and would otherwise read as ruling, so
+    # anything that survives an erode is treated as a solid shape and the crop
+    # is kept. A 1pt table line is about 2px here and does not survive at all.
+    solid = cv2.erode(ink, np.ones((5, 5), np.uint8))
+    if int(solid.sum()) / float(total) > SOLID_SHAPE_FRACTION:
+        return False
+
+    horiz = cv2.morphologyEx(ink, cv2.MORPH_OPEN,
+                             cv2.getStructuringElement(cv2.MORPH_RECT, (min_len_px, 1)))
+    vert = cv2.morphologyEx(ink, cv2.MORPH_OPEN,
+                            cv2.getStructuringElement(cv2.MORPH_RECT, (1, min_len_px)))
+    rules = cv2.bitwise_or(horiz, vert)
+    return (int(rules.sum()) / float(total)) >= RULE_DOMINANCE
 
 
 def _is_blank_pixmap(pix, min_std=MIN_CROP_VARIATION):
@@ -366,6 +651,26 @@ SMALL_RULE_FRACTION = 0.60
 # lines. A parts table measures around 0.9; an exploded diagram around 0.2.
 RULE_DOMINANCE = 0.55
 
+# Ink that survives a 5x5 erode is a solid shape, not ruling. Above this much
+# of it, a crop is artwork whatever its long runs suggest - a filled disc is
+# nothing but long horizontal runs, and is not a table.
+SOLID_SHAPE_FRACTION = 0.25
+
+# A crop this wide is the page's table rather than something sitting inside a
+# cell of it. The text column in these manuals is about 0.70 of the page.
+RULING_MIN_WIDTH_FRAC = 0.55
+
+# Ink this completely made of straight lines is grid and nothing else. A plate
+# or a boxed figure always carries something that is not a rule - a logo, a
+# curve, a symbol - and lands well below this even when it reads as heavily
+# ruled overall.
+RULE_PURE = 0.85
+
+# Narrower than this on its shorter side, a rule-dominated crop is a strip of
+# ruling or a leader line, not a figure. Genuine small symbols are not ruled at
+# all and never reach this test.
+RULING_MIN_SIDE_PT = 24.0
+
 # How many rule crossings make a lattice. Four is the smallest real table - one
 # cell has four corners - and it is well above what a drawing produces, where a
 # leader line meeting a centreline gives one or two.
@@ -432,6 +737,86 @@ def _thin_rules(mask, min_len_px, max_thick_px=None):
         if keep:
             out = cv2.bitwise_or(out, np.isin(labels, keep).astype(np.uint8))
     return out
+
+
+# How much of a region's width a horizontal rule must span before it counts as
+# a row divider. A table's row rule runs wall to wall; a horizontal stroke
+# inside an illustration - the body of the cable in "Prepare the SUBCAB
+# cables" - spans only part of its cell.
+# A row divider need only span the columns it separates, not the whole table.
+ROW_DIVIDER_MIN_SPAN = 0.40
+
+# Long against thick. A table rule measures 25:1 and up even where a glyph
+# thickens it; a horizontal stroke inside a drawing measures well under 20:1.
+ROW_DIVIDER_ASPECT = 20.0
+
+ROW_DIVIDER_SPAN = 0.7
+
+
+def _row_dividers(region_ink, min_len_px, min_span_frac=ROW_DIVIDER_SPAN):
+    """
+    The horizontal rules that genuinely divide a table's rows, or None.
+
+    Used as a barrier so the clustering dilation cannot bridge two icons in
+    adjacent rows, which means it must find table ruling and nothing else. A
+    plain horizontal opening does not: it answers yes for every row through the
+    middle of any thick horizontal drawing, the same trap _thin_rules was
+    written to avoid. The body of the cable in figure 4.7.3 is an 18pt-deep
+    black run, so it was read as a row divider, dilated into a barrier and
+    erased - which cut the illustration in half and left the crop covering only
+    the fanned-out conductors beside it.
+
+    A real divider is therefore required to be BOTH thin, like a rule, and to
+    span the region, like a row divider. A drawing's horizontal stroke fails
+    one test or the other.
+    """
+    band = cv2.morphologyEx(region_ink, cv2.MORPH_OPEN,
+                            cv2.getStructuringElement(cv2.MORPH_RECT, (min_len_px, 1)))
+    if not band.any():
+        return None
+
+    max_thick = max(3, int(round(min_len_px * 0.18)))
+    span_px = min_span_frac * region_ink.shape[1]
+
+    # A rule running the FULL width of the table is a row divider whatever its
+    # measured thickness. The thickness test exists to keep a thick horizontal
+    # stroke inside a drawing from being read as a divider, and such a stroke
+    # never spans the whole table - but a real divider does pick up a few
+    # pixels where a glyph or an icon happens to sit against it, and rejecting
+    # it for that left two rows joined. Those two then clustered together and
+    # came back as one graphic: five hazard symbols counted as three.
+    full_span_px = 0.95 * region_ink.shape[1]
+    full_span_thick = max(max_thick, int(round(min_len_px * 0.5)))
+
+    # A divider does not have to cross the whole table. In the 1.2 symbols
+    # table the rules separating the rows run only across the columns they
+    # divide - 205px of a 410px region, exactly half - so the 70% span test
+    # threw both of them away, the rows they separated merged into one blob,
+    # and five hazard symbols came out as three. English hit this and Dutch did
+    # not, purely because the shorter English text makes the rows tighter.
+    #
+    # What actually tells a rule from a stroke inside a drawing is how long it
+    # is against how thick: these dividers measure 41 and 26 to one, while the
+    # triangle bases rejected alongside them measure 13. Length alone would not
+    # do it, and thickness alone already failed - one of the two dividers picks
+    # up a few pixels where a glyph sits against it.
+    aspect_span_px = ROW_DIVIDER_MIN_SPAN * region_ink.shape[1]
+
+    def _is_divider(st):
+        _x, _y, w, h = st[0], st[1], st[2], st[3]
+        if w < aspect_span_px:
+            return False                       # too short to divide anything
+        if w >= span_px and h <= max_thick:
+            return True                        # thin and long: plainly a rule
+        if w >= full_span_px and h <= full_span_thick:
+            return True                        # spans the table: a rule regardless
+        return h > 0 and (w / float(h)) >= ROW_DIVIDER_ASPECT
+
+    count, labels, stats, _c = cv2.connectedComponentsWithStats(band, 8)
+    keep = [i for i in range(1, count) if _is_divider(stats[i])]
+    if not keep:
+        return None
+    return np.isin(labels, keep).astype(np.uint8)
 
 
 def _strip_isolated_rules(mask, min_len_px):
@@ -639,29 +1024,40 @@ def ink_clusters(fitz_page, table_rects=None, gap_pt=CLUSTER_GAP_PT, dpi=INK_DPI
     k = max(3, int(round(gap_pt * scale)) | 1)          # odd, so it is centred
 
     # Inside a table, icons in adjacent rows can sit close enough that the
-    # dilation bridges them into one cluster - the DANGER and WARNING triangles
-    # on page 6 of the Start 350 manual, where the row gap after rule removal
-    # is smaller than the clustering kernel.  Erasing the horizontal row
-    # dividers (found from the ORIGINAL ink, before any stripping) acts as a
-    # barrier: the dilation cannot cross a line that is no longer there.
-    # Only horizontal rules are erased, because they separate rows; vertical
-    # column dividers are left alone (icons in the same row but different
-    # columns are already far enough apart).
+    # dilation bridges them into one cluster - the hazard symbols on a 1.2
+    # "Safety terminology and symbols" page, where the row gap is smaller than
+    # the clustering kernel. The row divider between them is used to keep the
+    # rows apart, found from the ORIGINAL ink because by this point the rule
+    # itself has been taken out as furniture.
+    #
+    # The cut is THIN, and it is made on the DILATED mask, not on the ink.
+    # Widening it to the clustering kernel and subtracting it from the ink -
+    # which is what this did - eats the icons it is supposed to be separating:
+    # in a 40pt row a 34pt triangle came out 17pt tall, and the bottom rows
+    # merged into the table ruling and were then dropped as ruling, so five
+    # symbols were counted as three. Nothing needs to be removed from the ink
+    # at all; a full-width line cut through the grown mask separates the rows
+    # on its own, and leaves every icon whole.
+    barrier_page = np.zeros_like(mask)
     for rx0, ry0, rx1, ry1 in regions:
         sub = ink_before[ry0:ry1, rx0:rx1]
         if sub.size == 0:
             continue
-        horiz = cv2.morphologyEx(sub, cv2.MORPH_OPEN,
-                                 cv2.getStructuringElement(cv2.MORPH_RECT, (rule_px, 1)))
-        if not horiz.any():
+        horiz = _row_dividers(sub, rule_px)
+        if horiz is None:
             continue
-        # The barrier is slightly thicker than the clustering kernel so that
-        # ink on opposite sides of a row divider cannot touch after dilation.
-        barrier = cv2.dilate(horiz, np.ones((max(3, k + 2), 1), np.uint8))
+        # Just wide enough to cover the rule and its anti-aliased edge, so a
+        # cluster cannot span it and no icon loses more than a pixel.
+        thin = cv2.dilate(horiz, np.ones((3, 1), np.uint8))
         region_slice = mask[ry0:ry1, rx0:rx1]
         mask[ry0:ry1, rx0:rx1] = cv2.bitwise_and(region_slice,
-                                                  cv2.bitwise_not(barrier))
+                                                 cv2.bitwise_not(thin))
+        np.maximum(barrier_page[ry0:ry1, rx0:rx1], thin,
+                   out=barrier_page[ry0:ry1, rx0:rx1])
+
     grown = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    if barrier_page.any():
+        grown = cv2.bitwise_and(grown, cv2.bitwise_not(barrier_page))
     count, _labels, stats, _cent = cv2.connectedComponentsWithStats(grown, 8)
 
     pad = (k - 1) / 2.0                                  # undo the dilation
@@ -772,13 +1168,15 @@ def get_all_image_candidates(fitz_page, header_margin=None, footer_margin=None,
                 or r.x1 >= pw - page_margins.EDGE_TOUCH)
 
     ignored = []               # (rect, reason) - only collected when asked for
+    content = page_margins.content_box(pw, ph, m)
 
     if use_ink_clustering:
         try:
             merged_rects, grids = ink_clusters(fitz_page, table_rects=table_rects,
                                                return_grids=True)
             result = _judge_candidates(merged_rects, pw, ph, dropped_by,
-                                       is_edge_artifact, ignored, include_ignored)
+                                       is_edge_artifact, ignored, include_ignored,
+                                       content=content)
             if return_grids:
                 return result, grids
             return result
@@ -832,12 +1230,12 @@ def get_all_image_candidates(fitz_page, header_margin=None, footer_margin=None,
     # Tight clustering to assemble vector paths into individual icons without merging separate graphics
     merged_rects = merge_rects_tight(raw_elements, gap=2)
     result = _judge_candidates(merged_rects, pw, ph, dropped_by, is_edge_artifact,
-                               ignored, include_ignored)
+                               ignored, include_ignored, content=content)
     return (result, []) if return_grids else result
 
 
 def _judge_candidates(merged_rects, pw, ph, dropped_by, is_edge_artifact,
-                      ignored, include_ignored):
+                      ignored, include_ignored, content=None):
     """
     Decide which finished clusters survive: too small, in a margin, an edge
     artifact, or a graphic.
@@ -847,16 +1245,26 @@ def _judge_candidates(merged_rects, pw, ph, dropped_by, is_edge_artifact,
     cluster, never of its fragments. Judging fragments is what let the masthead
     through on the cover: only the pieces wholly inside the header band were
     dropped, and what was left merged into a graphic that had never been asked.
+
+    `content` is the live area once the ignored bands are taken off. A cluster
+    is trimmed to it before anything else is decided, because clustering runs
+    on the whole page and happily joins a language thumb tab to whatever sits
+    beside it. The joined cluster then reaches deep into the text block, so it
+    is no longer furniture by any test, and the tab came back as part of a
+    graphic however the side margin was set - which is not what someone who has
+    just marked that margin expects. Trimming first means a marked band can
+    never be part of a graphic, whether or not it managed to merge with one.
     """
     # Filter out tiny standalone noise artifacts (smaller than 12x12 and area < 140 pt^2)
     final_candidates = []
+    cx0, cy0, cx1, cy1 = content if content else (0.0, 0.0, float(pw), float(ph))
     for r in merged_rects:
         if (r.width >= 12 and r.height >= 12) or (r.width * r.height >= 140):
             clamped = fitz.Rect(
-                max(0, r.x0),
-                max(0, r.y0),
-                min(pw, r.x1),
-                min(ph, r.y1)
+                max(0, r.x0, cx0),
+                max(0, r.y0, cy0),
+                min(pw, r.x1, cx1),
+                min(ph, r.y1, cy1)
             )
             if clamped.width <= 5 or clamped.height <= 5:
                 if include_ignored:
@@ -1041,13 +1449,11 @@ def crop_pdf_elements(pdf_path, output_dir, dpi=DPI, header_margin=None, footer_
                         mask_text_inside_rect(page, rect)
 
                 for crop_idx, (label, rect) in enumerate(crops_on_page, start=1):
-                    x0 = max(0, rect.x0 - 2)
-                    y0 = max(0, rect.y0 - 2)
-                    x1 = min(page_rect.width, rect.x1 + 2)
-                    y1 = min(page_rect.height, rect.y1 + 2)
+                    # Shared with the count check, so the two cannot drift apart
+                    # about what is too small to be a graphic.
+                    r_clamped = padded_crop_rect(rect, page_rect)
 
-                    if (x1 - x0) > 5 and (y1 - y0) > 5:
-                        r_clamped = fitz.Rect(x0, y0, x1, y1)
+                    if r_clamped.width > MIN_CROP_SIDE_PT and r_clamped.height > MIN_CROP_SIDE_PT:
                         crop_pix = page.get_pixmap(dpi=dpi, clip=r_clamped)
 
                         # A region can pass the blank test and still come out
@@ -1061,9 +1467,16 @@ def crop_pdf_elements(pdf_path, output_dir, dpi=DPI, header_margin=None, footer_
                         # 51x35 patch from page 16 came back as a 29% "match"
                         # on page 59 of a translation. Dropping it here is both
                         # cheaper and more honest than scoring it later.
-                        if _is_blank_pixmap(crop_pix):
-                            print(f"  Page {page_num:3d}: Skipped empty crop "
-                                  f"(nothing left after text masking) at {rect}")
+                        # The count check's own decision, called rather than
+                        # repeated. Re-implementing these two tests here is
+                        # exactly how the cropper and the count check drifted
+                        # apart before: a width rule added to one of them left
+                        # the other still discarding the data plate in topic
+                        # 2.2. One render more per crop is worth never having
+                        # two answers to the same question.
+                        if not survives_text_masking(page, rect, dpi=dpi):
+                            print(f"  Page {page_num:3d}: Skipped (empty after text "
+                                  f"masking, or table ruling) at {rect}")
                             continue
 
                         # The index stays per-page in both layouts, so the same

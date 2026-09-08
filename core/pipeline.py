@@ -636,7 +636,6 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     toc_results = []
     bc_qr_results = []
     count_results = []
-    matched_results = []
     img_results_summary = []
     img_crop_details_list = []
     # Wall-clock time spent on each translated PDF, keyed by filename, so the
@@ -644,7 +643,6 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     timing_by_file = {}
 
     diff_crops_out_dir = os.path.join(output_dir, "Cropped_Comparison")
-    matched_evidence_dir = os.path.join(output_dir, "Matched_Images")
 
     # Documents occupy the bar from 20% to 82%; the text checks, the metadata
     # and the report share what is left.
@@ -692,35 +690,39 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
                        "rows": [], "overall_verdict": "FAIL", "status": f"FAIL ({e})"}
         count_results.append(cnt_res)
 
-        # 3b. Content-matched pairing within topics whose count already
-        # agrees - catches a graphic broken or swapped in place, which a
-        # count agreeing on both sides and a one-directional hunt that finds
-        # a near-identical sibling elsewhere would both otherwise miss.
-        # Scoped to topics compare_image_counts already calls a match on
-        # count, so this never fires without that context, and it never
-        # depends on reading order - it re-pairs by content, so translated
-        # text reflowing a graphic onto a later page or a different column
-        # does not get reported as a false mismatch.
-        try:
-            matched_findings = ImageCounts.compare_images_matched(
-                source_pdf_path, tr_path, margins=active_margins,
-                evidence_dir=matched_evidence_dir)
-        except Exception as e:
-            print(f"  [WARN] Content-matched image check failed for {tr_filename}: {e}")
-            matched_findings = []
-        matched_results.extend(matched_findings)
-
         # 4. Pure Visual Graphic Images Comparison
+        #
+        # The translation is cropped by the same extractor as the master, and
+        # the two sets of crops are compared directly. Hunting each master crop
+        # across the rendered translation instead - which is what this used to
+        # do - asks a question the page cannot answer well: it can settle on a
+        # look-alike somewhere else, it cannot see a graphic the translation
+        # ADDED, and matching a fixed-size template against a page collapses
+        # when the artwork was placed at 99% of its original size. Cropping both
+        # sides removes all three, and leaves the translation's own crops in the
+        # output folder where they can be looked at.
         try:
-            img_res = Compare_cropped_images.compare_english_crops_with_translated_pdf(
+            print(f"Extracting Pure Graphic Crops from {tr_filename}...")
+            crop_pdf_images.crop_pdf_elements(
+                tr_path, eng_crops_out_dir, margins=active_margins,
+                progress=stage_progress(here + doc_slice * 0.45, doc_slice * 0.25,
+                                        f"Cropping {tr_filename}"))
+            tr_crops_dir = os.path.join(
+                eng_crops_out_dir, os.path.splitext(tr_filename)[0])
+
+            img_res = Compare_cropped_images.compare_crop_sets(
                 eng_crop_dir=eng_crops_dir,
-                trans_pdf_path=tr_path,
+                tr_crop_dir=tr_crops_dir,
                 output_dir=diff_crops_out_dir,
-                progress=stage_progress(here + doc_slice * 0.45, doc_slice * 0.5,
+                trans_name=os.path.splitext(tr_filename)[0],
+                progress=stage_progress(here + doc_slice * 0.70, doc_slice * 0.25,
                                         f"Images: {tr_filename}"),
             )
         except Exception as e:
-            img_res = {"trans_name": tr_filename, "total_crops": 0, "matched_crops": 0, "match_pct": 0.0, "overall_status": "FAIL", "crop_details": []}
+            print(f"  [WARN] Image comparison failed for {tr_filename}: {e}")
+            img_res = {"trans_name": tr_filename, "total_crops": 0, "matched_crops": 0,
+                       "match_pct": 0.0, "extra_crops": 0,
+                       "overall_status": "FAIL", "crop_details": []}
         img_results_summary.append(img_res)
 
         # Unpack per-crop details for Images tab
@@ -741,13 +743,11 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
                 "match_img": cd.get("match_img", ""),
             })
 
-        matched_pass = all(f["passed"] for f in matched_findings)
         master_pass = (
             toc_res["status"] == "PASS" and
             bc_res["overall_verdict"] == "PASS" and
             img_res["overall_status"] == "PASS" and
-            cnt_res["overall_verdict"] == "PASS" and
-            matched_pass
+            cnt_res["overall_verdict"] == "PASS"
         )
         master_verdict = "PASS" if master_pass else "FAIL"
 
@@ -760,7 +760,6 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
             f"BC/QR: {bc_res['overall_verdict']:<4} | "
             f"Img: {img_res['overall_status']:<4} | "
             f"Count: {cnt_res['overall_verdict']:<4} | "
-            f"Match: {'PASS' if matched_pass else 'FAIL':<4} | "
             f"Master: {master_verdict} | "
             f"{format_duration(elapsed)}"
         )
@@ -947,7 +946,6 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
         "img_results_summary": img_results_summary,
         "img_crop_details": img_crop_details_list,
         "count_results": count_results,
-        "matched_results": matched_results,
         "region_results": region_results,
         "region_note": region_note,
         "metadata_rows": metadata_rows,
