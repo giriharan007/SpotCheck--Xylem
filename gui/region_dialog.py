@@ -514,12 +514,15 @@ class RegionInspectorFrame(ctk.CTkFrame):
                                      height=MIN_CONTENT_HEIGHT)
         content_frame.pack(fill="x", padx=14, pady=(0, 10))
         content_frame.pack_propagate(False)
+        content_frame.grid_columnconfigure(0, weight=1, uniform="inspector_split")
+        content_frame.grid_columnconfigure(1, weight=1, uniform="inspector_split")
+        content_frame.grid_rowconfigure(0, weight=1)
         self._content_frame = content_frame
         self._content_height = MIN_CONTENT_HEIGHT
 
         # Left Pane: Page Preview & Canvas
         left_card = ctk.CTkFrame(content_frame, fg_color=UI_CARD_BG, corner_radius=8, border_width=1, border_color=UI_BORDER)
-        left_card.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        left_card.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
 
         # Left Nav Bar
         nav_bar = ctk.CTkFrame(left_card, fg_color=UI_CARD_WELL, corner_radius=6)
@@ -582,7 +585,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
         # Right Pane: Multi-Region Management & Results
         right_card = ctk.CTkFrame(content_frame, fg_color=UI_CARD_BG, corner_radius=8,
                                   border_width=1, border_color=UI_BORDER)
-        right_card.pack(side="right", fill="both", expand=True, padx=(6, 0))
+        right_card.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
 
         # 1. Multi-Region Management Card
         mgmt_header = ctk.CTkFrame(right_card, fg_color="transparent")
@@ -591,23 +594,58 @@ class RegionInspectorFrame(ctk.CTkFrame):
 
         tmpl_bar = ctk.CTkFrame(right_card, fg_color=UI_CARD_WELL, corner_radius=6)
         tmpl_bar.pack(fill="x", padx=10, pady=(6, 2))
-        ctk.CTkLabel(tmpl_bar, text="Stylesheet Template:", font=_font(size=10, weight="bold"),
-                     text_color=DEPENDABLE_BLUE).pack(side="left", padx=(10, 4), pady=6)
+        self._tmpl_lbl = ctk.CTkLabel(tmpl_bar, text="Stylesheet Template:", font=_font(size=10, weight="bold"),
+                                      text_color=DEPENDABLE_BLUE)
         self.template_var = tk.StringVar(value="")
         self.template_menu = ctk.CTkOptionMenu(
-            tmpl_bar, variable=self.template_var, values=["(none)"], width=190, height=26,
+            tmpl_bar, variable=self.template_var, values=["(none)"], width=140, height=26,
             font=_font(size=10), fg_color=UI_CARD_BG, button_color=XYLEM_BLUE,
             text_color=DEPENDABLE_BLUE)
-        self.template_menu.pack(side="left", padx=4, pady=6)
-        ctk.CTkButton(tmpl_bar, text="Load", width=58, height=26, fg_color=XYLEM_BLUE,
-                      text_color=NEUTRAL_WHITE, font=_font(size=10, weight="bold"),
-                      command=self._on_load_template).pack(side="left", padx=3, pady=6)
-        ctk.CTkButton(tmpl_bar, text="Save As...", width=82, height=26, fg_color=DEPENDABLE_BLUE,
-                      text_color=NEUTRAL_WHITE, font=_font(size=10, weight="bold"),
-                      command=self._on_save_template).pack(side="left", padx=3, pady=6)
-        ctk.CTkButton(tmpl_bar, text="Delete", width=62, height=26, fg_color=UI_CARD_BG,
-                      text_color=DEPENDABLE_BLUE, border_width=1, border_color=UI_BORDER,
-                      font=_font(size=10), command=self._on_delete_template).pack(side="left", padx=3, pady=6)
+        self._btn_tmpl_load = ctk.CTkButton(tmpl_bar, text="Load", width=54, height=26, fg_color=XYLEM_BLUE,
+                                            text_color=NEUTRAL_WHITE, font=_font(size=10, weight="bold"),
+                                            command=self._on_load_template)
+        self._btn_tmpl_save = ctk.CTkButton(tmpl_bar, text="Save As...", width=78, height=26, fg_color=DEPENDABLE_BLUE,
+                                            text_color=NEUTRAL_WHITE, font=_font(size=10, weight="bold"),
+                                            command=self._on_save_template)
+        self._btn_tmpl_del = ctk.CTkButton(tmpl_bar, text="Delete", width=58, height=26, fg_color=UI_CARD_BG,
+                                           text_color=DEPENDABLE_BLUE, border_width=1, border_color=UI_BORDER,
+                                           font=_font(size=10), command=self._on_delete_template)
+
+        self._last_tmpl_layout = None
+        def _reflow_tmpl(event=None):
+            w = tmpl_bar.winfo_width()
+            if w < 50:
+                return
+            mode = "wide" if w >= 560 else "compact"
+            if mode == self._last_tmpl_layout:
+                return
+            self._last_tmpl_layout = mode
+            for child in (self._tmpl_lbl, self.template_menu, self._btn_tmpl_load, self._btn_tmpl_save, self._btn_tmpl_del):
+                child.grid_forget()
+            if mode == "wide":
+                tmpl_bar.grid_columnconfigure(0, weight=0)
+                tmpl_bar.grid_columnconfigure(1, weight=1)
+                tmpl_bar.grid_columnconfigure(2, weight=0)
+                tmpl_bar.grid_columnconfigure(3, weight=0)
+                tmpl_bar.grid_columnconfigure(4, weight=0)
+                self._tmpl_lbl.grid(row=0, column=0, padx=(8, 4), pady=6, sticky="w")
+                self.template_menu.grid(row=0, column=1, padx=3, pady=6, sticky="ew")
+                self._btn_tmpl_load.grid(row=0, column=2, padx=3, pady=6)
+                self._btn_tmpl_save.grid(row=0, column=3, padx=3, pady=6)
+                self._btn_tmpl_del.grid(row=0, column=4, padx=(3, 8), pady=6)
+            else:
+                tmpl_bar.grid_columnconfigure(0, weight=0)
+                tmpl_bar.grid_columnconfigure(1, weight=1)
+                tmpl_bar.grid_columnconfigure(2, weight=0)
+                tmpl_bar.grid_columnconfigure(3, weight=0)
+                tmpl_bar.grid_columnconfigure(4, weight=0)
+                self._tmpl_lbl.grid(row=0, column=0, padx=(8, 4), pady=(6, 2), sticky="w")
+                self.template_menu.grid(row=0, column=1, columnspan=4, padx=(2, 8), pady=(6, 2), sticky="ew")
+                self._btn_tmpl_load.grid(row=1, column=1, padx=2, pady=(2, 6), sticky="e")
+                self._btn_tmpl_save.grid(row=1, column=2, padx=2, pady=(2, 6))
+                self._btn_tmpl_del.grid(row=1, column=3, padx=(2, 8), pady=(2, 6))
+
+        tmpl_bar.bind("<Configure>", _reflow_tmpl, add="+")
 
         mgmt_btn_bar = ctk.CTkFrame(right_card, fg_color="transparent")
         mgmt_btn_bar.pack(fill="x", padx=10, pady=(0, 4))
@@ -653,13 +691,16 @@ class RegionInspectorFrame(ctk.CTkFrame):
 
         ctk.CTkLabel(edit_row, text="Label:", font=_font(size=11, weight="bold"), text_color=DEPENDABLE_BLUE).pack(side="left")
         self.label_var = tk.StringVar()
-        self.label_entry = ctk.CTkEntry(edit_row, textvariable=self.label_var, font=_font(size=11, weight="bold"), width=130, height=28)
-        self.label_entry.pack(side="left", padx=4)
+        self.label_entry = ctk.CTkEntry(edit_row, textvariable=self.label_var, font=_font(size=11, weight="bold"), height=28)
+        self.label_entry.pack(side="left", fill="x", expand=True, padx=(4, 6))
         self.label_entry.bind("<KeyRelease>", self._on_label_entry_change)
+
+        chk_frame = ctk.CTkFrame(editor_card, fg_color="transparent")
+        chk_frame.pack(fill="x", padx=6, pady=(0, 4))
 
         self.exact_match_var = ctk.BooleanVar(value=False)
         self.exact_match_chk = ctk.CTkCheckBox(
-            edit_row,
+            chk_frame,
             text="Exact Text match",
             variable=self.exact_match_var,
             font=_font(size=10, weight="bold"),
@@ -667,11 +708,10 @@ class RegionInspectorFrame(ctk.CTkFrame):
             text_color=DEPENDABLE_BLUE,
             command=self._on_exact_match_toggle
         )
-        self.exact_match_chk.pack(side="left", padx=4)
 
         self.scope_only_var = ctk.BooleanVar(value=False)
         self.scope_only_chk = ctk.CTkCheckBox(
-            edit_row,
+            chk_frame,
             text="Scope only",
             variable=self.scope_only_var,
             font=_font(size=10, weight="bold"),
@@ -679,11 +719,10 @@ class RegionInspectorFrame(ctk.CTkFrame):
             text_color=DEPENDABLE_BLUE,
             command=self._on_scope_only_toggle
         )
-        self.scope_only_chk.pack(side="left", padx=4)
 
         self.dont_compare_text_var = ctk.BooleanVar(value=False)
         self.dont_compare_text_chk = ctk.CTkCheckBox(
-            edit_row,
+            chk_frame,
             text="Visual only",
             variable=self.dont_compare_text_var,
             font=_font(size=10, weight="bold"),
@@ -691,16 +730,10 @@ class RegionInspectorFrame(ctk.CTkFrame):
             text_color=DEPENDABLE_BLUE,
             command=self._on_dont_compare_text_toggle
         )
-        self.dont_compare_text_chk.pack(side="left", padx=4)
 
-        # For content that is SUPPOSED to differ. A QR encodes a language
-        # specific URL, so its pattern is different in every translation by
-        # design and comparing pixels can only ever fail - twelve code regions
-        # came back at 45-75% and were told to REVIEW on every single run.
-        # Presence is the only question about them with a true answer.
         self.presence_only_var = ctk.BooleanVar(value=False)
         self.presence_only_chk = ctk.CTkCheckBox(
-            edit_row,
+            chk_frame,
             text="Present only",
             variable=self.presence_only_var,
             font=_font(size=10, weight="bold"),
@@ -708,17 +741,10 @@ class RegionInspectorFrame(ctk.CTkFrame):
             text_color=DEPENDABLE_BLUE,
             command=self._on_presence_only_toggle
         )
-        self.presence_only_chk.pack(side="left", padx=4)
 
-        # Stricter than "Present only" without being as strict as "Exact".
-        # A document number is six digits in every language - six DIFFERENT
-        # digits, but six. A language code is two letters, whichever two. So
-        # the check is on the shape, and the shape is read off the master's own
-        # text rather than configured: whatever pattern the English copy uses,
-        # the translation has to use as well.
         self.pattern_match_var = ctk.BooleanVar(value=False)
         self.pattern_match_chk = ctk.CTkCheckBox(
-            edit_row,
+            chk_frame,
             text="Same pattern",
             variable=self.pattern_match_var,
             font=_font(size=10, weight="bold"),
@@ -726,7 +752,57 @@ class RegionInspectorFrame(ctk.CTkFrame):
             text_color=DEPENDABLE_BLUE,
             command=self._on_pattern_match_toggle
         )
-        self.pattern_match_chk.pack(side="left", padx=4)
+
+        self._last_chk_layout = None
+        def _reflow_checkboxes(event=None):
+            w = chk_frame.winfo_width()
+            if w < 50:
+                return
+            if w >= 660:
+                mode = "1row"
+            elif w >= 400:
+                mode = "2row"
+            else:
+                mode = "stacked"
+
+            if mode == self._last_chk_layout:
+                return
+            self._last_chk_layout = mode
+
+            for chk in (self.exact_match_chk, self.scope_only_chk, self.dont_compare_text_chk,
+                        self.presence_only_chk, self.pattern_match_chk):
+                chk.grid_forget()
+
+            if mode == "1row":
+                for col in range(5):
+                    chk_frame.grid_columnconfigure(col, weight=1)
+                self.exact_match_chk.grid(row=0, column=0, padx=3, pady=2, sticky="w")
+                self.scope_only_chk.grid(row=0, column=1, padx=3, pady=2, sticky="w")
+                self.dont_compare_text_chk.grid(row=0, column=2, padx=3, pady=2, sticky="w")
+                self.presence_only_chk.grid(row=0, column=3, padx=3, pady=2, sticky="w")
+                self.pattern_match_chk.grid(row=0, column=4, padx=3, pady=2, sticky="w")
+            elif mode == "2row":
+                for col in range(3):
+                    chk_frame.grid_columnconfigure(col, weight=1)
+                chk_frame.grid_columnconfigure(3, weight=0)
+                chk_frame.grid_columnconfigure(4, weight=0)
+                self.exact_match_chk.grid(row=0, column=0, padx=3, pady=2, sticky="w")
+                self.scope_only_chk.grid(row=0, column=1, padx=3, pady=2, sticky="w")
+                self.dont_compare_text_chk.grid(row=0, column=2, padx=3, pady=2, sticky="w")
+                self.presence_only_chk.grid(row=1, column=0, padx=3, pady=2, sticky="w")
+                self.pattern_match_chk.grid(row=1, column=1, padx=3, pady=2, sticky="w")
+            else:
+                chk_frame.grid_columnconfigure(0, weight=1)
+                chk_frame.grid_columnconfigure(1, weight=1)
+                for col in (2, 3, 4):
+                    chk_frame.grid_columnconfigure(col, weight=0)
+                self.exact_match_chk.grid(row=0, column=0, padx=2, pady=2, sticky="w")
+                self.scope_only_chk.grid(row=0, column=1, padx=2, pady=2, sticky="w")
+                self.dont_compare_text_chk.grid(row=1, column=0, padx=2, pady=2, sticky="w")
+                self.presence_only_chk.grid(row=1, column=1, padx=2, pady=2, sticky="w")
+                self.pattern_match_chk.grid(row=2, column=0, padx=2, pady=2, sticky="w")
+
+        chk_frame.bind("<Configure>", _reflow_checkboxes, add="+")
 
         # Hover help: each match mode gets a full description on hover, so the
         # difference between them can be read at the point of choosing rather
@@ -734,40 +810,26 @@ class RegionInspectorFrame(ctk.CTkFrame):
         # garbage-collected while the dialog is alive.
         self._checkbox_tips = [
             _Tooltip(self.exact_match_chk,
-                     "Exact match\n\n"
-                     "The text in this region must be identical to the master's, "
-                     "character for character (after trimming surrounding spaces). "
-                     "Use it for strings that must never change in translation — "
-                     "part numbers, model names, standards like “EN 809”, "
-                     "trademarks. Any different character fails the check."),
+                     "Text must be exactly the same as the master.\n\n"
+                     "Example: A part number like \"PN-882539\" must appear "
+                     "unchanged in every language."),
             _Tooltip(self.scope_only_chk,
-                     "Scope only\n\n"
-                     "Marks an area without scoring it — this box is never passed "
-                     "or failed itself. Use it as a container: to group related "
-                     "regions, or to limit the area in which a sub-region drawn "
-                     "inside it is searched. It shapes where other checks look; it "
-                     "is not a check on its own."),
+                     "Defines an area but does not check it — acts as a "
+                     "container for other regions.\n\n"
+                     "Example: Draw a box around the entire header so that "
+                     "sub-regions inside it are searched only there."),
             _Tooltip(self.dont_compare_text_chk,
-                     "Visual only (no text)\n\n"
-                     "Ignore the words and compare the picture instead. Use it for "
-                     "logos, icons, hazard symbols, diagrams and other artwork — "
-                     "anything whose text layer is missing or irrelevant. The "
-                     "region passes when the image matches the master's."),
+                     "Ignores text and compares the image only.\n\n"
+                     "Example: A hazard triangle icon — the picture must "
+                     "match, but the warning text beside it will differ."),
             _Tooltip(self.presence_only_chk,
-                     "Present only\n\n"
-                     "The region just has to exist — its contents may differ. Use "
-                     "it for things that are SUPPOSED to change per language: a QR "
-                     "code or barcode that encodes a language-specific URL, or a "
-                     "value that varies by market. It passes as long as something "
-                     "is there, and never fails just because the content differs."),
+                     "Only checks that something exists — contents can differ.\n\n"
+                     "Example: A QR code that links to a language-specific URL "
+                     "— it must be there, but will look different."),
             _Tooltip(self.pattern_match_chk,
-                     "Same pattern\n\n"
-                     "The translation must keep the master's SHAPE, not its value. "
-                     "The pattern is read from the master's own text — 6 digits "
-                     "stays 6 digits, a 2-letter language code stays 2 letters — "
-                     "and the translation has to match that shape. Use it for "
-                     "document numbers, codes and IDs whose format is fixed but "
-                     "whose exact value changes per language."),
+                     "The format must match the master, but the value can differ.\n\n"
+                     "Example: A document number like \"882539\" — the translation "
+                     "must also have 6 digits, but the digits can be different."),
         ]
 
         # What the shape actually came out as, and a way to overrule it. Shown
@@ -3295,8 +3357,16 @@ class RegionInspectorDialog(ctk.CTkToplevel):
                  output_dir: str = None, on_results=None):
         super().__init__(parent)
         self.title("Xylem SpotCheck - Custom Region Inspector & Layout Comparison")
-        self.geometry("1280x880")
-        self.minsize(900, 600)
+        try:
+            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        except Exception:
+            sw, sh = 1366, 768
+        w = max(850, min(1400, int(sw * 0.94)))
+        h = max(560, min(920, int(sh * 0.90)))
+        x = max(0, (sw - w) // 2)
+        y = max(0, (sh - h) // 3)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.minsize(min(850, w), min(540, h))
         self.resizable(True, True)
         self.configure(fg_color=UI_BG_CANVAS)
 

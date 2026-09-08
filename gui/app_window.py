@@ -314,6 +314,11 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 text_color=CLARITY_BLUE
             )
             desc_lbl.pack(anchor="w", padx=20, pady=(0, 14))
+            header_frame.bind(
+                "<Configure>",
+                lambda e: desc_lbl.configure(wraplength=max(280, e.width - 40)),
+                add="+"
+            )
 
             # ------------------------------------------------------------------
             # 2. Input Configuration Card (White Card with Xylem Blue Accents)

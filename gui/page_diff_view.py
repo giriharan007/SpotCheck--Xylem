@@ -92,8 +92,16 @@ class PageDiffWindow(ctk.CTkToplevel):
 
         self.title(f"Master ↔ Translated  •  "
                    f"page {self.master_page} vs {self.trans_page}")
-        self.geometry("1500x940")
-        self.minsize(900, 600)
+        try:
+            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        except Exception:
+            sw, sh = 1366, 768
+        w = max(850, min(1500, int(sw * 0.94)))
+        h = max(560, min(940, int(sh * 0.88)))
+        x = max(0, (sw - w) // 2)
+        y = max(0, (sh - h) // 3)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.minsize(min(850, w), min(540, h))
         self.configure(fg_color=UI_BG_CANVAS)
 
         self._build_ui()
@@ -166,13 +174,16 @@ class PageDiffWindow(ctk.CTkToplevel):
         # ---- the two pages ----
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=12, pady=(0, 4))
+        body.grid_columnconfigure(0, weight=1, uniform="diff_split")
+        body.grid_columnconfigure(1, weight=1, uniform="diff_split")
+        body.grid_rowconfigure(0, weight=1)
 
         self.panes = {}
-        for side, caption, colour in (("master", "MASTER", XYLEM_BLUE),
-                                      ("trans", "TRANSLATED", DEPENDABLE_BLUE)):
+        for col_idx, (side, caption, colour) in enumerate((("master", "MASTER", XYLEM_BLUE),
+                                                          ("trans", "TRANSLATED", DEPENDABLE_BLUE))):
             card = ctk.CTkFrame(body, fg_color=UI_CARD_BG, corner_radius=8,
                                 border_width=1, border_color=UI_BORDER)
-            card.pack(side="left", fill="both", expand=True,
+            card.grid(row=0, column=col_idx, sticky="nsew",
                       padx=((0, 5) if side == "master" else (5, 0)))
             cap = ctk.CTkFrame(card, fg_color="transparent")
             cap.pack(fill="x", padx=10, pady=(7, 2))
@@ -197,7 +208,7 @@ class PageDiffWindow(ctk.CTkToplevel):
         # One scrollbar drives both pages. Scrolling them independently would
         # defeat the point: the eye has to land on the same place twice.
         self.vsb = tk.Scrollbar(body, orient="vertical", command=self._yview_both)
-        self.vsb.pack(side="left", fill="y", padx=(4, 0))
+        self.vsb.grid(row=0, column=2, sticky="ns", padx=(4, 0))
 
         self.note_lbl = ctk.CTkLabel(
             self, text="", font=self._f(9), text_color=NEUTRAL_DARK_GR,
