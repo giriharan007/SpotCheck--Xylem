@@ -62,7 +62,6 @@ from gui.theme import (
 SOURCE_REGIONS = "Region Checks"
 SOURCE_CROPS = "Images"
 SOURCE_COUNTS = "Image Counts"
-SOURCE_MATCHED = "Graphic Match"
 SOURCE_TOC = "TOC"
 SOURCE_BARCODE = "Barcode"
 SOURCE_QR = "QR Code"
@@ -77,7 +76,6 @@ SOURCE_BAND_COLOR = {
     SOURCE_REGIONS: "#EAF6FF",
     SOURCE_CROPS: "#F3EAFF",
     SOURCE_COUNTS: "#EAFBF0",
-    SOURCE_MATCHED: "#FFF6E0",
     SOURCE_TOC: "#FDEAF3",
     SOURCE_BARCODE: "#EEF0FF",
     SOURCE_QR: "#E8ECFF",
@@ -294,51 +292,6 @@ def cards_from_image_counts(count_results, page_lookup=None):
                 "image": "",
                 "roi_rect": None,
             })
-    return rows
-
-
-def cards_from_matched_images(findings):
-    """
-    Normalise image_counts.py's content-matched per-topic pairing into
-    gallery rows.
-
-    Unlike cards_from_image_counts, this never asks "how many" - it asks "is
-    each graphic still the right picture", pairing master and translation
-    graphics within a topic by what they look like rather than by reading
-    order, so a graphic reflow moved to a different page or column does not
-    get compared against the wrong sibling. Each finding already names both
-    real page numbers directly (no page_lookup needed, unlike Image Counts),
-    because the pairing was built from each document's own detected graphic
-    positions, not inferred from a topic's page span.
-    """
-    rows = []
-    for f in findings or []:
-        ok = bool(f.get("passed"))
-        # The topic title already carries its own number ("1.1 Introduction"),
-        # so showing the bare code in front of it too just repeats "1.1"
-        # twice - a false impression that this is somehow re-checking section
-        # numbering (that is a completely separate check; see cards_from_toc).
-        label = f.get("topic_title") or f.get("topic_code") or "Document"
-        n = f.get("slot_count", 1)
-        rows.append({
-            "source": SOURCE_MATCHED,
-            "title": f"{label[:70]} — graphic {f.get('slot', 1)} of {n}",
-            "eng_name": f.get("english_pdf", ""),
-            "eng_page": f.get("master_page", "-"),
-            "tr_name": f.get("translated_pdf", ""),
-            "tr_page": f.get("target_page", "-"),
-            "status": f.get("status", ""),
-            "passed": ok,
-            "score": f"{f.get('match_pct', 0):.1f}%",
-            "detail": (f"This picture in the translation still matches the master's "
-                      f"picture at this spot ({f.get('match_pct', 0):.0f}% alike)." if ok else
-                      f"The picture the translation has here does not look like the "
-                      f"master's picture for this spot ({f.get('match_pct', 0):.0f}% alike) - "
-                      f"it may be broken, corrupted, or swapped with another graphic "
-                      f"in this section."),
-            "shift": 0.0,
-            "image": f.get("match_img", ""),
-        })
     return rows
 
 
@@ -999,18 +952,10 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         self._replace(SOURCE_COUNTS, cards_from_image_counts(count_results, _page_lookup))
         self._refresh_list()
 
-    def load_matched_images(self, matched_findings):
-        """
-        Publish image_counts.py's content-matched pairing (broken or swapped
-        graphics that a count agreeing on both sides would miss).
-        """
-        self._replace(SOURCE_MATCHED, cards_from_matched_images(matched_findings))
-        self._refresh_list()
-
     def load_toc_results(self, toc_results):
         """
         Publish toc.py's section-numbering comparison - the actual table-of-
-        contents check, distinct from Graphic Match above even though both
+        contents check, distinct from Image Counts above even though both
         happen to talk about section numbers.
         """
         self._replace(SOURCE_TOC, cards_from_toc_results(toc_results))
@@ -1194,17 +1139,31 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
             # on the left so the two sides start off aligned.
             eng_page = _page(row.get("eng_page"), _page(row.get("tr_page")))
 
-            # Where to look in the translation when the result itself does not
-            # say - a graphic reported NOT FOUND, for instance. Falling back to
-            # the same page number opens two pages that reflow has long since
-            # separated, so the topic-aligned page is used instead.
-            fallback = eng_page
+            # Which translated page actually holds this master page's TOPIC.
+            # Section 4.6 is section 4.6 in every language, so that - not the
+            # page number, and not where a single crop happened to match - is
+            # what makes the two pages comparable.
+            topic_page, topic_code, why = eng_page, None, "same page"
             try:
                 from core import toc as TOC
-                fallback = TOC.page_mapper(master_pdf, trans_pdf)(eng_page)
+                topic_page, topic_code, why = TOC.matching_page(
+                    master_pdf, trans_pdf, eng_page)
             except Exception:
                 pass
-            tr_page = _page(row.get("tr_page"), fallback)
+
+            # A row that names a translated page keeps it ONLY while it agrees
+            # with the topic. A crop found on a page belonging to another
+            # section is the interesting case: opening that page would show the
+            # reviewer the wrong section and report every graphic on it as
+            # missing, which is what "looking in a specific location" meant.
+            tr_page = _page(row.get("tr_page"), topic_page)
+            if why == "topic" and tr_page != topic_page:
+                try:
+                    from core import toc as TOC
+                    if TOC.topic_at_page(trans_pdf, tr_page) != topic_code:
+                        tr_page = topic_page
+                except Exception:
+                    pass
 
         margins = None
         if callable(self._get_margins):

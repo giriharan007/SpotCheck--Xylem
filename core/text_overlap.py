@@ -203,6 +203,54 @@ def evidence_crop(page, rect, out_path, pad=6.0, dpi=200):
         return ""
 
 
+_artwork_cache = {}
+
+
+def _graphic_rects(pdf_path, page_no, margins):
+    """The drawings on one page, cached per document and page."""
+    key = (os.path.abspath(pdf_path), page_no)
+    if key not in _artwork_cache:
+        try:
+            from core import page_diff
+            _artwork_cache[key] = [fitz.Rect(*r) for r in
+                                   page_diff.page_graphics(pdf_path, page_no, margins)]
+        except Exception:
+            _artwork_cache[key] = []
+    return _artwork_cache[key]
+
+
+# How far outside a drawing a label still belongs to it. A callout sits just
+# clear of the thing it names - the pin labels under a terminal symbol land
+# about a line below the ink - so a rule that asked for the label to be INSIDE
+# the artwork matched almost none of them.
+ARTWORK_LABEL_PAD_PT = 14.0
+
+
+def _inside_artwork(bbox_a, bbox_b, artwork):
+    """
+    True when both colliding labels belong to the same drawing.
+
+    A technical illustration is not laid out like prose. Callout numbers sit on
+    leader lines, a terminal label sits hard against the terminal it names, and
+    two labels on neighbouring pins are as close as the pins are - all of which
+    reads as a text collision and none of which is a defect. The check exists to
+    catch a translated line overrunning its cell or its neighbour in the body
+    copy, and inside a figure there is no such expectation to measure against.
+
+    Both boxes must belong to the SAME graphic, so a line that has overrun out
+    of a figure and onto real body text is still reported.
+    """
+    if not artwork:
+        return False
+    ra, rb = fitz.Rect(bbox_a), fitz.Rect(bbox_b)
+    pad = ARTWORK_LABEL_PAD_PT
+    for g in artwork:
+        near = fitz.Rect(g.x0 - pad, g.y0 - pad, g.x1 + pad, g.y1 + pad)
+        if near.contains(ra) and near.contains(rb):
+            return True
+    return False
+
+
 def find_overlaps(pdf_path, skip_first_last=True, margins=None,
                   evidence_dir=None, progress=None):
     """
@@ -230,8 +278,22 @@ def find_overlaps(pdf_path, skip_first_last=True, margins=None,
             if progress:
                 progress(page_no, total, name)
             clip = _clip_for_margins(page, margins)
+            candidates = _candidates(page, clip)
+            if not candidates:
+                continue
+
+            # Only now, and only on the few pages that got this far. Working
+            # out where the drawings are means ink clustering, grid detection
+            # and a barcode sweep, with the document reopened for each page -
+            # about a third of a second. Doing that for every page of every
+            # translation cost seven minutes a batch to answer a question that
+            # almost every page never asks: this check finds no candidate at
+            # all on the overwhelming majority of them.
+            artwork = _graphic_rects(pdf_path, page_no, margins)
             raw = []
-            for a, b, overlap in _candidates(page, clip):
+            for a, b, overlap in candidates:
+                if _inside_artwork(a["bbox"], b["bbox"], artwork):
+                    continue
                 collides, why = _glyphs_collide(page, a["bbox"], b["bbox"])
                 if collides:
                     raw.append((a, b, overlap, why))

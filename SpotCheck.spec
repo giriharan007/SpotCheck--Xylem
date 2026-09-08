@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
+import struct
 import sys
 from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs, collect_data_files
 
@@ -183,6 +184,67 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
+
+def _pe_machine(path):
+    """
+    The architecture recorded in a Windows PE header, or None.
+
+    Read straight from the file: e_lfanew at offset 0x3C points at the PE
+    signature, and the machine word follows it.
+    """
+    try:
+        with open(path, 'rb') as f:
+            if f.read(2) != b'MZ':
+                return None
+            f.seek(0x3C)
+            off = struct.unpack('<I', f.read(4))[0]
+            f.seek(off)
+            if f.read(4) != b'PE\0\0':
+                return None
+            return struct.unpack('<H', f.read(2))[0]
+    except Exception:
+        return None
+
+
+def drop_foreign_architecture(binaries):
+    """
+    Remove any DLL that is not built for the architecture we are building for.
+
+    libzbar links against the Visual C++ 2013 runtime, so PyInstaller follows
+    that dependency and bundles whatever MSVCR120.dll it resolves on the build
+    machine. A 64-bit Windows carries TWO - the x64 copy in System32 and an x86
+    copy in SysWOW64 - and when the 32-bit one is the one that gets picked up,
+    the build succeeds and the exe dies on launch with
+
+        MSVCR120.dll is either not designed to run on Windows or it contains
+        an error.  Error status 0xc0000020
+
+    0xc0000020 is STATUS_INVALID_IMAGE_FORMAT: the file is intact, it is simply
+    the wrong architecture. It only shows on a machine that does not already
+    have the right runtime installed, which is why it survives testing on the
+    build machine and appears on someone else's laptop.
+    """
+    if sys.platform != 'win32':
+        return binaries
+    want = 0x8664 if sys.maxsize > 2 ** 32 else 0x14c
+    label = {0x8664: 'x64', 0x14c: 'x86', 0xaa64: 'arm64'}
+    kept, dropped = [], []
+    for item in binaries:
+        dest, src = item[0], item[1]
+        machine = _pe_machine(src) if isinstance(src, str) else None
+        if machine is not None and machine != want:
+            dropped.append((dest, label.get(machine, hex(machine))))
+            continue
+        kept.append(item)
+    if dropped:
+        print(f"[SPEC] dropped {len(dropped)} binary(ies) of the wrong architecture "
+              f"(building {label[want]}):")
+        for dest, got in dropped:
+            print(f"[SPEC]   {dest}  ({got})")
+    return kept
+
+
+a.binaries = drop_foreign_architecture(a.binaries)
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 

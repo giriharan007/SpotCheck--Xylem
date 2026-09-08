@@ -35,10 +35,13 @@ import numpy as np
 import pymupdf as fitz
 
 from core.crop_images import (
+    MASK_TEXT_IN_CROPS,
     extract_topics_with_positions,
     find_topic_for_rect,
     get_all_image_candidates,
     is_blank_region,
+    mask_text_inside_rect,
+    survives_text_masking,
 )
 from core import barcode_qr as Barcode_QR_Check
 from core import docscan
@@ -72,6 +75,43 @@ def _topic_keys(topics):
             seq += 1
             keys[idx] = f"{UNNUMBERED_PREFIX}{seq}"
     return keys
+
+
+def _croppable_rects(page, code_rects, page_margins, dpi):
+    """
+    The graphics on one page that the cropper would actually write out.
+
+    Every caller that counts or pairs graphics goes through here, because the
+    checks are only comparable if they agree on what a graphic IS. Four filters,
+    in the cropper's own order: a barcode is not a graphic, a region painted
+    over is not a graphic, and - the two this used to miss - a region that is
+    empty once its text is masked, or too small to render, is not one either.
+
+    Missing the last two is what made "Image Counts" and "Images" report
+    different totals for the same page. Both are language-sensitive: a label
+    that fills its box in English and not in Spanish changes the count on one
+    side only, so identical artwork failed the count check.
+    """
+    kept = []
+    for r in get_all_image_candidates(page, margins=page_margins):
+        if any(fitz.Rect(cr.x0 - 5, cr.y0 - 5, cr.x1 + 5, cr.y1 + 5).intersects(r)
+               for cr in code_rects):
+            continue                              # a code, not a graphic
+        if is_blank_region(page, r):
+            continue                              # painted over or empty
+        kept.append(r)
+
+    if not kept:
+        return kept
+
+    # The cropper masks the text inside every candidate on the page before it
+    # renders any of them, so the same must happen here or the render below
+    # would still be looking at the words.
+    if MASK_TEXT_IN_CROPS:
+        for r in kept:
+            mask_text_inside_rect(page, r)
+
+    return [r for r in kept if survives_text_masking(page, r, dpi=dpi)]
 
 
 def count_images_by_topic(pdf_path, dpi=150, margins=None):
@@ -115,13 +155,9 @@ def count_images_by_topic(pdf_path, dpi=150, margins=None):
             # Exactly the same view of the page as the cropper: this check
             # exists to agree with the crop count, and it cannot do that if one
             # of them treats a ruled table as a graphic and the other does not.
-            for r in get_all_image_candidates(
-                    page, margins=PageMargins.margins_for_page(margins, pno + 1, len(doc))):
-                if any(fitz.Rect(cr.x0 - 5, cr.y0 - 5, cr.x1 + 5, cr.y1 + 5).intersects(r)
-                       for cr in code_rects):
-                    continue                      # a code, not a graphic
-                if is_blank_region(page, r):
-                    continue                      # painted over or empty
+            for r in _croppable_rects(
+                    page, code_rects,
+                    PageMargins.margins_for_page(margins, pno + 1, len(doc)), dpi):
                 total += 1
                 if topics:
                     t = find_topic_for_rect(pno + 1, r, topics)
@@ -247,18 +283,14 @@ def _topic_image_rects(pdf_path, topics, keys, margins=None):
                     codes = []
                 code_rects = [c["rect"] for c in codes]
 
-            candidates = get_all_image_candidates(
-                page, margins=PageMargins.margins_for_page(margins, page_num, len(doc)))
+            candidates = _croppable_rects(
+                page, code_rects,
+                PageMargins.margins_for_page(margins, page_num, len(doc)), 150)
             # Left-to-right, top-to-bottom on the page, matching how a reviewer's
             # eye actually moves - which is what "1st graphic, 2nd graphic" means.
             candidates = sorted(candidates, key=lambda r: (round(r.y0, 1), round(r.x0, 1)))
 
             for r in candidates:
-                if any(fitz.Rect(cr.x0 - 5, cr.y0 - 5, cr.x1 + 5, cr.y1 + 5).intersects(r)
-                       for cr in code_rects):
-                    continue
-                if is_blank_region(page, r):
-                    continue
                 t = find_topic_for_rect(page_num, r, topics)
                 k = keys.get(index_of.get(id(t), -1), FRONT_MATTER_KEY) if t is not None \
                     else FRONT_MATTER_KEY
@@ -367,7 +399,8 @@ def compare_images_in_order(source_pdf_path, target_pdf_path, dpi=150, margins=N
                                                  re.sub(r"[^\w.\-]+", "_", key))
                         os.makedirs(topic_dir, exist_ok=True)
                         match_img_path = os.path.join(topic_dir, f"slot_{slot:02d}.png")
-                        cv2.imwrite(match_img_path, canvas)
+                        from core.compare_crops import imwrite_unicode
+                        imwrite_unicode(match_img_path, canvas)
                     except Exception:
                         match_img_path = ""
 
@@ -576,7 +609,8 @@ def compare_images_matched(source_pdf_path, target_pdf_path, dpi=150, margins=No
                                                  re.sub(r"[^\w.\-]+", "_", key))
                         os.makedirs(topic_dir, exist_ok=True)
                         match_img_path = os.path.join(topic_dir, f"item_{i + 1:02d}.png")
-                        cv2.imwrite(match_img_path, canvas)
+                        from core.compare_crops import imwrite_unicode
+                        imwrite_unicode(match_img_path, canvas)
                     except Exception:
                         match_img_path = ""
 
