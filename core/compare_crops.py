@@ -784,6 +784,32 @@ def _group_by_topic(rows):
     return out
 
 
+def _group_sort_key(key):
+    """
+    Order groups the way a reader meets them, front of the document to back.
+
+    The keys are strings, and sorting them as strings puts "1.10" before "1.2"
+    and "4.7.10" before "4.7.2" - so on any manual with ten or more subsections
+    in a chapter the results come out with the page numbers jumping backwards.
+    Comparing the numbers as numbers is what "in order" has to mean here.
+
+    Front matter, keyed by page because it belongs to no section, comes first.
+    """
+    kind, _, rest = key.partition(":")
+    if kind != "topic":
+        try:
+            return (0, [int(rest)])
+        except ValueError:
+            return (0, [0])
+    parts = []
+    for piece in rest.split("."):
+        try:
+            parts.append(int(piece))
+        except ValueError:
+            parts.append(0)
+    return (1, parts)
+
+
 def create_pair_image(a_gray, b_gray, eng_page, trans_page, score_pct,
                       threshold=SIMILARITY_THRESHOLD, status=None):
     """Master crop beside its translated counterpart, captioned with the score."""
@@ -861,7 +887,7 @@ def compare_crop_sets(eng_crop_dir, tr_crop_dir, output_dir, trans_name=None,
 
     crop_details, extras = [], []
     checked = matched = 0
-    keys = sorted(set(eng_groups) | set(tr_groups))
+    keys = sorted(set(eng_groups) | set(tr_groups), key=_group_sort_key)
 
     for gi, key in enumerate(keys, start=1):
         if progress:

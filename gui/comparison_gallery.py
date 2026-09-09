@@ -999,6 +999,35 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         self._replace(SOURCE_OVERFLOW, cards_from_overflows(overflow_rows))
         self._refresh_list()
 
+    @staticmethod
+    def _page_number(value):
+        """A row's page as an int, or None when it does not name one."""
+        try:
+            n = int(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+        return n if n > 0 else None
+
+    @classmethod
+    def _row_order(cls, row):
+        """
+        Where a result belongs in a reading of the document, front to back.
+
+        Results arrive one CHECK at a time - every image result, then every
+        count result, then the TOC ones - and the list was showing them in that
+        order, so the page numbers ran 1..n, restarted at 1, restarted again.
+        Reviewing means working through a document, so the page is what orders
+        the list and the check is only a tie-break.
+
+        A text finding names no master page, only the translated one it was
+        measured on; that is the page it belongs to. Anything with no page at
+        all sorts to the end rather than pretending to be page zero.
+        """
+        page = cls._page_number(row.get("eng_page"))
+        if page is None:
+            page = cls._page_number(row.get("tr_page"))
+        return (0, page) if page is not None else (1, 0)
+
     def _replace(self, source, rows):
         self._all_rows = [r for r in self._all_rows if r["source"] != source] + rows
         # A fresh batch of results always lands on the file summary first,
@@ -1243,6 +1272,9 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         self._set_compare_enabled(True)
 
         rows = [r for r in self._all_rows if (r.get("tr_name") or "") == self._detail_file]
+        # Sorted stably, so results sharing a page keep the order their checks
+        # produced them in and stay grouped.
+        rows.sort(key=self._row_order)
         self._visible_rows = rows
         n_pass = sum(1 for r in rows if r["passed"])
         n_fail = len(rows) - n_pass

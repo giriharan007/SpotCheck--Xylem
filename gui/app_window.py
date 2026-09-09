@@ -102,6 +102,12 @@ TAB_TEXT_CHECKS = "  Text Checks  "
 # ──────────────────────────────────────────────────────────────
 # Fix 1 (continued): Safe TextRedirector with encoding guard & file logging
 # ──────────────────────────────────────────────────────────────
+# The scrollbar fraction at which the console counts as "at the bottom", and
+# so keeps following new output. Tk reports exactly 1.0 when it is pinned
+# there; the slack absorbs a partly visible last line.
+LOG_AT_BOTTOM = 0.999
+
+
 class TextRedirector:
     """
     Redirects stdout/stderr streams to a thread-safe GUI text queue AND
@@ -885,12 +891,42 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         if not chunks:
             return
         try:
+            # Follow the output only while the view is already at the bottom.
+            # Scrolling back to read something means the console is being READ,
+            # and yanking it to the end on the next line - which during a run
+            # is a tenth of a second later - makes that impossible.
+            try:
+                # An unmapped console has no scroll position worth honouring
+                # and nobody reading it, so it follows: without this the very
+                # first lines of a run, written before the window is on
+                # screen, would decide the reader had scrolled away.
+                following = (not self.log_textbox.winfo_ismapped()
+                             or self.log_textbox.yview()[1] >= LOG_AT_BOTTOM)
+            except Exception:
+                following = True
+
+            first_visible = self.log_textbox.index("@0,0")
             self.log_textbox.insert("end", "".join(chunks))
+
             # Trim from the front, so the console stays a fixed cost.
             lines = int(self.log_textbox.index("end-1c").split(".")[0])
+            removed = 0
             if lines > self.MAX_LOG_LINES:
-                self.log_textbox.delete("1.0", f"{lines - self.MAX_LOG_LINES}.0")
-            self.log_textbox.see("end")
+                # Deleting up to the START of line N removes lines 1..N-1, so
+                # this drops one fewer line than the index suggests. Counting
+                # it as N put the view a line out every time the buffer wrapped.
+                cut_to = lines - self.MAX_LOG_LINES
+                self.log_textbox.delete("1.0", f"{cut_to}.0")
+                removed = max(0, cut_to - 1)
+
+            if following:
+                self.log_textbox.see("end")
+            elif removed:
+                # Dropping lines off the front slides everything up by that
+                # many, which would carry the text being read up with it. Put
+                # the view back on the line it was on.
+                target = max(1, int(first_visible.split(".")[0]) - removed)
+                self.log_textbox.yview(f"{target}.0")
         except Exception:
             pass
 

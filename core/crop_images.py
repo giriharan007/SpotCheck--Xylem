@@ -18,7 +18,7 @@ from core import margins as page_margins
 INPUT_PATH = r"Input"                 # Path to a single PDF file OR a directory containing PDFs
 OUTPUT_DIR = r"Output_Cropped_Images"    # Directory where cropped element images will be saved
 DPI = 150                             # Image resolution DPI (e.g. 150, 300)
-MASK_TEXT_IN_CROPS = True             # Mask text characters inside graphic crops to compare pure visual graphics
+MASK_TEXT_IN_CROPS = False             # Mask text characters inside graphic crops to compare pure visual graphics
 # ==============================================================================
 
 # Margins are a property of the stylesheet, not of this file: they are set in

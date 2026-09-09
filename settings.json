@@ -1,7 +1,7 @@
 {
-  "english_pdf": "D:\\Spot check\\Input\\t2\\899125_28.0_de-DE_2026-03_IOM.3315.pdf",
-  "translated_dir": "D:\\Spot check\\Input\\t2",
-  "output_dir": "D:\\Spot check\\Input\\t2\\SpotCheck_Output",
+  "english_pdf": "D:\\Spot check\\Input\\English\\898815_28.0_en-US_2026-03_IOM.3315.pdf",
+  "translated_dir": "D:\\Spot check\\Input\\English",
+  "output_dir": "D:\\Spot check\\Input\\English\\SpotCheck_Output",
   "template": "10_xylem_A4_1c_single",
   "margins": {
     "header": 34.4,
