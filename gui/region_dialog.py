@@ -682,6 +682,17 @@ class RegionInspectorFrame(ctk.CTkFrame):
 
         self.region_tree.bind("<<TreeviewSelect>>", self._on_region_tree_select)
 
+        # Up and down step the list, the way the Review tab's does. A Treeview
+        # only answers the arrow keys while it holds keyboard focus, and this
+        # one never took it - clicking a row selected it but left the focus
+        # wherever it was, so the arrows went nowhere. Clicking now focuses the
+        # list, and the handlers below take over from Tk's own bindings so that
+        # a sub-region under a group is stepped into rather than skipped.
+        self.region_tree.bind("<Button-1>",
+                              lambda _e: self.region_tree.focus_set(), add="+")
+        self.region_tree.bind("<Up>", lambda _e: self._nav_region_tree(-1))
+        self.region_tree.bind("<Down>", lambda _e: self._nav_region_tree(1))
+
         # 2. Active Region Editor, Exact Match & Don't Compare Text Toggles
         editor_card = ctk.CTkFrame(right_card, fg_color=UI_CARD_WELL, corner_radius=6)
         editor_card.pack(fill="x", padx=10, pady=6)
@@ -2133,6 +2144,38 @@ class RegionInspectorFrame(ctk.CTkFrame):
             self.regions = []
             self.active_region_id = None
             self._load_and_render_page()
+
+    def _visible_tree_items(self, parent=""):
+        """
+        Every row the list is actually showing, top to bottom.
+
+        get_children only reaches one level, and the sub-regions of a group are
+        children - so stepping by siblings alone would jump straight over them.
+        A closed group contributes only itself.
+        """
+        out = []
+        for iid in self.region_tree.get_children(parent):
+            out.append(iid)
+            kids = self.region_tree.get_children(iid)
+            if kids and self.region_tree.item(iid, "open"):
+                out.extend(self._visible_tree_items(iid))
+        return out
+
+    def _nav_region_tree(self, delta):
+        """Move the selection `delta` rows and let the normal select run."""
+        items = self._visible_tree_items()
+        if not items:
+            return "break"
+        sel = self.region_tree.selection()
+        try:
+            idx = items.index(sel[0]) if sel else 0
+        except (ValueError, IndexError):
+            idx = 0
+        target = items[max(0, min(len(items) - 1, idx + delta))]
+        self.region_tree.selection_set(target)
+        self.region_tree.focus(target)
+        self.region_tree.see(target)
+        return "break"        # Tk's own arrow binding would move it a second time
 
     def _on_region_tree_select(self, event):
         if getattr(self, "_updating_selection", False):

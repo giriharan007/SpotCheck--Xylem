@@ -116,6 +116,12 @@ class PageDiffWindow(ctk.CTkToplevel):
         # detail on one page can be enlarged against the other at 100%.
         self.zooms = {"master": 1.0, "trans": 1.0}
         self.ignore_text = tk.BooleanVar(value=True)
+        # Each pane scrolls on its own. They used to share one scrollbar, which
+        # assumes the two pages still line up - and once the translation has
+        # reflowed, the thing being compared is rarely at the same height on
+        # both, so moving them together is what makes it hard to look at.
+        self.lock_scroll = tk.BooleanVar(value=False)
+        self._syncing = False
         self._photos = {}                       # keep PhotoImages alive
         self._current = -1                      # index of the highlighted diff
         self._busy = False
@@ -232,6 +238,15 @@ class PageDiffWindow(ctk.CTkToplevel):
         # Off by default and labelled plainly: with it cleared, every translated
         # paragraph becomes a difference, which is right only when the page was
         # not supposed to be translated at all.
+        # Off by default: the panes scroll on their own. Locking them is still
+        # offered, because for a page whose layout did survive the translation
+        # it is easier to compare two views that move together.
+        ctk.CTkCheckBox(bar, text="Lock scrolling", variable=self.lock_scroll,
+                        font=self._f(10, "bold"), text_color=DEPENDABLE_BLUE,
+                        checkbox_width=16, checkbox_height=16,
+                        fg_color=XYLEM_BLUE, hover_color=UI_HOVER_BLUE
+                        ).pack(side="right", padx=(6, 4), pady=7)
+
         ctk.CTkCheckBox(bar, text="Ignore translated text", variable=self.ignore_text,
                         font=self._f(10, "bold"), text_color=DEPENDABLE_BLUE,
                         checkbox_width=16, checkbox_height=16,
@@ -301,12 +316,16 @@ class PageDiffWindow(ctk.CTkToplevel):
             cv = tk.Canvas(holder, bg="#3A3A3A", highlightthickness=0,
                            yscrollincrement=1, xscrollincrement=1)
             hsb = tk.Scrollbar(holder, orient="horizontal", command=cv.xview)
+            vsb = tk.Scrollbar(holder, orient="vertical",
+                               command=lambda *a, sd=side: self._yview(sd, *a))
             cv.configure(xscrollcommand=hsb.set,
-                         yscrollcommand=self._on_pane_yscroll)
+                         yscrollcommand=lambda f, l, sd=side:
+                             self._on_pane_yscroll(sd, f, l))
             hsb.pack(side="bottom", fill="x")
+            vsb.pack(side="right", fill="y")
             cv.pack(side="left", fill="both", expand=True)
             for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-                cv.bind(seq, self._on_wheel)
+                cv.bind(seq, lambda e, sd=side: self._on_wheel(e, sd))
             # Ctrl+wheel zooms, the way every document viewer does it. Bound
             # per pane so the pane under the pointer is the one that changes.
             for seq in ("<Control-MouseWheel>", "<Control-Button-4>",
@@ -317,12 +336,7 @@ class PageDiffWindow(ctk.CTkToplevel):
                                              -_wheel_step(e) * PAGE_WHEEL_STEP,
                                              "units"), "break")[1])
             self.panes[side] = {"canvas": cv, "name": name_lbl, "page_lbl": side_lbl,
-                                "prev": prev_b, "next": next_b}
-
-        # One scrollbar drives both pages. Scrolling them independently would
-        # defeat the point: the eye has to land on the same place twice.
-        self.vsb = tk.Scrollbar(body, orient="vertical", command=self._yview_both)
-        self.vsb.grid(row=0, column=2, sticky="ns", padx=(4, 0))
+                                "prev": prev_b, "next": next_b, "vsb": vsb}
 
         self.note_lbl = ctk.CTkLabel(
             self, text="", font=self._f(9), text_color=NEUTRAL_DARK_GR,
@@ -333,17 +347,49 @@ class PageDiffWindow(ctk.CTkToplevel):
     # Synced scrolling
     # ──────────────────────────────────────────────────────────
     def _yview_both(self, *args):
+        """Move both panes, whatever the lock says - used to jump to a finding."""
         for p in self.panes.values():
             p["canvas"].yview(*args)
 
-    def _on_pane_yscroll(self, first, last):
-        """One pane moved; move the scrollbar, and let the other pane follow."""
-        self.vsb.set(first, last)
+    def _yview(self, side, *args):
+        """A scrollbar moved: that pane always, the other only when locked."""
+        self.panes[side]["canvas"].yview(*args)
+        if self.lock_scroll.get():
+            for other, pane in self.panes.items():
+                if other != side:
+                    pane["canvas"].yview(*args)
 
-    def _on_wheel(self, event):
+    def _on_pane_yscroll(self, side, first, last):
+        """
+        A pane scrolled: update its own scrollbar, and mirror it when locked.
+
+        `_syncing` stops the mirrored pane from reporting back and bouncing the
+        first one, which locks the two into a feedback loop that pins the view
+        at one end of the page.
+        """
+        try:
+            self.panes[side]["vsb"].set(first, last)
+        except Exception:
+            return
+        if not self.lock_scroll.get() or self._syncing:
+            return
+        self._syncing = True
+        try:
+            for other, pane in self.panes.items():
+                if other != side:
+                    pane["canvas"].yview_moveto(first)
+        finally:
+            self._syncing = False
+
+    def _on_wheel(self, event, side=None):
+        """The wheel moves the pane under the pointer, or both when locked."""
         step = _wheel_step(event)
         if step:
-            self._yview_both("scroll", step * PAGE_WHEEL_STEP, "units")
+            if side is None or self.lock_scroll.get():
+                self._yview_both("scroll", step * PAGE_WHEEL_STEP, "units")
+            else:
+                self.panes[side]["canvas"].yview(
+                    "scroll", step * PAGE_WHEEL_STEP, "units")
         return "break"
 
     def _on_zoom_wheel(self, event, side):

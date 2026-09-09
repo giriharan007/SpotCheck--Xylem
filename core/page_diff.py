@@ -351,6 +351,7 @@ def compare_pages(master_pdf, master_page, trans_pdf, trans_page,
         return None
 
     diffs = []
+    placed = []
     for (x, y, w, h) in m_boxes:
         if w < 4 or h < 4:
             continue
@@ -384,8 +385,39 @@ def compare_pages(master_pdf, master_page, trans_pdf, trans_page,
 
         t_work[fy:fy + h, fx:fx + w] = 255       # consumed
         claimed[fy:fy + h, fx:fx + w] = 1
-        dx, dy = fx - x, fy - y
-        if abs(dx) > tol_px or abs(dy) > tol_px:
+        # Located, but not yet judged. Whether a shift means anything depends
+        # on what the REST of the page did, which is not known until every
+        # graphic has been found.
+        placed.append(((x, y, w, h), fx, fy, fx - x, fy - y, score))
+
+    # A graphic that has only slid DOWN the page has not moved - the text above
+    # it grew.
+    #
+    # Translated prose runs a different length, so every figure below a
+    # lengthened paragraph is pushed down, and by a different amount depending
+    # on how much text sits above it: on one page here the figure at the top
+    # did not move at all while the one at the foot dropped 21 pt. Measured
+    # against the master's coordinates every one of those reads as "moved", and
+    # none of them is a defect. Across the pages sampled from this manual EVERY
+    # such finding was dx = 0.0 exactly - purely vertical, purely reflow.
+    #
+    # Nor can a single per-page offset fix it, because the shift accumulates
+    # down the page rather than applying evenly: subtracting the median put the
+    # figure that had not moved as far out as the one that had.
+    #
+    # So vertical position is not evidence here and is not reported. A
+    # HORIZONTAL displacement is a different matter - nothing about reflow moves
+    # a figure sideways - so that is still a finding, and the vertical distance
+    # travelled is carried along with it for context.
+    max_drop = max((p[4] for p in placed), default=0) * scale_pt
+    if max_drop > tol_px * scale_pt:
+        notes.append(
+            f"artwork on the translated page sits up to {max_drop:.0f} pt lower "
+            f"than on the master - normal reflow, not reported per graphic")
+
+    for (box, fx, fy, dx, dy, score) in placed:
+        x, y, w, h = box
+        if abs(dx) > tol_px:
             diffs.append({
                 "kind": KIND_MOVED,
                 "rect_master": as_pt((x, y, w, h)),
@@ -393,7 +425,7 @@ def compare_pages(master_pdf, master_page, trans_pdf, trans_page,
                 "shift_pt": (dx * scale_pt, dy * scale_pt),
                 "score": score,
             })
-        # Matched in place: nothing to report.
+        # Straight down the page: reflow, not a difference.
 
     # Anything on the translation that no master graphic claimed is an addition -
     # unless the master simply carries it on the page before or after, which is
