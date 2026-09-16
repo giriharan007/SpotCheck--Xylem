@@ -302,8 +302,12 @@ class DocScan:
         with self._lock:
             if self._codes is not None:
                 return
-            jobs = [(self.path, p, dpi) for p in range(1, self.page_count + 1)]
-            self._codes = _map_pages(_codes_on_page, jobs, progress, "barcodes")
+            # Barcodes and QR codes are verified and expected only on first and last pages
+            target_pnos = {1, self.page_count} if self.page_count > 0 else {1}
+            jobs = [(self.path, p, dpi) for p in sorted(target_pnos)]
+            scanned = _map_pages(_codes_on_page, jobs, progress, "barcodes")
+            self._codes = {p: [] for p in range(1, self.page_count + 1)}
+            self._codes.update(scanned)
 
 
 # ── the registry ─────────────────────────────────────────────

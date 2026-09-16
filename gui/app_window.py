@@ -154,6 +154,8 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         self.text_queue = queue.Queue()
         self.done_queue = queue.Queue()
         self.progress_queue = queue.Queue()
+        self.live_results_queue = queue.Queue()
+        self._all_metadata_rows = []
         self.is_running = False
         self.output_excel_path = None
         self.output_dir_path = None
@@ -197,6 +199,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 self,
                 fg_color=UI_BG_CANVAS,
                 anchor="w",
+                command=self._on_tab_changed,
                 **theme.tabview_colors(),
             )
             self.tabview.pack(fill="both", expand=True, padx=10, pady=(8, 10))
@@ -236,6 +239,22 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._check_queue()
+
+    def _on_tab_changed(self):
+        """Handle smooth switching between tabs."""
+        try:
+            cur = self.tabview.get() if self.tabview else None
+            if cur == TAB_INSPECTION:
+                if hasattr(self, "log_textbox") and self.log_textbox.winfo_ismapped():
+                    self.log_textbox.see("end")
+            elif cur == TAB_METADATA:
+                if self.metadata_tab is not None and self._all_metadata_rows:
+                    self.metadata_tab.show_rows(self._all_metadata_rows)
+            elif cur == TAB_REVIEW:
+                if self.comparison_gallery is not None and not self.is_running:
+                    self.comparison_gallery._refresh_list()
+        except Exception:
+            pass
 
     # Screens this has to work on range from a 1366x768 laptop to a 4K desktop.
     # A hard 1320x900 window opened larger than the screen on the first and
@@ -891,17 +910,17 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         if not chunks:
             return
         try:
-            # Follow the output only while the view is already at the bottom.
-            # Scrolling back to read something means the console is being READ,
-            # and yanking it to the end on the next line - which during a run
-            # is a tenth of a second later - makes that impossible.
+            if not self.log_textbox.winfo_ismapped():
+                # Inspection tab is not on screen; fast insert without expensive scroll calculations
+                self.log_textbox.insert("end", "".join(chunks))
+                lines = int(self.log_textbox.index("end-1c").split(".")[0])
+                if lines > self.MAX_LOG_LINES:
+                    cut_to = lines - self.MAX_LOG_LINES
+                    self.log_textbox.delete("1.0", f"{cut_to}.0")
+                return
+
             try:
-                # An unmapped console has no scroll position worth honouring
-                # and nobody reading it, so it follows: without this the very
-                # first lines of a run, written before the window is on
-                # screen, would decide the reader had scrolled away.
-                following = (not self.log_textbox.winfo_ismapped()
-                             or self.log_textbox.yview()[1] >= LOG_AT_BOTTOM)
+                following = (self.log_textbox.yview()[1] >= LOG_AT_BOTTOM)
             except Exception:
                 following = True
 
@@ -936,7 +955,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         # an unbounded drain is what made the interface stop responding while
         # a 92-page manual scrolled past.
         chunks = []
-        for _ in range(400):
+        for _ in range(150):
             try:
                 chunks.append(self.text_queue.get_nowait())
             except queue.Empty:
@@ -951,6 +970,49 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 break
         if latest is not None:
             self._show_progress(*latest)
+
+        # Process progressive inspection results for the Review tab and Meta Data tab
+        while not self.live_results_queue.empty():
+            try:
+                event_type, payload = self.live_results_queue.get_nowait()
+                if event_type == "master_complete":
+                    master_meta = payload.get("metadata_rows") or []
+                    if master_meta:
+                        self._all_metadata_rows = list(master_meta)
+                        if self.metadata_tab is not None:
+                            try:
+                                self.metadata_tab.show_rows(self._all_metadata_rows)
+                            except Exception as e:
+                                print(f"[WARN] Error updating metadata tab for master: {e}")
+                    if self.comparison_gallery is not None:
+                        try:
+                            self.comparison_gallery.add_master_results(payload)
+                        except Exception as e:
+                            print(f"[WARN] Error adding master results to gallery: {e}")
+                elif event_type == "doc_complete":
+                    if self.comparison_gallery is not None:
+                        try:
+                            self.comparison_gallery.add_document_results(payload)
+                        except Exception as e:
+                            print(f"[WARN] Error adding document results to gallery: {e}")
+                    meta_rows = payload.get("metadata_rows") or []
+                    if meta_rows and self.metadata_tab is not None:
+                        try:
+                            self._all_metadata_rows.extend(meta_rows)
+                            self.metadata_tab.show_rows(self._all_metadata_rows)
+                        except Exception as e:
+                            print(f"[WARN] Error updating metadata tab: {e}")
+                elif event_type == "text_checks":
+                    if self.comparison_gallery is not None:
+                        overlaps, missed, overflows = payload
+                        self.comparison_gallery.add_text_checks(overlaps, missed, overflows)
+                elif event_type == "regions":
+                    if self.comparison_gallery is not None:
+                        self.comparison_gallery.add_region_results(payload)
+            except queue.Empty:
+                break
+            except Exception as e:
+                print(f"[WARN] Error handling live result: {e}")
 
         # Completion is delivered the same way the log is, on the main thread.
         # The worker used to call self.after() directly, which registers a
@@ -984,10 +1046,12 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         if message:
             try:
                 text = f"● {message}"
-                if HAS_CTK:
-                    self.status_lbl.configure(text=text, text_color=theme.TEXT_ATTENTION)
-                else:
-                    self.status_lbl.config(text=text, fg=RADIANT_ORANGE)
+                if getattr(self, "_last_status_text", None) != text:
+                    self._last_status_text = text
+                    if HAS_CTK:
+                        self.status_lbl.configure(text=text, text_color=theme.TEXT_ATTENTION)
+                    else:
+                        self.status_lbl.config(text=text, fg=RADIANT_ORANGE)
             except Exception:
                 pass
 
@@ -1086,6 +1150,13 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         self.open_folder_btn.configure(state="disabled")
         self._lock_inputs()  # Fix 6
 
+        if self.comparison_gallery is not None:
+            try:
+                self.comparison_gallery.clear_results()
+            except Exception as e:
+                print(f"[WARN] Could not clear gallery: {e}")
+        self._all_metadata_rows = []
+
         if HAS_CTK:
             self.status_lbl.configure(text="\u25cf Inspecting PDFs...", text_color=theme.TEXT_ATTENTION)
             self.progress_bar.start()
@@ -1128,15 +1199,30 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         sys.stdout = redirector
         sys.stderr = redirector
 
+        old_switch_interval = sys.getswitchinterval()
+        try:
+            sys.setswitchinterval(0.001)
+        except Exception:
+            pass
+
         def report(fraction, message):
             # Straight onto a queue: touching a widget from here raises
             # "main thread is not in main loop". The pump draws it.
             self.progress_queue.put((fraction, message))
 
+        def on_doc(doc_payload):
+            self.live_results_queue.put(("doc_complete", doc_payload))
+            # Yield CPU to GUI thread so Review tab renders the document before next PDF starts
+            time.sleep(0.08)
+
+        def on_stage(stage_name, payload):
+            self.live_results_queue.put((stage_name, payload))
+
         try:
             self.last_run_results = spotcheck_engine.run_quality_inspection(
                 eng_pdf, tr_target, out_dir, margins=run_margins,
-                regions=run_regions or None, progress=report)
+                regions=run_regions or None, progress=report,
+                on_doc_complete=on_doc, on_stage_complete=on_stage)
             success = True
         except Exception as e:
             # Fix 5: Full traceback in error console for production debugging
@@ -1147,6 +1233,10 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             self.text_queue.put(f"{'=' * 76}\n")
             success = False
         finally:
+            try:
+                sys.setswitchinterval(old_switch_interval)
+            except Exception:
+                pass
             sys.stdout = old_stdout
             sys.stderr = old_stderr
             self.done_queue.put(success)
@@ -1578,6 +1668,8 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
     def _sync_region_inspector(self):
         """Point the inspector at the currently configured paths, if usable."""
         self._path_reload_job = None
+        if getattr(self, "is_running", False):
+            return
 
         # A master path typed or pasted into the field (rather than browsed)
         # still re-derives its batch folder and refreshes the hint. Idempotent -
@@ -1599,15 +1691,6 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                 pass
 
         if self.region_inspector is None:
-            return
-
-        # Never re-open a PDF into the inspector while a run is working. The
-        # render happens on the main thread, and doing it while every core is
-        # busy scanning is what makes switching tabs mid-run feel like the
-        # window has broken. The paths cannot change during a run anyway - the
-        # fields are locked - so this only defers a redundant reload.
-        if getattr(self, "is_running", False):
-            self._path_reload_job = self.after(1500, self._sync_region_inspector)
             return
 
         eng_path = self.eng_pdf_var.get().strip().strip('"').strip("'")

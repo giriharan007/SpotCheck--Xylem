@@ -128,9 +128,12 @@ def count_images_by_topic(pdf_path, dpi=150, margins=None):
     """
     topics = extract_topics_with_positions(pdf_path)
     keys = _topic_keys(topics)
-    by_topic, titles = {}, {}
+    by_topic, titles, topic_pages = {}, {}, {}
     for idx, t in enumerate(topics):
-        titles[keys[idx]] = t.get("title", "")
+        k = keys[idx]
+        titles[k] = t.get("title", "")
+        if t.get("page"):
+            topic_pages[k] = t.get("page")
 
     index_of = {id(t): i for i, t in enumerate(topics)}
     total = 0
@@ -174,6 +177,7 @@ def count_images_by_topic(pdf_path, dpi=150, margins=None):
         "topic_count": len(topics),
         "by_topic": by_topic,
         "titles": titles,
+        "topic_pages": topic_pages,
         "total": total,
     }
 
@@ -192,6 +196,8 @@ def compare_image_counts(source_model, target_model):
 
     if both_toc:
         src_t, tgt_t = source_model["by_topic"], target_model["by_topic"]
+        src_pages = source_model.get("topic_pages", {})
+        tgt_pages = target_model.get("topic_pages", {})
         for key in sorted(set(src_t) | set(tgt_t), key=_sort_key):
             s, t = src_t.get(key, 0), tgt_t.get(key, 0)
             ok = (s == t)
@@ -203,7 +209,9 @@ def compare_image_counts(source_model, target_model):
                                or target_model["titles"].get(key, ""),
                 "master_count": s,
                 "target_count": t,
-                "status": "PASS" if ok else f"FAIL ({t} vs {s})",
+                "master_page": src_pages.get(key, "-"),
+                "target_page": tgt_pages.get(key, "-"),
+                "status": "PASS" if ok else f"FAIL (E({s}) vs T({t}))",
             })
         granularity = "per topic"
         passed = not mismatches and src_total == tgt_total
@@ -217,16 +225,16 @@ def compare_image_counts(source_model, target_model):
             "topic_title": "(no table of contents - document total only)",
             "master_count": src_total,
             "target_count": tgt_total,
-            "status": "PASS" if passed else f"FAIL ({tgt_total} vs {src_total})",
+            "status": "PASS" if passed else f"FAIL (E({src_total}) vs T({tgt_total}))",
         })
 
     if passed:
-        status = f"PASS ({tgt_total}/{src_total}, {granularity})"
+        status = f"PASS (E({src_total}) vs T({tgt_total}), {granularity})"
     else:
         detail = ", ".join(mismatches[:6]) if mismatches else "total"
         if len(mismatches) > 6:
             detail += f", +{len(mismatches) - 6} more"
-        status = f"FAIL ({tgt_total}/{src_total}, {granularity}; differs at {detail})"
+        status = f"FAIL (E({src_total}) vs T({tgt_total}), {granularity}; differs at {detail})"
 
     return {
         "english_pdf": source_model["filename"],

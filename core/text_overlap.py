@@ -98,6 +98,22 @@ def _area(b):
     return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
 
 
+def _is_normal_typesetting(a, b):
+    """
+    True when two spans are consecutive lines in the same text block with standard leading.
+    Ascender-to-descender font box overlap is standard typography and not a collision.
+    """
+    if a["line"][0] == b["line"][0]:
+        ab, bb = a["bbox"], b["bbox"]
+        ha = ab[3] - ab[1]
+        hb = bb[3] - bb[1]
+        h = min(ha, hb)
+        dy = abs(bb[1] - ab[1])
+        if dy >= 0.55 * h:
+            return True
+    return False
+
+
 def _candidates(page, clip=None):
     """
     Pairs of spans whose boxes intersect enough to be worth rendering.
@@ -118,6 +134,8 @@ def _candidates(page, clip=None):
                 break
             if a["line"] == b["line"]:      # same line - that is kerning, not a collision
                 continue
+            if _is_normal_typesetting(a, b): # regular multi-line typesetting in same block
+                continue
             overlap = _intersection_area(ab, bb)
             if overlap < MIN_OVERLAP_PT2:
                 continue
@@ -131,9 +149,9 @@ def _ink_rows(page, rect):
     """Dark pixels per scan line down a rectangle of the page."""
     pix = page.get_pixmap(clip=fitz.Rect(rect), dpi=INK_DPI, colorspace=fitz.csGRAY)
     if not pix.width or not pix.height:
-        return np.zeros(0, dtype=int)
+        return np.zeros(0, dtype=int), 0
     arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
-    return (arr < INK_THRESHOLD).sum(axis=1)
+    return (arr < INK_THRESHOLD).sum(axis=1), pix.width
 
 
 def _glyphs_collide(page, a_bbox, b_bbox):
@@ -146,23 +164,42 @@ def _glyphs_collide(page, a_bbox, b_bbox):
     if x1 - x0 <= 0.5:
         return False, "the boxes share no column of the page"
 
-    top = max(a_bbox[1], b_bbox[1]) - BAND_PAD_PT
-    bot = min(a_bbox[3], b_bbox[3]) + BAND_PAD_PT
-    rows = _ink_rows(page, (x0, top, x1, bot))
+    ov_top = max(a_bbox[1], b_bbox[1])
+    ov_bot = min(a_bbox[3], b_bbox[3])
+    if ov_bot <= ov_top:
+        return False, "the boxes do not overlap vertically"
+
+    # To see daylight between the two lines, we must see enough of the lines
+    # themselves. Looking only at [ov_top, ov_bot] is fatal when one line's font
+    # bbox reaches past its ink: the crop then contains only one line's ink,
+    # sees no blank lines inside that single line, and reports collision.
+    # Expanding slightly into both spans ensures both lines are properly sampled.
+    pad_y = 5.0
+    scan_top = max(min(a_bbox[1], b_bbox[1]), ov_top - pad_y)
+    scan_bot = min(max(a_bbox[3], b_bbox[3]), ov_bot + pad_y)
+
+    rows, pix_w = _ink_rows(page, (x0, scan_top, x1, scan_bot))
     if not rows.size or not rows.max():
         return False, "no ink in the overlap band"
 
-    # Only the gap BETWEEN the ink counts. The band is padded, and a span box
-    # runs past the tallest letter in it, so there are always blank lines at the
-    # top and bottom - counting those dismissed a page where the two lines were
-    # printed straight through each other.
     inked = np.flatnonzero(rows)
+    if len(inked) < 2:
+        return False, "negligible ink in overlap band"
+
     interior = rows[inked[0]:inked[-1] + 1]
     gap_px = _longest_run_of_zeros(interior)
     gap_pt = gap_px / (INK_DPI / 72.0)
     if gap_pt >= MIN_CLEAR_GAP_PT:
         return False, (f"{gap_pt:.2f} pt of white separates the two lines - "
                        f"the boxes overlap, the letters do not")
+
+    # Low-ink runs (anti-aliasing fringe where rows have <= 3% ink)
+    low_ink_run = _longest_run_below(interior, threshold=max(2, int(pix_w * 0.03)))
+    low_gap_pt = low_ink_run / (INK_DPI / 72.0)
+    if low_gap_pt >= 1.0:
+        return False, (f"{low_gap_pt:.2f} pt of daylight separates the lines - "
+                       f"only antialiasing fringe in between")
+
     return True, ("no white between them (largest gap "
                   f"{gap_pt:.2f} pt) - the ink is printed through itself")
 
@@ -171,6 +208,14 @@ def _longest_run_of_zeros(rows):
     longest = run = 0
     for value in rows:
         run = run + 1 if value == 0 else 0
+        longest = max(longest, run)
+    return longest
+
+
+def _longest_run_below(rows, threshold=2):
+    longest = run = 0
+    for value in rows:
+        run = run + 1 if value <= threshold else 0
         longest = max(longest, run)
     return longest
 

@@ -1,13 +1,13 @@
 {
-  "english_pdf": "D:\\Spot check\\Input\\English\\898815_28.0_en-US_2026-03_IOM.3315.pdf",
-  "translated_dir": "D:\\Spot check\\Input\\English",
-  "output_dir": "D:\\Spot check\\Input\\English\\SpotCheck_Output",
+  "english_pdf": "C:\\Xylem Project\\SpotCheck V2\\Input\\Batch-3\\90013401_6.0_en-US_2025-08_IOM.2840.pdf",
+  "translated_dir": "C:\\Xylem Project\\SpotCheck V2\\Input\\Batch-3",
+  "output_dir": "C:\\Xylem Project\\SpotCheck V2\\Input\\Batch-3\\SpotCheck_Output",
   "template": "10_xylem_A4_1c_single",
   "margins": {
-    "header": 34.4,
-    "footer": 35.5,
-    "left": 48.0,
-    "right": 50.5,
+    "header": 37.0,
+    "footer": 37.0,
+    "left": 50.3,
+    "right": 47.3,
     "skip_pages": {
       "first": [
         "header",
