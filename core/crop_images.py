@@ -570,6 +570,49 @@ def merge_rects_tight(rect_list, gap=2):
     return rects
 
 
+def merge_figure_components(rect_list, max_gap=12.0):
+    """
+    Merges bounding boxes that intersect, overlap, or are aligned sub-components
+    of a single technical illustration or diagram (e.g. pump casing, baseplate,
+    motor, mounting feet, and straps in Figure 1).
+    Does NOT group distant icons or graphics separated by substantial white space.
+    """
+    rects = [fitz.Rect(r) for r in rect_list]
+    changed = True
+    while changed:
+        changed = False
+        out = []
+        used = [False] * len(rects)
+        for i in range(len(rects)):
+            if used[i]:
+                continue
+            cur = fitz.Rect(rects[i])
+            used[i] = True
+            for j in range(i + 1, len(rects)):
+                if used[j]:
+                    continue
+                rj = rects[j]
+                intersects = cur.intersects(rj)
+                h_overlap = min(cur.x1, rj.x1) - max(cur.x0, rj.x0)
+                v_overlap = min(cur.y1, rj.y1) - max(cur.y0, rj.y0)
+
+                should_merge = False
+                if intersects:
+                    should_merge = True
+                elif h_overlap > 0 and v_overlap >= -max_gap:
+                    should_merge = True
+                elif v_overlap > 0 and h_overlap >= -max_gap:
+                    should_merge = True
+
+                if should_merge:
+                    cur.include_rect(rj)
+                    used[j] = True
+                    changed = True
+            out.append(cur)
+        rects = out
+    return rects
+
+
 def resolve_margins(margins=None, header_margin=None, footer_margin=None, page=None):
     """
     Settle on one margins dict from whichever form the caller supplied.
@@ -1108,6 +1151,8 @@ def ink_clusters(fitz_page, table_rects=None, gap_pt=CLUSTER_GAP_PT, dpi=INK_DPI
             continue
         kept.append(r)
 
+    kept = merge_figure_components(kept)
+
     if return_grids:
         return kept, [fitz.Rect(x0 / scale, y0 / scale, x1 / scale, y1 / scale)
                       for x0, y0, x1, y1 in regions]
@@ -1285,6 +1330,8 @@ def _judge_candidates(merged_rects, pw, ph, dropped_by, is_edge_artifact,
             final_candidates.append(clamped)
         elif include_ignored:
             ignored.append((r, "too small"))
+
+    final_candidates = merge_figure_components(final_candidates)
 
     # Sort top to bottom, left to right
     final_candidates.sort(key=lambda r: (r.y0, r.x0))

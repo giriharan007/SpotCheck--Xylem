@@ -308,16 +308,14 @@ def detect_barcodes_and_qr_codes(page, dpi=SCAN_DPI):
 # Document-level Barcode & QR Code Count Extractor
 # -----------------------------------------------------------
 
-def extract_barcode_qr_model(pdf_path, dpi=SCAN_DPI, progress=None):
+def extract_barcode_qr_model(pdf_path, dpi=SCAN_DPI, progress=None, first_last_only=True):
     """
-    Extract multi-page Barcode and QR Code model from a PDF file.
+    Extract Barcode and QR Code model from a PDF file.
 
-    Returns dict containing counts, breakdown, and presence indicators.
-
-    The page sweep goes through core.docscan, so a document scanned here is not
-    scanned again by the crop or count stage - and the master, which used to be
-    re-swept once per translation, is swept once per run. Detection itself is
-    unchanged; only who pays for it is.
+    By default (first_last_only=True), only the first page (cover) and last page
+    (back cover) are scanned, where publication barcodes and QR codes legitimately live.
+    This avoids false positive detections from internal schematic diagrams and tables,
+    and runs in a fraction of a second.
     """
     all_codes = []
     barcode_count = 0
@@ -326,14 +324,19 @@ def extract_barcode_qr_model(pdf_path, dpi=SCAN_DPI, progress=None):
     pages_with_barcode = set()
     pages_with_qr = set()
 
+    with pymupdf.open(pdf_path) as doc:
+        total_pages = len(doc)
+
+    target_pages = {1, total_pages} if (first_last_only and total_pages > 0) else set(range(1, total_pages + 1))
+
     scan = docscan.scan(pdf_path)
-    if scan is not None:
-        codes_iter = scan.all_codes(dpi=dpi, progress=progress)
-    else:
-        codes_iter = []
-        with pymupdf.open(pdf_path) as doc:
-            for page_idx in range(len(doc)):
-                codes_iter.extend(detect_barcodes_and_qr_codes(doc[page_idx], dpi=dpi))
+    codes_iter = []
+    for pno in sorted(target_pages):
+        if scan is not None:
+            codes_iter.extend(scan.codes(pno, dpi=dpi, progress=progress))
+        else:
+            with pymupdf.open(pdf_path) as doc:
+                codes_iter.extend(detect_barcodes_and_qr_codes(doc[pno - 1], dpi=dpi))
 
     for c in codes_iter:
         all_codes.append(c)
@@ -358,6 +361,7 @@ def extract_barcode_qr_model(pdf_path, dpi=SCAN_DPI, progress=None):
         "pages_with_barcode": sorted(list(pages_with_barcode)),
         "pages_with_qr": sorted(list(pages_with_qr)),
         "all_codes": all_codes,
+        "first_last_only": first_last_only,
     }
 
 
@@ -388,24 +392,22 @@ def compare_barcode_qr_models(source_model, target_model):
 
     overall_pass = bc_pass and qr_pass
 
-    # Say how the codes were found. A count derived without a working decoder is
-    # still a valid count, but the reader should know the contents were never
-    # read - and a 0/0 with no decoder at all must never look like a clean pass.
     used_structural = bool(source_model.get("structural_count") or target_model.get("structural_count"))
     note = " structural" if used_structural else ""
+    scope = " (first & last pages)" if source_model.get("first_last_only") else ""
 
     no_codes_at_all = (src_bc_count + tgt_bc_count + src_qr_count + tgt_qr_count) == 0
     if no_codes_at_all and not HAS_PYZBAR:
-        bc_status = "CHECK (No Detector)"
-        qr_status = "CHECK (No Detector)"
+        bc_status = f"CHECK (No Detector){scope}"
+        qr_status = f"CHECK (No Detector){scope}"
         overall_pass = False
         detection_note = ("pyzbar unavailable and nothing found structurally - "
                           "cannot distinguish 'no codes' from 'not detected'")
     else:
-        bc_status = (f"PASS (Count {tgt_bc_count}/{src_bc_count}{note})" if bc_pass
-                     else f"FAIL (Count {tgt_bc_count}/{src_bc_count}{note})")
-        qr_status = (f"PASS (Count {tgt_qr_count}/{src_qr_count}{note})" if qr_pass
-                     else f"FAIL (Count {tgt_qr_count}/{src_qr_count}{note})")
+        bc_status = (f"PASS (Count {tgt_bc_count}/{src_bc_count}{note}{scope})" if bc_pass
+                     else f"FAIL (Count {tgt_bc_count}/{src_bc_count}{note}{scope})")
+        qr_status = (f"PASS (Count {tgt_qr_count}/{src_qr_count}{note}{scope})" if qr_pass
+                     else f"FAIL (Count {tgt_qr_count}/{src_qr_count}{note}{scope})")
         detection_note = ("located structurally; install pyzbar to verify contents"
                           if used_structural else "decoded")
 
@@ -429,12 +431,12 @@ def compare_barcode_qr_models(source_model, target_model):
     }
 
 
-def compare_barcode_qr(source_pdf_path, target_pdf_path, dpi=SCAN_DPI):
+def compare_barcode_qr(source_pdf_path, target_pdf_path, dpi=SCAN_DPI, first_last_only=True):
     """
     Convenience wrapper to extract models and compare Barcode & QR Code counts between two PDFs.
     """
-    src_model = extract_barcode_qr_model(source_pdf_path, dpi=dpi)
-    tgt_model = extract_barcode_qr_model(target_pdf_path, dpi=dpi)
+    src_model = extract_barcode_qr_model(source_pdf_path, dpi=dpi, first_last_only=first_last_only)
+    tgt_model = extract_barcode_qr_model(target_pdf_path, dpi=dpi, first_last_only=first_last_only)
     return compare_barcode_qr_models(src_model, tgt_model)
 
 

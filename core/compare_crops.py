@@ -515,9 +515,9 @@ def compare_english_crops_with_translated_pdf(eng_crop_dir, trans_pdf_path, outp
             total_matches_found += 1
 
         if not found_at_all:
-            status = "NOT FOUND"
+            status = "EXTRA IN MASTER"
             expected = scope_pages[0] if scope_pages else eng_page_num
-            shift_info = f"Not found (expected near page {expected})"
+            shift_info = f"Extra in master (not found near page {expected})"
         else:
             status = "MATCH (PASS)" if is_match else "CHECK"
             shift_info = "Same Page" if best_page == eng_page_num else f"Moved to Page {best_page}"
@@ -534,7 +534,7 @@ def compare_english_crops_with_translated_pdf(eng_crop_dir, trans_pdf_path, outp
                 crop_img, pages.bgr(show_page),
                 best_loc if found_at_all else (0, 0),
                 best_score, eng_page_num, show_page, threshold=threshold,
-                status=None if found_at_all else "NOT FOUND",
+                status=None if found_at_all else "EXTRA IN MASTER",
                 scale=scale if found_at_all else 1.0)
             os.makedirs(out_dir_for_match, exist_ok=True)
             match_save_path = os.path.join(out_dir_for_match, f"match_{crop_file}")
@@ -814,14 +814,24 @@ def create_pair_image(a_gray, b_gray, eng_page, trans_page, score_pct,
                       threshold=SIMILARITY_THRESHOLD, status=None):
     """Master crop beside its translated counterpart, captioned with the score."""
     box = (0, 180, 0) if score_pct >= threshold else (0, 0, 220)
-    a_bgr = cv2.cvtColor(a_gray, cv2.COLOR_GRAY2BGR)
-    if b_gray is None:
+
+    if a_gray is None and b_gray is not None:
+        b_bgr = cv2.cvtColor(b_gray, cv2.COLOR_GRAY2BGR)
+        a_bgr = np.full((max(40, b_gray.shape[0]), max(60, b_gray.shape[1]), 3),
+                        245, np.uint8)
+        cv2.putText(a_bgr, "none", (6, max(20, a_bgr.shape[0] // 2)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 200), 1)
+    elif a_gray is not None and b_gray is None:
+        a_bgr = cv2.cvtColor(a_gray, cv2.COLOR_GRAY2BGR)
         b_bgr = np.full((max(40, a_gray.shape[0]), max(60, a_gray.shape[1]), 3),
                         245, np.uint8)
-        cv2.putText(b_bgr, "none", (6, b_bgr.shape[0] // 2),
+        cv2.putText(b_bgr, "none", (6, max(20, b_bgr.shape[0] // 2)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 200), 1)
-    else:
+    elif a_gray is not None and b_gray is not None:
+        a_bgr = cv2.cvtColor(a_gray, cv2.COLOR_GRAY2BGR)
         b_bgr = cv2.cvtColor(b_gray, cv2.COLOR_GRAY2BGR)
+    else:
+        return np.full((100, 200, 3), 255, np.uint8)
 
     h = max(a_bgr.shape[0], b_bgr.shape[0], 50)
     w1, w2 = a_bgr.shape[1], b_bgr.shape[1]
@@ -833,11 +843,13 @@ def create_pair_image(a_gray, b_gray, eng_page, trans_page, score_pct,
 
     f = cv2.FONT_HERSHEY_SIMPLEX
     label = status or ("PASS" if score_pct >= threshold else "CHECK")
-    cv2.putText(canvas, f"English Graphic (Pg {eng_page})", (10, 22), f, 0.45,
-                (0, 100, 0), 1)
-    right = (f"Translated: [{label}]" if b_gray is None
-             else f"Translated (Pg {trans_page}): {score_pct:.1f}% [{label}]")
-    cv2.putText(canvas, right, (20 + w1, 22), f, 0.45, box, 1)
+    left_title = f"English Graphic (Pg {eng_page})" if a_gray is not None else "English Graphic: [none]"
+    right_title = (f"Translated: [{label}]" if b_gray is None
+                   else f"Translated (Pg {trans_page}): {score_pct:.1f}% [{label}]" if score_pct > 0
+                   else f"Translated (Pg {trans_page}): [{label}]")
+    cv2.putText(canvas, left_title, (10, 22), f, 0.45,
+                (0, 100, 0) if a_gray is not None else (0, 0, 200), 1)
+    cv2.putText(canvas, right_title, (20 + w1, 22), f, 0.45, box, 1)
     return canvas
 
 
@@ -914,9 +926,6 @@ def compare_crop_sets(eng_crop_dir, tr_crop_dir, output_dir, trans_name=None,
         taken = set()
         for i, j in pairing:
             if i >= n:
-                if j < m:
-                    taken.add(j)
-                    extras.append(t_loaded[j])
                 continue
             folder, page, topic, fname, img = e_loaded[i]
             checked += 1
@@ -948,7 +957,7 @@ def compare_crop_sets(eng_crop_dir, tr_crop_dir, output_dir, trans_name=None,
                 matched += 1
 
             if not found:
-                status, shift = "NOT FOUND", "Not found in this topic"
+                status, shift = "EXTRA IN MASTER", "Extra in master (not found in translation)"
             else:
                 status = "MATCH (PASS)" if is_match else "CHECK"
                 shift = ("Same Page" if t_page == page
@@ -958,22 +967,49 @@ def compare_crop_sets(eng_crop_dir, tr_crop_dir, output_dir, trans_name=None,
             os.makedirs(out_dir, exist_ok=True)
             save_to = os.path.join(out_dir, f"match_{fname}")
             imwrite_unicode(save_to, create_pair_image(
-                img, t_img, page, t_page, pct, threshold=threshold,
-                status=None if found else "NOT FOUND"))
+                img, t_img if found else None, page, t_page, pct, threshold=threshold,
+                status=None if found else "EXTRA IN MASTER"))
 
             crop_details.append({
                 "eng_page": page, "topic": topic, "crop_file": fname,
                 "trans_page": t_page if found else -1, "shift_info": shift,
                 "scope": key.replace("topic:", "topic ").replace("page:", "page "),
-                "match_pct": pct, "status": status, "match_img": save_to,
+                "match_pct": pct if found else 0.0, "status": status, "match_img": save_to,
             })
             print(f"  Eng Pg {page:2d} | {fname:28s} -> Trans Pg "
                   f"{(t_page if found else -1):2d} ({shift:24s} via {key:14s}) | "
                   f"Match: {pct:6.2f}% | {status}")
 
+        tr_to_eng_page = {}
+        for i, j in pairing:
+            if i < n and j < m:
+                tr_to_eng_page[t_loaded[j][1]] = e_loaded[i][1]
+
         for j, item in enumerate(t_loaded):
             if j not in taken:
                 extras.append(item)
+                t_folder, t_page, t_topic, t_fname, t_img = item
+                topic_for_extra = t_topic or (e_loaded[0][2] if e_loaded else "")
+                topic_eng_page = tr_to_eng_page.get(t_page, e_loaded[-1][1] if e_loaded else t_page)
+                out_dir = os.path.join(diff_out_dir, topic_for_extra if topic_for_extra else f"page_{t_page:03d}")
+                os.makedirs(out_dir, exist_ok=True)
+                save_to = os.path.join(out_dir, f"extra_{t_fname}")
+                imwrite_unicode(save_to, create_pair_image(
+                    None, t_img, -1, t_page, 0.0, threshold=threshold,
+                    status="EXTRA IN TRANSLATION"))
+
+                crop_details.append({
+                    "eng_page": -1,
+                    "topic": topic_for_extra,
+                    "crop_file": t_fname,
+                    "trans_page": t_page,
+                    "shift_info": "Extra in translation (not present in English master)",
+                    "scope": key.replace("topic:", "topic ").replace("page:", "page "),
+                    "match_pct": 0.0,
+                    "status": "EXTRA IN TRANSLATION",
+                    "match_img": save_to,
+                    "topic_eng_page": topic_eng_page,
+                })
 
     for folder, page, topic, fname, _img in extras:
         print(f"  {'':7s} | {fname:28s} -> EXTRA in the translation (Pg {page})")

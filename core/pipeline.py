@@ -23,6 +23,8 @@ import os
 import sys
 import time
 import argparse
+import concurrent.futures
+import threading
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
@@ -309,8 +311,8 @@ def generate_unified_excel_report(
             crop_row["crop_name"],
             crop_row["image_type"],
             crop_row.get("topic") or "-",
-            crop_row["eng_page"],
-            crop_row["trans_page"] if crop_row["trans_page"] != -1 else "N/A",
+            crop_row["eng_page"] if crop_row.get("eng_page") not in (-1, "-1") else "N/A",
+            crop_row["trans_page"] if crop_row.get("trans_page") not in (-1, "-1") else "N/A",
             crop_row["shift_info"],
             f"{crop_row['similarity']:.2f}%",
             crop_row["status"],
@@ -459,7 +461,7 @@ def generate_unified_excel_report(
                 if val.startswith("PASS") or val.startswith("Present") or val.startswith("Equal") or val in ("Matched", "MATCH (PASS)", "Same Page"):
                     cell.fill = pass_fill
                     cell.font = pass_font
-                elif val.startswith("FAIL") or val.startswith("Not Present") or val.startswith("Not Equal") or val.startswith("Not Matched") or val in ("CHECK", "MISSING") or "Missing:" in val or "Extra:" in val:
+                elif val.startswith("FAIL") or val.startswith("Not Present") or val.startswith("Not Equal") or val.startswith("Not Matched") or val in ("CHECK", "MISSING") or "Missing:" in val or "Extra:" in val or "EXTRA" in val.upper():
                     cell.fill = fail_fill
                     cell.font = fail_font
 
@@ -524,7 +526,7 @@ def resolve_master_pdf(path):
 
 def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_dir,
                            margins=None, regions=None, collect_metadata=True,
-                           progress=None):
+                           progress=None, on_doc_complete=None, on_stage_complete=None):
     """
     Run unified TOC, Barcode/QR and Images inspection across all translated PDFs.
 
@@ -615,11 +617,41 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     eng_crops_out_dir = os.path.join(output_dir, "Cropped_Images")
     pdf_name_no_ext = os.path.splitext(os.path.basename(source_pdf_path))[0]
     eng_crops_dir = os.path.join(eng_crops_out_dir, pdf_name_no_ext)
+    diff_crops_out_dir = os.path.join(output_dir, "Cropped_Comparison")
+    text_evidence_dir = os.path.join(diff_crops_out_dir, "Text_Checks")
+    os.makedirs(diff_crops_out_dir, exist_ok=True)
+    os.makedirs(text_evidence_dir, exist_ok=True)
 
     print(f"Extracting Pure Graphic Crops from Source PDF...")
     crop_pdf_images.crop_pdf_elements(
         source_pdf_path, eng_crops_out_dir, margins=active_margins,
         progress=stage_progress(0.13, 0.07, "Cropping the master"))
+
+    # Master text inventory, overlaps, overflows and metadata
+    inventory = Untranslated.master_inventory(source_pdf_path)
+
+    master_overlaps = []
+    try:
+        master_overlaps = TextOverlap.find_overlaps(
+            source_pdf_path, skip_first_last=False,
+            evidence_dir=os.path.join(text_evidence_dir, "overlap")) or []
+    except Exception as e:
+        print(f"  [WARN] Master overlap check failed: {e}")
+
+    master_overflows = []
+    try:
+        master_overflows = MarginOverflow.find_overflows(
+            source_pdf_path, margins=active_margins, skip_first_last=False,
+            evidence_dir=os.path.join(text_evidence_dir, "overflow")) or []
+    except Exception as e:
+        print(f"  [WARN] Master margin overflow check failed: {e}")
+
+    master_metadata_rows = []
+    if collect_metadata:
+        try:
+            master_metadata_rows = MetaData.collect([source_pdf_path], margins=active_margins) or []
+        except Exception as e:
+            print(f"  [WARN] Master metadata collection failed: {e}")
 
     master_seconds = time.perf_counter() - master_t0
 
@@ -629,8 +661,20 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     print(f"  Master scanned in    : {master_seconds:.1f}s")
     print()
 
-    # 3. Inspect each translated PDF across all modules
-    print(f"Inspecting {len(translated_files)} Translated PDF(s)...")
+    if on_stage_complete:
+        try:
+            on_stage_complete("master_complete", {
+                "filename": os.path.basename(source_pdf_path),
+                "metadata_rows": master_metadata_rows,
+                "overlap_results": master_overlaps,
+                "overflow_results": master_overflows,
+                "seconds": round(master_seconds, 1),
+            })
+        except Exception as e:
+            pass
+
+    # 3. Inspect each translated PDF sequentially across all 9 modules (PDF by PDF)
+    print(f"Inspecting {len(translated_files)} Translated PDF(s) sequentially (PDF by PDF)...")
     print()
 
     toc_results = []
@@ -638,26 +682,29 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     count_results = []
     img_results_summary = []
     img_crop_details_list = []
+    region_results = []
+    overlap_results = list(master_overlaps)
+    untranslated_results = []
+    overflow_results = list(master_overflows)
+    metadata_rows = list(master_metadata_rows)
     # Wall-clock time spent on each translated PDF, keyed by filename, so the
     # report and the Review tab can show how long every document took.
     timing_by_file = {}
 
-    diff_crops_out_dir = os.path.join(output_dir, "Cropped_Comparison")
+    DOC_BASE, DOC_SPAN = 0.20, 0.75
+    num_files = len(translated_files)
+    doc_slice = DOC_SPAN / max(1, num_files)
 
-    # Documents occupy the bar from 20% to 82%; the text checks, the metadata
-    # and the report share what is left.
-    DOC_BASE, DOC_SPAN = 0.20, 0.62
-    doc_slice = DOC_SPAN / max(1, len(translated_files))
+    print_lock = threading.Lock()
 
-    for idx, tr_path in enumerate(translated_files, start=1):
+    def safe_print(*args, **kwargs):
+        with print_lock:
+            print(*args, **kwargs)
+
+    def _inspect_single_doc(item):
+        idx, tr_path = item
         tr_filename = os.path.basename(tr_path)
         doc_t0 = time.perf_counter()
-        here = DOC_BASE + doc_slice * (idx - 1)
-        say(here, f"{tr_filename}  ({idx} of {len(translated_files)})")
-        # Scan this translation once, up front, for the three stages below.
-        DocScan.prepare(tr_path, tables=False, codes=True,
-                        progress=stage_progress(here, doc_slice * 0.35,
-                                                f"Scanning {tr_filename}"))
 
         # 1. TOC check
         try:
@@ -669,16 +716,20 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
             target_toc_numerics = []
             toc_res = {"english_pdf": os.path.basename(source_pdf_path), "translated_pdf": tr_filename,
                        "diff_msg": str(e), "status": "FAIL", "target_numerics_str": ""}
-        toc_results.append(toc_res)
 
         # 2. Barcode & QR Code Count Check
+        time.sleep(0.01)
         try:
             bc_res = Barcode_QR_Check.compare_barcode_qr(source_pdf_path, tr_path)
         except Exception as e:
-            bc_res = {"english_pdf": os.path.basename(source_pdf_path), "translated_pdf": tr_filename, "master_barcode_count": 0, "target_barcode_count": 0, "master_pages_barcode": [], "target_pages_barcode": [], "barcode_status": "FAIL", "master_qr_count": 0, "target_qr_count": 0, "master_pages_qr": [], "target_pages_qr": [], "qr_status": "FAIL", "overall_verdict": "FAIL"}
-        bc_qr_results.append(bc_res)
+            bc_res = {"english_pdf": os.path.basename(source_pdf_path), "translated_pdf": tr_filename,
+                      "master_barcode_count": 0, "target_barcode_count": 0, "master_pages_barcode": [],
+                      "target_pages_barcode": [], "barcode_status": "FAIL", "master_qr_count": 0,
+                      "target_qr_count": 0, "master_pages_qr": [], "target_pages_qr": [],
+                      "qr_status": "FAIL", "overall_verdict": "FAIL"}
 
         # 3. Symmetric Image Count Check (per topic, or document total)
+        time.sleep(0.01)
         try:
             cnt_res = ImageCounts.compare_image_counts(
                 source_count_model,
@@ -688,25 +739,12 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
                        "translated_pdf": tr_filename, "granularity": "unavailable",
                        "master_total": 0, "target_total": 0, "mismatched_topics": [],
                        "rows": [], "overall_verdict": "FAIL", "status": f"FAIL ({e})"}
-        count_results.append(cnt_res)
 
         # 4. Pure Visual Graphic Images Comparison
-        #
-        # The translation is cropped by the same extractor as the master, and
-        # the two sets of crops are compared directly. Hunting each master crop
-        # across the rendered translation instead - which is what this used to
-        # do - asks a question the page cannot answer well: it can settle on a
-        # look-alike somewhere else, it cannot see a graphic the translation
-        # ADDED, and matching a fixed-size template against a page collapses
-        # when the artwork was placed at 99% of its original size. Cropping both
-        # sides removes all three, and leaves the translation's own crops in the
-        # output folder where they can be looked at.
+        time.sleep(0.01)
         try:
-            print(f"Extracting Pure Graphic Crops from {tr_filename}...")
             crop_pdf_images.crop_pdf_elements(
-                tr_path, eng_crops_out_dir, margins=active_margins,
-                progress=stage_progress(here + doc_slice * 0.45, doc_slice * 0.25,
-                                        f"Cropping {tr_filename}"))
+                tr_path, eng_crops_out_dir, margins=active_margins)
             tr_crops_dir = os.path.join(
                 eng_crops_out_dir, os.path.splitext(tr_filename)[0])
 
@@ -715,21 +753,19 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
                 tr_crop_dir=tr_crops_dir,
                 output_dir=diff_crops_out_dir,
                 trans_name=os.path.splitext(tr_filename)[0],
-                progress=stage_progress(here + doc_slice * 0.70, doc_slice * 0.25,
-                                        f"Images: {tr_filename}"),
             )
         except Exception as e:
-            print(f"  [WARN] Image comparison failed for {tr_filename}: {e}")
+            safe_print(f"  [WARN] Image comparison failed for {tr_filename}: {e}")
             img_res = {"trans_name": tr_filename, "total_crops": 0, "matched_crops": 0,
                        "match_pct": 0.0, "extra_crops": 0,
                        "overall_status": "FAIL", "crop_details": []}
-        img_results_summary.append(img_res)
 
-        # Unpack per-crop details for Images tab
+        # Unpack per-crop details for this document
+        doc_crops = []
         for cd in img_res.get("crop_details", []):
             crop_name = cd["crop_file"]
             image_type = "table_image" if "table_image" in crop_name.lower() else "normal image"
-            img_crop_details_list.append({
+            doc_crops.append({
                 "english_pdf": os.path.basename(source_pdf_path),
                 "translated_pdf": tr_filename,
                 "crop_name": crop_name,
@@ -737,145 +773,153 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
                 "topic": cd.get("topic", ""),
                 "eng_page": cd["eng_page"],
                 "trans_page": cd["trans_page"],
+                "topic_eng_page": cd.get("topic_eng_page"),
                 "shift_info": cd["shift_info"],
                 "similarity": cd["match_pct"],
                 "status": cd["status"],
                 "match_img": cd.get("match_img", ""),
             })
 
+        # 5. Stylesheet Region Check (for this document against Master)
+        doc_regions = []
+        if regions:
+            try:
+                doc_regions = RegionEngine.run_batch_multiple_regions_check(
+                    eng_pdf_path=source_pdf_path,
+                    tr_target=tr_path,
+                    regions=regions,
+                    output_crops_dir=os.path.join(diff_crops_out_dir, "Region_Inspector"),
+                ) or []
+            except Exception as e:
+                safe_print(f"  [WARN] Region check failed for {tr_filename}: {e}")
+
+        # 6. Text Overlap Check (for this document)
+        doc_overlaps = []
+        try:
+            doc_overlaps = TextOverlap.find_overlaps(
+                tr_path, skip_first_last=False,
+                evidence_dir=os.path.join(text_evidence_dir, "overlap")) or []
+        except Exception as e:
+            safe_print(f"  [WARN] Text overlap check failed for {tr_filename}: {e}")
+
+        # 7. Untranslated / Non-translation Check (for this document against master inventory)
+        doc_untranslated = []
+        try:
+            doc_untranslated = Untranslated.find_untranslated(
+                tr_path, inventory, skip_first_last=True,
+                evidence_dir=os.path.join(text_evidence_dir, "untranslated")) or []
+        except Exception as e:
+            safe_print(f"  [WARN] Untranslated check failed for {tr_filename}: {e}")
+
+        # 8. Margin Overflow Check (for this document)
+        doc_overflows = []
+        try:
+            doc_overflows = MarginOverflow.find_overflows(
+                tr_path, margins=active_margins, skip_first_last=False,
+                evidence_dir=os.path.join(text_evidence_dir, "overflow")) or []
+        except Exception as e:
+            safe_print(f"  [WARN] Margin overflow check failed for {tr_filename}: {e}")
+
+        # 9. Document Metadata Check (for this document)
+        doc_metadata = []
+        if collect_metadata:
+            try:
+                doc_metadata = MetaData.collect([tr_path], margins=active_margins) or []
+            except Exception as e:
+                safe_print(f"  [WARN] Metadata measurement failed for {tr_filename}: {e}")
+
         master_pass = (
             toc_res["status"] == "PASS" and
             bc_res["overall_verdict"] == "PASS" and
             img_res["overall_status"] == "PASS" and
-            cnt_res["overall_verdict"] == "PASS"
+            cnt_res["overall_verdict"] == "PASS" and
+            (all(r.get("is_match") for r in doc_regions) if doc_regions else True) and
+            len(doc_overlaps) == 0 and
+            len(doc_untranslated) == 0 and
+            len(doc_overflows) == 0
         )
         master_verdict = "PASS" if master_pass else "FAIL"
 
         elapsed = time.perf_counter() - doc_t0
-        timing_by_file[tr_filename] = elapsed
 
-        print(
-            f"  [{idx:02d}/{len(translated_files):02d}] {tr_filename[:34]:<34} | "
+        reg_str = ("PASS" if all(r.get("is_match") for r in doc_regions) else "FAIL") if regions else "N/A"
+        txt_str = "PASS" if (len(doc_overlaps) == 0 and len(doc_untranslated) == 0 and len(doc_overflows) == 0) else "FAIL"
+
+        safe_print(
+            f"  [{idx:02d}/{num_files:02d}] {tr_filename[:28]:<28} | "
             f"TOC: {toc_res['status']:<4} | "
             f"BC/QR: {bc_res['overall_verdict']:<4} | "
             f"Img: {img_res['overall_status']:<4} | "
-            f"Count: {cnt_res['overall_verdict']:<4} | "
-            f"Master: {master_verdict} | "
+            f"Cnt: {cnt_res['overall_verdict']:<4} | "
+            f"Reg: {reg_str:<4} | "
+            f"Txt: {txt_str:<4} | "
+            f"Verdict: {master_verdict} | "
             f"{format_duration(elapsed)}"
         )
+
+        doc_payload = {
+            "idx": idx,
+            "filename": tr_filename,
+            "english_pdf": os.path.basename(source_pdf_path),
+            "toc_res": toc_res,
+            "bc_res": bc_res,
+            "cnt_res": cnt_res,
+            "img_res": img_res,
+            "img_crop_details": doc_crops,
+            "region_results": doc_regions,
+            "overlap_results": doc_overlaps,
+            "untranslated_results": doc_untranslated,
+            "overflow_results": doc_overflows,
+            "metadata_rows": doc_metadata,
+            "seconds": round(elapsed, 1),
+        }
+
+        # Send full document results across all 9 checks immediately to GUI
+        if on_doc_complete:
+            try:
+                on_doc_complete(doc_payload)
+            except Exception as ex:
+                safe_print(f"  [WARN] on_doc_complete error: {ex}")
+
+        return doc_payload
+
+    # Inspect translated PDFs sequentially, PDF by PDF.
+    # As soon as each PDF completes all 9 checks, on_doc_complete updates the Review tab
+    # and Meta Data tab with this PDF's complete results before the loop moves to the next PDF.
+    for idx, tr_path in enumerate(translated_files, start=1):
+        here = DOC_BASE + doc_slice * (idx - 1)
+        say(here, f"{os.path.basename(tr_path)} ({idx} of {num_files})")
+        res = _inspect_single_doc((idx, tr_path))
+        toc_results.append(res["toc_res"])
+        bc_qr_results.append(res["bc_res"])
+        count_results.append(res["cnt_res"])
+        img_results_summary.append(res["img_res"])
+        img_crop_details_list.extend(res["img_crop_details"])
+        region_results.extend(res["region_results"])
+        overlap_results.extend(res["overlap_results"])
+        untranslated_results.extend(res["untranslated_results"])
+        overflow_results.extend(res["overflow_results"])
+        metadata_rows.extend(res["metadata_rows"])
+        timing_by_file[res["filename"]] = res["seconds"]
+        say(DOC_BASE + doc_slice * idx, f"Completed {idx}/{num_files}: {res['filename']}")
+        time.sleep(0.02)
 
     print()
     print("-" * 80)
 
-    # 4. Stylesheet regions, from the template or whatever is on screen.
-    #    Skipped rather than failed when there are none: the other four checks
-    #    are still worth having, and the report says the section was skipped so
-    #    a clean run cannot be mistaken for a complete one.
-    region_results = []
+    # Stylesheet regions summary note for report
     region_note = ""
     if regions:
-        print(f"Checking {len(regions)} stylesheet region(s) across the translated set...")
-        try:
-            region_results = RegionEngine.run_batch_multiple_regions_check(
-                eng_pdf_path=source_pdf_path,
-                tr_target=translated_path_or_folder,
-                regions=regions,
-                output_crops_dir=os.path.join(diff_crops_out_dir, "Region_Inspector"),
-            ) or []
-            passed = sum(1 for r in region_results if r.get("is_match"))
-            region_note = f"{passed}/{len(region_results)} region checks passed"
-            print(f"  {region_note}")
-        except Exception as e:
-            region_note = f"stylesheet check failed: {e}"
-            print(f"  ERROR: {region_note}")
+        passed = sum(1 for r in region_results if r.get("is_match"))
+        region_note = f"{passed}/{len(region_results)} region checks passed"
+        print(f"Stylesheet Regions Summary: {region_note}")
     else:
         region_note = ("No stylesheet template selected and no regions marked - "
                        "the stylesheet check was skipped.")
         print(region_note)
     print()
 
-    # 5. Text checks: colliding text, and English left in a translation.
-    #
-    # Neither is about a place on the page, so neither can be a stylesheet
-    # region: a collision happens wherever a line runs long, and a missed
-    # segment is wherever the translator's eye slipped. The untranslated-text
-    # check still skips the first and last page - covers and back matter carry
-    # addresses, trademarks and a copyright line that are English by design,
-    # and would otherwise flag as missed translation on every single document.
-    # The overlap check does NOT skip them: a cover or back-cover layout can
-    # overrun just like a body page can, and by request this now covers the
-    # whole document, first and last page included.
-    #
-    # The overlap scan reads the MASTER as well. An overrun caption in the
-    # English original is a layout fault that every translation will inherit,
-    # and finding it here is cheaper than finding it eleven times.
-    print("Checking for colliding and untranslated text...")
-    say(0.82, "Text checks")
-    text_evidence_dir = os.path.join(diff_crops_out_dir, "Text_Checks")
-    overlap_results, untranslated_results, overflow_results = [], [], []
-    try:
-        every_document = [source_pdf_path] + translated_files
-        for i, path in enumerate(every_document):
-            say(0.82 + 0.04 * (i / float(len(every_document))),
-                f"Overlap: {os.path.basename(path)}")
-            overlap_results.extend(TextOverlap.find_overlaps(
-                path, skip_first_last=False,
-                evidence_dir=os.path.join(text_evidence_dir, "overlap")))
-        print(f"  {len(overlap_results)} text overlap(s) across "
-              f"{len(every_document)} document(s)")
-    except Exception as e:
-        print(f"  ERROR: the overlap check failed: {e}")
-
-    try:
-        inventory = Untranslated.master_inventory(source_pdf_path)
-        for i, path in enumerate(translated_files):
-            say(0.86 + 0.04 * (i / float(len(translated_files) or 1)),
-                f"Not translated: {os.path.basename(path)}")
-            untranslated_results.extend(Untranslated.find_untranslated(
-                path, inventory, skip_first_last=True,
-                evidence_dir=os.path.join(text_evidence_dir, "untranslated")))
-        print(f"  {len(untranslated_results)} untranslated line(s) across "
-              f"{len(translated_files)} translation(s)")
-    except Exception as e:
-        print(f"  ERROR: the untranslated-text check failed: {e}")
-
-    # Text that runs past the left/right margin - the same ignored-margin block
-    # the run extracts with decides what counts as the live area, so the header,
-    # the footer and any edge-anchored thumb tab are furniture and are skipped.
-    # The master is scanned too: an overrun in the English original is a real
-    # layout fault, and it is one every translation is liable to inherit.
-    try:
-        every_document = [source_pdf_path] + translated_files
-        for i, path in enumerate(every_document):
-            say(0.86 + 0.04 * (i / float(len(every_document))),
-                f"Margin overflow: {os.path.basename(path)}")
-            overflow_results.extend(MarginOverflow.find_overflows(
-                path, margins=active_margins, skip_first_last=False,
-                evidence_dir=os.path.join(text_evidence_dir, "overflow")))
-        print(f"  {len(overflow_results)} margin overflow(s) across "
-              f"{len(every_document)} document(s)")
-    except Exception as e:
-        print(f"  ERROR: the margin-overflow check failed: {e}")
-    print()
-
-    # 6. Document metadata for the master and every translation.
-    metadata_rows = []
-    if collect_metadata:
-        print("Collecting document metadata...")
-        say(0.90, "Measuring documents")
-        try:
-            metadata_rows = MetaData.collect(
-                [source_pdf_path] + translated_files, margins=active_margins,
-                progress=lambda i, n, name: say(0.90 + 0.07 * (i / float(n or 1)),
-                                                f"Measuring {name} ({i}/{n})"))
-            print(f"  {len(metadata_rows)} document(s) measured")
-        except Exception as e:
-            print(f"  ERROR: metadata scan failed: {e}")
-        print()
-
-    # Per-document timing, master first, ready for the report and the GUI. The
-    # total is measured end to end, so it also covers the shared stages (text
-    # checks, metadata) that are not charged to any single file.
+    # Per-document timing, master first, ready for the report and the GUI.
     total_seconds = time.perf_counter() - run_started
     timing_rows = [{
         "filename": os.path.basename(source_pdf_path),

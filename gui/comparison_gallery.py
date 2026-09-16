@@ -85,6 +85,22 @@ SOURCE_BAND_COLOR = {
 }
 DEFAULT_BAND_COLOR = "#F2F2F2"
 
+# Display priority within each page or section:
+# 1. Image count of the page/topic first
+# 2. Images on that page/topic next
+# 3. Followed by remaining checks
+SOURCE_PRIORITY = {
+    SOURCE_COUNTS: 1,
+    SOURCE_CROPS: 2,
+    SOURCE_REGIONS: 3,
+    SOURCE_TOC: 4,
+    SOURCE_BARCODE: 5,
+    SOURCE_QR: 6,
+    SOURCE_OVERLAP: 7,
+    SOURCE_UNTRANSLATED: 8,
+    SOURCE_OVERFLOW: 9,
+}
+
 # A row that needs review gets this tint regardless of which check it came
 # from - that is the signal that actually matters, and it must never blend
 # into whichever check's band colour happens to be next to it.
@@ -114,7 +130,7 @@ DETAIL_COLUMNS = (
     ("item", "Item", 150, "w"),
     ("mpage", "Master Pg", 74, "center"),
     ("tpage", "Trans Pg", 70, "center"),
-    ("score", "Score", 68, "center"),
+    ("score", "Score", 88, "center"),
 )
 
 # Deleting from disk is irreversible, so "Clear Images" refuses to touch anything
@@ -221,19 +237,40 @@ def cards_from_crop_details(details):
         tr_page = d.get("trans_page", "-")
         if tr_page in (-1, "-1"):
             tr_page = "—"
+        eng_page = d.get("eng_page", "-")
+        if eng_page in (-1, "-1"):
+            eng_page = "—"
+
+        topic = d.get("topic") or ""
+        if not topic and d.get("match_img"):
+            parent = os.path.basename(os.path.dirname(d.get("match_img")))
+            if not parent.lower().startswith("page_") and not parent.lower().startswith("output"):
+                topic = parent
+
+        topic_code = ""
+        if topic:
+            m = re.match(r"^\s*(\d+(?:\.\d+)*)", topic)
+            if m:
+                topic_code = m.group(1)
+
+        title = d.get("crop_name") or d.get("crop_file") or "crop"
+
         rows.append({
             "source": SOURCE_CROPS,
-            "title": d.get("crop_name", "crop"),
+            "title": title,
             "eng_name": d.get("english_pdf", ""),
-            "eng_page": d.get("eng_page", "-"),
+            "eng_page": eng_page,
             "tr_name": d.get("translated_pdf", ""),
             "tr_page": tr_page,
+            "topic_eng_page": d.get("topic_eng_page"),
             "status": d.get("status", ""),
             "passed": _is_pass(d.get("status", "")),
             "score": f"{d.get('similarity', 0):.1f}%",
             "detail": d.get("shift_info", ""),
             "shift": 0.0,
             "image": d.get("match_img", ""),
+            "topic": topic,
+            "topic_code": topic_code,
         })
     return rows
 
@@ -263,16 +300,30 @@ def cards_from_image_counts(count_results, page_lookup=None):
         tr_name = res.get("translated_pdf", "")
         for r in res.get("rows", []):
             ok = r.get("status") == "PASS"
-            eng_page, tr_page = "-", "-"
-            if callable(page_lookup):
+            eng_page = r.get("master_page") or "-"
+            tr_page = r.get("target_page") or "-"
+            if (eng_page == "-" or tr_page == "-") and callable(page_lookup):
                 try:
-                    eng_page, tr_page = page_lookup(eng_name, tr_name, r.get("topic_code"))
+                    ep, tp = page_lookup(eng_name, tr_name, r.get("topic_code"))
+                    if eng_page == "-":
+                        eng_page = ep
+                    if tr_page == "-":
+                        tr_page = tp
                 except Exception:
-                    eng_page, tr_page = "-", "-"
+                    pass
             title = r.get("topic_title") or ""
             code = r.get("topic_code") or ""
             label = f"{code} · {title}" if (code and code not in ("-",) and not code.startswith("#")) \
                 else (title or "Document total")
+            m_cnt = r.get('master_count', 0)
+            t_cnt = r.get('target_count', 0)
+            diff_msg = ""
+            if not ok:
+                if t_cnt > m_cnt:
+                    diff_msg = f"Translation has {t_cnt - m_cnt} extra graphic(s)."
+                else:
+                    diff_msg = f"Translation is missing {m_cnt - t_cnt} graphic(s) (extra in master)."
+
             rows.append({
                 "source": SOURCE_COUNTS,
                 "title": label[:80],
@@ -282,15 +333,15 @@ def cards_from_image_counts(count_results, page_lookup=None):
                 "tr_page": tr_page or "-",
                 "status": r.get("status", ""),
                 "passed": ok,
-                "score": f"{r.get('target_count', 0)} vs {r.get('master_count', 0)}",
-                "detail": ("Same count both sides." if ok else
-                          f"Master has {r.get('master_count', 0)} graphic(s) here; "
-                          f"the translation has {r.get('target_count', 0)}. A one-directional "
-                          f"crop hunt can miss this when a near-identical icon exists "
-                          f"elsewhere in the manual - this check counts instead of hunting."),
+                "score": f"E({m_cnt}) vs T({t_cnt})",
+                "detail": (f"Same count both sides: {m_cnt} graphic(s)." if ok else
+                          f"Master has {m_cnt} graphic(s) here; translation has {t_cnt}. "
+                          f"{diff_msg} Check individual crop findings for visual details."),
                 "shift": 0.0,
                 "image": "",
                 "roi_rect": None,
+                "topic": title,
+                "topic_code": code,
             })
     return rows
 
@@ -550,7 +601,10 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         try:
             w = self.winfo_width()
             if w > 400:
-                self._list_card.configure(width=max(360, min(720, int(w * 0.38))))
+                new_w = max(360, min(720, int(w * 0.38)))
+                if getattr(self, "_last_list_width", None) != new_w:
+                    self._last_list_width = new_w
+                    self._list_card.configure(width=new_w)
         except Exception:
             pass
 
@@ -905,34 +959,17 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
     # ──────────────────────────────────────────────────────────
     # Data
     # ──────────────────────────────────────────────────────────
-    def load_region_results(self, results):
-        self._replace(SOURCE_REGIONS, cards_from_region_results(results))
-        self._refresh_list()
-
-    def load_crop_details(self, details):
-        self._replace(SOURCE_CROPS, cards_from_crop_details(details))
-        self._refresh_list()
-
-    def load_image_counts(self, count_results):
-        """
-        Publish image_counts.py's symmetric per-topic counts.
-
-        A page lookup is wired in here (not in the pure cards_from_ function)
-        because it needs self._resolve_paths to turn the reported file names
-        back into real paths, then core.toc to find where every topic - PASS
-        rows included, so the detail view always shows a page number - lives
-        in each document. The TOC spans for a given document pair are
-        extracted once and cached here rather than once per topic row.
-        """
-        span_cache = {}
+    def _get_page_lookup(self):
+        if not hasattr(self, "_span_cache"):
+            self._span_cache = {}
 
         def _spans_for(master_pdf, trans_pdf):
             key = (master_pdf, trans_pdf)
-            if key not in span_cache:
+            if key not in self._span_cache:
                 from core import toc as TOC
-                span_cache[key] = (TOC.topic_page_spans(master_pdf),
-                                    TOC.topic_page_spans(trans_pdf))
-            return span_cache[key]
+                self._span_cache[key] = (TOC.topic_page_spans(master_pdf),
+                                          TOC.topic_page_spans(trans_pdf))
+            return self._span_cache[key]
 
         def _page_lookup(eng_name, tr_name, topic_code):
             if not callable(self._resolve_paths):
@@ -949,7 +986,117 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
             tr_page = tr_spans.get(topic_code, (None,))[0] or "-"
             return eng_page, tr_page
 
-        self._replace(SOURCE_COUNTS, cards_from_image_counts(count_results, _page_lookup))
+        return _page_lookup
+
+    def clear_results(self):
+        """Reset the gallery for a new inspection run."""
+        self._all_rows = []
+        self._visible_rows = []
+        self._timings = {}
+        self._total_seconds = None
+        self._selected = None
+        self._mode = "files"
+        self._detail_file = None
+        if hasattr(self, "_span_cache"):
+            self._span_cache.clear()
+        self._refresh_list()
+
+    def add_document_results(self, doc_data):
+        """
+        Progressively add results for one translated document as soon as it finishes.
+        Allows results to be loaded in parallel while the inspection is actively running.
+        """
+        tr_name = doc_data.get("filename") or ""
+        if not tr_name:
+            return
+
+        new_rows = []
+        if doc_data.get("toc_res"):
+            new_rows.extend(cards_from_toc_results([doc_data["toc_res"]]))
+        if doc_data.get("bc_res"):
+            new_rows.extend(cards_from_barcode([doc_data["bc_res"]]))
+            new_rows.extend(cards_from_qr([doc_data["bc_res"]]))
+        if doc_data.get("cnt_res"):
+            new_rows.extend(cards_from_image_counts([doc_data["cnt_res"]], self._get_page_lookup()))
+        if doc_data.get("img_crop_details"):
+            new_rows.extend(cards_from_crop_details(doc_data["img_crop_details"]))
+        if doc_data.get("region_results"):
+            new_rows.extend(cards_from_region_results(doc_data["region_results"]))
+        if doc_data.get("overlap_results"):
+            new_rows.extend(cards_from_overlaps(doc_data["overlap_results"]))
+        if doc_data.get("untranslated_results"):
+            new_rows.extend(cards_from_untranslated(doc_data["untranslated_results"]))
+        if doc_data.get("overflow_results"):
+            new_rows.extend(cards_from_overflows(doc_data["overflow_results"]))
+
+        # Remove previous rows for this document if any (idempotent update)
+        self._all_rows = [r for r in self._all_rows if r.get("tr_name") != tr_name] + new_rows
+
+        if doc_data.get("seconds") is not None:
+            self._timings[tr_name] = doc_data["seconds"]
+
+        if self._mode == "files":
+            self._refresh_list()
+        elif self._mode == "detail":
+            if self._detail_file == tr_name:
+                self._refresh_list()
+            else:
+                # User is inspecting a different file; update counters without interruption
+                summaries = self._file_summaries()
+                n_pass = sum(1 for s in summaries if s["verdict"] == "PASS")
+                n_fail = len(summaries) - n_pass
+                self.count_lbl.configure(
+                    text=f"{n_pass} passed   ·   {n_fail} need review   ·   {len(summaries)} file(s)")
+                self.summary_lbl.configure(
+                    text=f"{len(self._all_rows)} result(s) across {len(summaries)} file(s)")
+
+    def add_master_results(self, master_data):
+        """
+        Progressively add any findings (e.g. overlap or margin overflow defects)
+        found on the Master English PDF during master scanning.
+        """
+        master_name = master_data.get("filename") or ""
+        if not master_name:
+            return
+
+        new_rows = []
+        if master_data.get("overlap_results"):
+            new_rows.extend(cards_from_overlaps(master_data["overlap_results"]))
+        if master_data.get("overflow_results"):
+            new_rows.extend(cards_from_overflows(master_data["overflow_results"]))
+
+        self._all_rows = [r for r in self._all_rows if r.get("tr_name") != master_name] + new_rows
+
+        if master_data.get("seconds") is not None:
+            self._timings[master_name] = master_data["seconds"]
+
+        if self._mode == "files":
+            self._refresh_list()
+
+    def add_text_checks(self, overlaps, missed, overflows=None):
+        """Live-load text checks (overlap, untranslated, margin overflow)."""
+        self.load_text_checks(overlaps, missed)
+        if overflows:
+            self.load_overflows(overflows)
+
+    def add_region_results(self, regions):
+        """Live-load stylesheet region results."""
+        cur_mode, cur_detail = self._mode, self._detail_file
+        self._replace(SOURCE_REGIONS, cards_from_region_results(regions), preserve_mode=True)
+        self._mode, self._detail_file = cur_mode, cur_detail
+        self._refresh_list()
+
+    def load_region_results(self, results):
+        self._replace(SOURCE_REGIONS, cards_from_region_results(results), preserve_mode=True)
+        self._refresh_list()
+
+    def load_crop_details(self, details):
+        self._replace(SOURCE_CROPS, cards_from_crop_details(details), preserve_mode=True)
+        self._refresh_list()
+
+    def load_image_counts(self, count_results):
+        """Publish image_counts.py's symmetric per-topic counts."""
+        self._replace(SOURCE_COUNTS, cards_from_image_counts(count_results, self._get_page_lookup()), preserve_mode=True)
         self._refresh_list()
 
     def load_toc_results(self, toc_results):
@@ -958,7 +1105,7 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         contents check, distinct from Image Counts above even though both
         happen to talk about section numbers.
         """
-        self._replace(SOURCE_TOC, cards_from_toc_results(toc_results))
+        self._replace(SOURCE_TOC, cards_from_toc_results(toc_results), preserve_mode=True)
         self._refresh_list()
 
     def load_barcode_qr(self, bc_qr_results):
@@ -968,8 +1115,8 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         and a QR code dropped are seen and reviewed independently, neither mixed
         into the other or into any other check.
         """
-        self._replace(SOURCE_BARCODE, cards_from_barcode(bc_qr_results))
-        self._replace(SOURCE_QR, cards_from_qr(bc_qr_results))
+        self._replace(SOURCE_BARCODE, cards_from_barcode(bc_qr_results), preserve_mode=True)
+        self._replace(SOURCE_QR, cards_from_qr(bc_qr_results), preserve_mode=True)
         self._refresh_list()
 
     def load_timings(self, timing_rows, total_seconds=None):
@@ -990,13 +1137,18 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
 
     def load_text_checks(self, overlaps, untranslated_rows):
         """Both text checks at once - they are produced by one scan."""
-        self._replace(SOURCE_OVERLAP, cards_from_overlaps(overlaps))
-        self._replace(SOURCE_UNTRANSLATED, cards_from_untranslated(untranslated_rows))
+        cur_mode, cur_detail = self._mode, self._detail_file
+        self._replace(SOURCE_OVERLAP, cards_from_overlaps(overlaps), preserve_mode=True)
+        self._replace(SOURCE_UNTRANSLATED, cards_from_untranslated(untranslated_rows), preserve_mode=True)
+        self._mode, self._detail_file = cur_mode, cur_detail
         self._refresh_list()
 
     def load_overflows(self, overflow_rows):
         """Text that runs past the left/right margin, into the Review breakdown."""
-        self._replace(SOURCE_OVERFLOW, cards_from_overflows(overflow_rows))
+        cur_mode, cur_detail = self._mode, self._detail_file
+        self._replace(SOURCE_OVERFLOW, cards_from_overflows(overflow_rows), preserve_mode=True)
+        self._mode, self._detail_file = cur_mode, cur_detail
+        self._refresh_list()
         self._refresh_list()
 
     @staticmethod
@@ -1008,32 +1160,70 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
             return None
         return n if n > 0 else None
 
+    @staticmethod
+    def _topic_sort_key(topic_code, topic_title="", fallback_title=""):
+        """
+        Sort key for topics:
+        - Front matter: (-1, [0])
+        - Unnumbered topics (#1, #2): (0, [num])
+        - Numbered topics (1.1, 1.2, 1.10, 1.5.1): (1, [1, 1])
+        - Non-topic or general page finding: (2, [0])
+        """
+        raw = str(topic_code or "").strip()
+        if not raw and topic_title:
+            raw = str(topic_title).strip()
+        if not raw and fallback_title:
+            raw = str(fallback_title).strip()
+        if not raw or raw in ("-", "Document total"):
+            return (2, [0])
+        if raw.lower() in ("front", "front matter", "#front") or "front matter" in raw.lower():
+            return (-1, [0])
+        if raw.startswith("#"):
+            try:
+                return (0, [int(raw[1:])])
+            except ValueError:
+                return (0, [0])
+        m = re.match(r"^\s*(\d+(?:\.\d+)*)", raw)
+        if m:
+            code = m.group(1)
+            try:
+                return (1, [int(p) for p in code.split(".")])
+            except ValueError:
+                pass
+        return (0, [0])
+
     @classmethod
     def _row_order(cls, row):
         """
         Where a result belongs in a reading of the document, front to back.
 
-        Results arrive one CHECK at a time - every image result, then every
-        count result, then the TOC ones - and the list was showing them in that
-        order, so the page numbers ran 1..n, restarted at 1, restarted again.
-        Reviewing means working through a document, so the page is what orders
-        the list and the check is only a tie-break.
+        Organised by page first, then by topic on that page (if topic-wise):
+        1. For each topic: Image Count of that topic first, then Images of that topic
+        2. Followed by remaining checks and non-topic findings on that page.
 
         A text finding names no master page, only the translated one it was
         measured on; that is the page it belongs to. Anything with no page at
-        all sorts to the end rather than pretending to be page zero.
+        all sorts to the end by priority.
         """
         page = cls._page_number(row.get("eng_page"))
         if page is None:
+            page = cls._page_number(row.get("topic_eng_page"))
+        if page is None:
             page = cls._page_number(row.get("tr_page"))
-        return (0, page) if page is not None else (1, 0)
+        t_key = cls._topic_sort_key(
+            row.get("topic_code"),
+            row.get("topic"),
+            row.get("title") if row.get("source") in (SOURCE_COUNTS, SOURCE_CROPS) else ""
+        )
+        prio = SOURCE_PRIORITY.get(row.get("source"), 99)
+        name = str(row.get("title") or "")
+        return (0, page, t_key, prio, name) if page is not None else (1, t_key, prio, name)
 
-    def _replace(self, source, rows):
+    def _replace(self, source, rows, preserve_mode=False):
         self._all_rows = [r for r in self._all_rows if r["source"] != source] + rows
-        # A fresh batch of results always lands on the file summary first,
-        # never mid-drill-down into whatever file happened to be open before.
-        self._mode = "files"
-        self._detail_file = None
+        if not preserve_mode and self._mode != "detail":
+            self._mode = "files"
+            self._detail_file = None
 
     def _file_summaries(self):
         """
@@ -1149,7 +1339,7 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         # master page of its own ("—"). Its roi_rect is in that page's own
         # coordinates too, so it belongs on the "trans" pane, not "master".
         is_self_row = bool(row.get("self_path"))
-        focus_side = "trans" if is_self_row else "master"
+        focus_side = "trans" if (is_self_row or row.get("eng_page") in ("—", "-", None)) else "master"
 
         if is_self_row:
             tr_page = _page(row.get("tr_page"), 1)
@@ -1164,9 +1354,10 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
             except Exception:
                 eng_page = tr_page
         else:
-            # "—" for a row with no master page at all. Open the same number
-            # on the left so the two sides start off aligned.
-            eng_page = _page(row.get("eng_page"), _page(row.get("tr_page")))
+            # "—" for a row with no master page at all. Fall back to topic_eng_page
+            # if available, else translated page, so the two sides start off aligned.
+            fallback_eng = _page(row.get("topic_eng_page"), _page(row.get("tr_page")))
+            eng_page = _page(row.get("eng_page"), fallback_eng)
 
             # Which translated page actually holds this master page's TOPIC.
             # Section 4.6 is section 4.6 in every language, so that - not the
@@ -1248,7 +1439,7 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         self.summary_lbl.configure(
             text=(f"{len(self._all_rows)} result(s) across {len(summaries)} file(s)"
                   f"{total_note}"
-                  if self._all_rows else "Nothing to review yet"))
+                  if self._all_rows else "Inspecting documents (PDF by PDF)..."))
 
         for i, s in enumerate(summaries):
             self.tree.insert(
@@ -1262,7 +1453,7 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         # summary is never actually seen, which defeats the point of it.
         self._clear_detail(
             "Click a file above to see its results." if summaries else
-            "Run a Region Inspector check, or a full inspection, to see results here.")
+            "Inspection running... Results will appear here as each document completes.")
 
     def _render_file_detail(self):
         """Drilled into one file: every finding about it, from every check."""
