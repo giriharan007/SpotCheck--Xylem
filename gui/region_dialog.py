@@ -22,6 +22,7 @@ Features:
 
 import os
 import re
+import time
 import threading
 
 import pymupdf as fitz  # PyMuPDF (aliased as fitz for API compat)
@@ -344,6 +345,10 @@ class RegionInspectorFrame(ctk.CTkFrame):
         self._drag_guide = None            # which guide the pointer is holding
         self._margin_scan = {}             # (pdf, page) -> element list, cached
         self._page_size_cache = {}         # (pdf, page) -> (w, h) in points
+        self._page_cache = {}              # (pdf, page, zoom) -> (PIL.Image, pw, ph) cached
+        self._last_page_wheel_time = 0.0   # debounce for mouse wheel page turning
+        self._fit_height_job = None        # debounce handle for _fit_content_height
+        self._tab_wheel_debt = 0.0         # smooth wheel accumulation for touchpads
         self._suspend_margin_sync = False  # stops the spinboxes echoing a drag
 
         theme.apply_treeview_style(_TREE_STYLE)
@@ -424,6 +429,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
             self.current_page = 1
             self._margin_scan = {}      # element cache belongs to the old document
             self._page_size_cache = {}  # and so do the page sizes
+            self._page_cache = {}       # and rendered page images
             try:
                 for row in self.results_tree.get_children():
                     self.results_tree.delete(row)
@@ -1136,19 +1142,21 @@ class RegionInspectorFrame(ctk.CTkFrame):
         self._fit_content_height()
         try:
             # Keep the columns as tall as the window when the window is the
-            # taller of the two. add="+" so CTk's own handler still runs.
+            # taller of the two. Debounced so active scrolling doesn't trigger layout churn.
             self._scroll._parent_canvas.bind(
                 "<Configure>", lambda _e: self._fit_content_height(), add="+")
         except Exception as e:
             print(f"[Layout] Could not track the tab height: {e}")
 
-        # The page viewer scrolls the page, not the tab.
+        # The page viewer scrolls the page or turns pages cleanly.
         self.canvas.configure(xscrollincrement=1, yscrollincrement=1)
         self._bind_wheel(self.canvas, self._on_page_wheel)
 
+        # Smooth tab scrolling for mouse wheel & touchpads without dropped deltas
+        self._bind_wheel(self._scroll._parent_canvas, self._on_tab_wheel)
+
         # Each table scrolls itself while it has anywhere to go, and hands the
-        # wheel back to the tab once it is at the end - which is what makes a
-        # short list inside a long page feel right rather than sticky.
+        # wheel back to the tab once it is at the end.
         for tree in (self.region_tree, self.results_tree):
             self._bind_wheel(tree, lambda e, t=tree: self._on_tree_wheel(t, e))
 
@@ -1171,30 +1179,61 @@ class RegionInspectorFrame(ctk.CTkFrame):
             return 0
         if abs(delta) >= 120:                          # Windows, multiples of 120
             return -int(delta / 120)
-        return -int(delta)                             # macOS, small deltas
+        return -1 if delta > 0 else 1                  # fine deltas
 
     def _fit_content_height(self):
-        """Grow the columns to fill a tall window; never below the floor."""
-        try:
-            avail = self._scroll._parent_canvas.winfo_height()
-            head = self._header_frame.winfo_height() or 60
-            # On a 1366x768 laptop a hard 1100pt floor means everything is below
-            # the fold and the page viewer is a letterbox. Scale the floor to the
-            # screen so a small display scrolls a little and a large one not at all.
-            screen_h = self.winfo_screenheight() or 1080
-            floor = max(MIN_CONTENT_HEIGHT_FLOOR, min(MIN_CONTENT_HEIGHT, int(screen_h * 0.95)))
-            want = max(floor, avail - head - 30)
-            if abs(want - self._content_height) > 4:
-                self._content_height = want
-                self._content_frame.configure(height=want)
-        except Exception:
-            pass
+        """Grow the columns to fill a tall window; debounced to avoid reflow storms."""
+        if getattr(self, "_fit_height_job", None) is not None:
+            try:
+                self.after_cancel(self._fit_height_job)
+            except Exception:
+                pass
+            self._fit_height_job = None
 
-    def _on_page_wheel(self, event):
-        """Wheel over the page viewer: turn the page. Ctrl zooms, Shift pans."""
+        def _do_fit():
+            self._fit_height_job = None
+            try:
+                avail = self._scroll._parent_canvas.winfo_height()
+                head = self._header_frame.winfo_height() or 60
+                screen_h = self.winfo_screenheight() or 1080
+                floor = max(MIN_CONTENT_HEIGHT_FLOOR, min(MIN_CONTENT_HEIGHT, int(screen_h * 0.95)))
+                want = max(floor, avail - head - 30)
+                if abs(want - self._content_height) > 6:
+                    self._content_height = want
+                    self._content_frame.configure(height=want)
+            except Exception:
+                pass
+
+        try:
+            self._fit_height_job = self.after(50, _do_fit)
+        except Exception:
+            _do_fit()
+
+    def _on_tab_wheel(self, event):
+        """Smooth wheel scrolling for the tab canvas without dropped touchpad deltas."""
         step = self._wheel_direction(event)
         if not step:
             return None
+        delta = getattr(event, "delta", 0)
+        if delta == 0:
+            delta = -120 if step > 0 else 120
+
+        # Accumulate small deltas for smooth touchpad response
+        self._tab_wheel_debt = getattr(self, "_tab_wheel_debt", 0.0) + delta
+        units = int(self._tab_wheel_debt / 30.0)
+        if units != 0:
+            self._tab_wheel_debt -= units * 30.0
+            try:
+                self._scroll._parent_canvas.yview_scroll(-units, "units")
+            except Exception:
+                pass
+        return "break"
+
+    def _on_page_wheel(self, event):
+        """Wheel over page viewer: turn page when fitted/at edges. Ctrl zooms, Shift pans."""
+        step = self._wheel_direction(event)
+        if not step:
+            return "break"
         shift = bool(event.state & 0x0001)
         ctrl = bool(event.state & 0x0004)
 
@@ -1202,13 +1241,32 @@ class RegionInspectorFrame(ctk.CTkFrame):
             self._zoom_out() if step > 0 else self._zoom_in()
             return "break"
 
-        view = self.canvas.xview() if shift else self.canvas.yview()
-        if view == (0.0, 1.0):
-            return None            # nothing to scroll here; let the tab take it
         if shift:
-            self.canvas.xview_scroll(step * PAGE_WHEEL_STEP, "units")
-        else:
-            self.canvas.yview_scroll(step * PAGE_WHEEL_STEP, "units")
+            self.canvas.xview_scroll(step * 100, "units")
+            return "break"
+
+        # Check vertical visibility
+        try:
+            yview = self.canvas.yview()
+        except Exception:
+            yview = (0.0, 1.0)
+
+        is_fitted = (yview == (0.0, 1.0)) or (yview[0] <= 0.001 and yview[1] >= 0.999)
+        at_top = (step < 0 and yview[0] <= 0.001)
+        at_bottom = (step > 0 and yview[1] >= 0.999)
+
+        if is_fitted or at_top or at_bottom:
+            now = time.perf_counter()
+            if now - getattr(self, "_last_page_wheel_time", 0.0) > 0.18:
+                self._last_page_wheel_time = now
+                if step > 0:
+                    self._goto_next_page()
+                else:
+                    self._goto_prev_page()
+            return "break"
+
+        # Zoomed in and inside page: scroll smoothly
+        self.canvas.yview_scroll(step * 100, "units")
         return "break"
 
     def _on_tree_wheel(self, tree, event):
@@ -1219,10 +1277,8 @@ class RegionInspectorFrame(ctk.CTkFrame):
             first, last = tree.yview()
         except Exception:
             return None
-        if (first, last) == (0.0, 1.0):
-            return None            # fully visible; the tab scrolls instead
-        if (step < 0 and first <= 0.0) or (step > 0 and last >= 1.0):
-            return None            # already at the end; pass the wheel on
+        if (first, last) == (0.0, 1.0) or (step < 0 and first <= 0.0) or (step > 0 and last >= 1.0):
+            return self._on_tab_wheel(event)
         tree.yview_scroll(step, "units")
         return "break"
 
@@ -2911,7 +2967,16 @@ class RegionInspectorFrame(ctk.CTkFrame):
             return
 
         try:
-            img, pw, ph = render_pdf_page_image(self.eng_pdf_path, self.current_page, zoom=self.zoom)
+            cache_key = (self.eng_pdf_path, self.current_page, round(self.zoom, 2))
+            if hasattr(self, "_page_cache") and cache_key in self._page_cache:
+                img, pw, ph = self._page_cache[cache_key]
+            else:
+                img, pw, ph = render_pdf_page_image(self.eng_pdf_path, self.current_page, zoom=self.zoom)
+                if hasattr(self, "_page_cache"):
+                    if len(self._page_cache) >= 20:
+                        self._page_cache.pop(next(iter(self._page_cache)))
+                    self._page_cache[cache_key] = (img, pw, ph)
+
             self.pil_image = img
             self.page_width_pt = pw
             self.page_height_pt = ph

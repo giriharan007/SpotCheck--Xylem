@@ -32,3 +32,5 @@ Thumbs.db
 Template annotation/
 templates/
 build_venv/
+scratch/
+test_out/

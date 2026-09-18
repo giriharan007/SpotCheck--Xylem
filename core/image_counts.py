@@ -114,6 +114,18 @@ def _croppable_rects(page, code_rects, page_margins, dpi):
     return [r for r in kept if survives_text_masking(page, r, dpi=dpi)]
 
 
+_MODEL_CACHE = {}
+
+
+def record_model(pdf_path, model, margins=None):
+    """Store an already-computed image count model (e.g. from the crop extraction pass)."""
+    if not pdf_path or not model:
+        return
+    norm_path = os.path.abspath(pdf_path)
+    m_key = PageMargins.describe(margins) if margins else ""
+    _MODEL_CACHE[(norm_path, m_key)] = model
+
+
 def count_images_by_topic(pdf_path, dpi=150, margins=None):
     """
     Count croppable graphics per topic.
@@ -126,6 +138,11 @@ def count_images_by_topic(pdf_path, dpi=150, margins=None):
     the crop have to agree about what is page furniture, or the count check
     starts reporting differences that only exist between two of our own passes.
     """
+    norm_path = os.path.abspath(pdf_path) if pdf_path else ""
+    m_key = PageMargins.describe(margins) if margins else ""
+    if (norm_path, m_key) in _MODEL_CACHE:
+        return _MODEL_CACHE[(norm_path, m_key)]
+
     topics = extract_topics_with_positions(pdf_path)
     keys = _topic_keys(topics)
     by_topic, titles, topic_pages = {}, {}, {}

@@ -526,9 +526,9 @@ def get_table_bboxes(fitz_page, pdfplumber_page=None):
 
     return table_rects
 
-def merge_rects_tight(rect_list, gap=2):
+def merge_rects_tight(rect_list, gap=4):
     """
-    Tightly merges bounding boxes that intersect or touch (gap <= 2pt),
+    Tightly merges bounding boxes that intersect or touch (gap <= 4pt),
     or are vertically aligned sub-parts of a single icon (such as an icon and its underline bar).
     Does NOT group distinct icons or horizontally separate figures together.
     """
@@ -570,15 +570,103 @@ def merge_rects_tight(rect_list, gap=2):
     return rects
 
 
-def merge_figure_components(rect_list, max_gap=12.0):
+def merge_figure_components(rect_list, max_gap=16.0, barrier_page=None, scale=None,
+                            grid_regions=None, page=None):
     """
     Merges bounding boxes that intersect, overlap, or are aligned sub-components
     of a single technical illustration or diagram (e.g. pump casing, baseplate,
     motor, mounting feet, and straps in Figure 1).
-    Does NOT group distant icons or graphics separated by substantial white space.
+    Does NOT group distant icons or graphics separated by substantial white space,
+    nor does it merge across table row dividers, barrier rules, or grid boundaries.
     """
     rects = [fitz.Rect(r) for r in rect_list]
     changed = True
+
+    lines = []
+    if page is not None:
+        try:
+            for d in page.get_drawings():
+                r = fitz.Rect(d['rect'])
+                if (r.height <= 2.5 and r.width >= 15) or (r.width <= 2.5 and r.height >= 15):
+                    lines.append(r)
+        except Exception:
+            lines = []
+
+    pw = page.rect.width if page is not None else 419.527
+    edge_touch = page_margins.EDGE_TOUCH
+    max_edge_w = pw * EDGE_ARTIFACT_MAX_WIDTH
+
+    def is_edge(r):
+        if r.width > max_edge_w:
+            return False
+        return r.x0 <= edge_touch or r.x1 >= pw - edge_touch
+
+    def has_barrier(r1, r2):
+        # 0. Edge artifacts (thumb tabs / crop marks) must never merge with interior graphics
+        if is_edge(r1) or is_edge(r2):
+            return True
+
+        # 1. Check raster barrier page if available
+        if barrier_page is not None and scale is not None:
+            # Vertical gap
+            y_top = int(min(r1.y1, r2.y1) * scale)
+            y_bot = int(max(r1.y0, r2.y0) * scale)
+            x_l = int(max(r1.x0, r2.x0) * scale)
+            x_r = int(min(r1.x1, r2.x1) * scale)
+            if y_bot > y_top and x_r > x_l:
+                if barrier_page[y_top:y_bot, x_l:x_r].any():
+                    return True
+            # Horizontal gap
+            x_l = int(min(r1.x1, r2.x1) * scale)
+            x_r = int(max(r1.x0, r2.x0) * scale)
+            y_top = int(max(r1.y0, r2.y0) * scale)
+            y_bot = int(min(r1.y1, r2.y1) * scale)
+            if x_r > x_l and y_bot > y_top:
+                if barrier_page[y_top:y_bot, x_l:x_r].any():
+                    return True
+
+        # 2. Check vector divider lines
+        if lines:
+            # Vertical separation
+            y_top = min(r1.y1, r2.y1)
+            y_bot = max(r1.y0, r2.y0)
+            if y_bot > y_top:
+                x_l = max(r1.x0, r2.x0)
+                x_r = min(r1.x1, r2.x1)
+                for l in lines:
+                    if l.height <= 2.5:
+                        ly = (l.y0 + l.y1) / 2.0
+                        if y_top - 1.0 <= ly <= y_bot + 1.0:
+                            if l.x0 <= x_l + 10.0 and l.x1 >= x_r - 10.0:
+                                return True
+            # Horizontal separation
+            x_l = min(r1.x1, r2.x1)
+            x_r = max(r1.x0, r2.x0)
+            if x_r > x_l:
+                y_top = max(r1.y0, r2.y0)
+                y_bot = min(r1.y1, r2.y1)
+                for l in lines:
+                    if l.width <= 2.5:
+                        lx = (l.x0 + l.x1) / 2.0
+                        if x_l - 1.0 <= lx <= x_r + 1.0:
+                            if l.y0 <= y_top + 10.0 and l.y1 >= y_bot - 10.0:
+                                return True
+
+        # 3. Check table / grid regions
+        if grid_regions:
+            for g in grid_regions:
+                g_rect = fitz.Rect(g)
+                if r1 in g_rect and r2 in g_rect:
+                    # Inside a table, non-intersecting graphics belong to separate cells/rows
+                    return True
+
+        # 4. Standalone small icons vertically stacked in a column
+        if (r1.width <= 60 and r1.height <= 60 and r2.width <= 60 and r2.height <= 60
+                and abs(r1.width - r2.width) < 10 and abs(r1.x0 - r2.x0) < 10):
+            return True
+
+        return False
+
     while changed:
         changed = False
         out = []
@@ -599,10 +687,17 @@ def merge_figure_components(rect_list, max_gap=12.0):
                 should_merge = False
                 if intersects:
                     should_merge = True
-                elif h_overlap > 0 and v_overlap >= -max_gap:
-                    should_merge = True
-                elif v_overlap > 0 and h_overlap >= -max_gap:
-                    should_merge = True
+                else:
+                    if not has_barrier(cur, rj):
+                        if h_overlap > 0 and v_overlap >= -max_gap:
+                            # Horizontally overlapping with vertical proximity
+                            should_merge = True
+                        elif v_overlap > 0 and h_overlap >= -max_gap:
+                            # Vertically overlapping with horizontal proximity
+                            should_merge = True
+                        elif h_overlap >= -2.0 and v_overlap >= -2.0:
+                            # Tight corner or diagonal touch
+                            should_merge = True
 
                 if should_merge:
                     cur.include_rect(rj)
@@ -1151,11 +1246,13 @@ def ink_clusters(fitz_page, table_rects=None, gap_pt=CLUSTER_GAP_PT, dpi=INK_DPI
             continue
         kept.append(r)
 
-    kept = merge_figure_components(kept)
+    regions_pt = [fitz.Rect(x0 / scale, y0 / scale, x1 / scale, y1 / scale)
+                  for x0, y0, x1, y1 in regions]
+    kept = merge_figure_components(kept, barrier_page=barrier_page, scale=scale,
+                                   grid_regions=regions_pt, page=fitz_page)
 
     if return_grids:
-        return kept, [fitz.Rect(x0 / scale, y0 / scale, x1 / scale, y1 / scale)
-                      for x0, y0, x1, y1 in regions]
+        return kept, regions_pt
     return kept
 
 
@@ -1221,7 +1318,8 @@ def get_all_image_candidates(fitz_page, header_margin=None, footer_margin=None,
                                                return_grids=True)
             result = _judge_candidates(merged_rects, pw, ph, dropped_by,
                                        is_edge_artifact, ignored, include_ignored,
-                                       content=content)
+                                       content=content, page=fitz_page,
+                                       grid_regions=grids)
             if return_grids:
                 return result, grids
             return result
@@ -1275,12 +1373,14 @@ def get_all_image_candidates(fitz_page, header_margin=None, footer_margin=None,
     # Tight clustering to assemble vector paths into individual icons without merging separate graphics
     merged_rects = merge_rects_tight(raw_elements, gap=2)
     result = _judge_candidates(merged_rects, pw, ph, dropped_by, is_edge_artifact,
-                               ignored, include_ignored, content=content)
+                               ignored, include_ignored, content=content,
+                               page=fitz_page)
     return (result, []) if return_grids else result
 
 
 def _judge_candidates(merged_rects, pw, ph, dropped_by, is_edge_artifact,
-                      ignored, include_ignored, content=None):
+                      ignored, include_ignored, content=None,
+                      page=None, grid_regions=None):
     """
     Decide which finished clusters survive: too small, in a margin, an edge
     artifact, or a graphic.
@@ -1331,7 +1431,9 @@ def _judge_candidates(merged_rects, pw, ph, dropped_by, is_edge_artifact,
         elif include_ignored:
             ignored.append((r, "too small"))
 
-    final_candidates = merge_figure_components(final_candidates)
+    final_candidates = merge_figure_components(final_candidates,
+                                               grid_regions=grid_regions,
+                                               page=page)
 
     # Sort top to bottom, left to right
     final_candidates.sort(key=lambda r: (r.y0, r.x0))
@@ -1381,31 +1483,103 @@ def detect_barcodes_and_qr_codes(page, dpi=150):
     """
     return Barcode_QR_Check.detect_barcodes_and_qr_codes(page, dpi=dpi)
 
+def _process_single_page_crop_job(args):
+    """Process a single PDF page for pure graphic extraction. Thread-safe."""
+    (pdf_path, page_num, total_pages, active_margins, output_dir, pdf_name,
+     by_topic, topics, dpi, mask_text_in_crops, code_rects) = args
+    page_idx = page_num - 1
+    page_out_dir = os.path.join(output_dir, pdf_name, f"page_{page_num:03d}")
+    page_manifest = []
+    crops_saved_count = 0
+
+    with fitz.open(pdf_path) as doc:
+        page = doc[page_idx]
+        page_rect = page.rect
+        page_margins_here = page_margins.margins_for_page(active_margins, page_num, total_pages)
+        image_rects, table_rects = get_all_image_candidates(
+            page, margins=page_margins_here, return_grids=True)
+
+        crops_on_page = []
+        for img_rect in image_rects:
+            is_barcode_or_qr = False
+            for c_rect in (code_rects or []):
+                padded_c = fitz.Rect(c_rect.x0 - 5, c_rect.y0 - 5, c_rect.x1 + 5, c_rect.y1 + 5)
+                if padded_c.contains(img_rect) or padded_c.intersects(img_rect):
+                    intersect = padded_c & img_rect
+                    if intersect.width * intersect.height > 0:
+                        is_barcode_or_qr = True
+                        break
+
+            if is_barcode_or_qr or is_blank_region(page, img_rect):
+                continue
+
+            in_table = False
+            for t_rect in (table_rects or []):
+                padded_t = fitz.Rect(t_rect.x0 - 2, t_rect.y0 - 2, t_rect.x1 + 2, t_rect.y1 + 2)
+                if padded_t.contains(img_rect) or padded_t.intersects(img_rect):
+                    in_table = True
+                    break
+
+            label = "table_image" if in_table else "image"
+            crops_on_page.append((label, img_rect))
+
+        if crops_on_page:
+            if mask_text_in_crops:
+                for _, rect in crops_on_page:
+                    mask_text_inside_rect(page, rect)
+
+            for crop_idx, (label, rect) in enumerate(crops_on_page, start=1):
+                r_clamped = padded_crop_rect(rect, page_rect)
+                if r_clamped.width > MIN_CROP_SIDE_PT and r_clamped.height > MIN_CROP_SIDE_PT:
+                    crop_pix = page.get_pixmap(dpi=dpi, clip=r_clamped)
+                    if not survives_text_masking(page, rect, dpi=dpi):
+                        continue
+
+                    if by_topic:
+                        topic = find_topic_for_rect(page_num, rect, topics)
+                        out_dir_for_crop = os.path.join(output_dir, pdf_name, topic_slug(topic))
+                        crop_filename = f"p{page_num:03d}_crop_{crop_idx:02d}_{label}.png"
+                        topic_title = (topic or {}).get("title", "")
+                    else:
+                        topic = None
+                        out_dir_for_crop = page_out_dir
+                        crop_filename = f"crop_{crop_idx:02d}_{label}.png"
+                        topic_title = ""
+
+                    crop_path = safe_crop_path(out_dir_for_crop, crop_filename, page_num)
+                    try:
+                        os.makedirs(os.path.dirname(crop_path), exist_ok=True)
+                        crop_pix.save(crop_path)
+                    except Exception:
+                        fallback_dir = os.path.join(output_dir, pdf_name, f"page_{page_num:03d}")
+                        try:
+                            os.makedirs(fallback_dir, exist_ok=True)
+                            crop_path = os.path.join(fallback_dir, crop_filename)
+                            crop_pix.save(crop_path)
+                        except Exception:
+                            continue
+
+                    page_manifest.append({
+                        "page": page_num, "index": crop_idx, "label": label,
+                        "topic": topic_title, "topic_obj": topic if by_topic else None,
+                        "path": crop_path,
+                    })
+                    crops_saved_count += 1
+
+    return page_num, page_manifest, crops_saved_count
+
+
 def crop_pdf_elements(pdf_path, output_dir, dpi=DPI, header_margin=None, footer_margin=None,
                       mask_text_in_crops=MASK_TEXT_IN_CROPS, margins=None, progress=None):
     """
     Extract and crop pure inside images from PDF pages.
-
-    Layout depends on the document: when the PDF has a table of contents the
-    crops are filed under the topic they belong to, otherwise under their page.
-    The crop image and its per-page index are the same either way, so the two
-    layouts stay directly comparable:
-
-        with TOC   <pdf>/1.3 User safety/p007_crop_01_image.png
-        without    <pdf>/page_007/crop_01_image.png
-
-    Other behaviour:
-    - Text characters inside graphic crops are masked with white to isolate pure graphics (logos, lines, boxes, shapes, icons).
-    - Images inside tables are labeled as 'table_image' (e.g. crop_01_table_image.png)
-    - Standalone images outside tables are labeled as 'image' (e.g. crop_02_image.png)
-    - Standard text-only tables are NOT extracted as crops.
-    - Barcodes and QR Codes are excluded and NOT cropped as image files.
     """
     print(f"\n==================================================")
     print(f"Processing & Cropping Pure PDF Graphic Images: {pdf_path}")
     print(f"==================================================")
     doc = fitz.open(pdf_path)
     pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
+    total_pages = len(doc)
 
     active_margins = resolve_margins(margins, header_margin, footer_margin)
     print(f"  Ignored margins: {page_margins.describe(active_margins)}"
@@ -1416,162 +1590,57 @@ def crop_pdf_elements(pdf_path, output_dir, dpi=DPI, header_margin=None, footer_
     print(f"  Grouping: {'topic-wise (' + str(len(topics)) + ' TOC entries)' if by_topic else 'page-wise (no TOC in this document)'}")
     manifest = []
 
-    # Tables and codes come from the shared document scan: computed once for
-    # this file, page-parallel, and reused by the count and barcode stages
-    # instead of each of them paying for the same page again.
-    # Codes come from the shared document scan. Tables do not: the ruled regions
-    # are found in each page's own ink as the graphics are grouped, which is
-    # both free and more reliable than a table finder on a page full of
-    # engineering drawings.
     scan = docscan.scan(pdf_path)
-    plumb_doc = None
     if scan is not None:
         if progress:
-            progress(0, len(doc), "scanning pages")
+            progress(0, total_pages, "scanning pages")
         scan._ensure_codes(dpi=dpi, progress=progress)
 
     total_crops = 0
 
     try:
-        for page_idx in range(len(doc)):
-            page = doc[page_idx]
-            page_rect = page.rect
-            page_num = page_idx + 1
-            if progress:
-                progress(page_num, len(doc), "cropping")
-
-            page_out_dir = os.path.join(output_dir, pdf_name, f"page_{page_num:03d}")  # page-wise fallback
-
+        workers = min(4, max(1, (os.cpu_count() or 2) - 1)) if total_pages >= 8 else 1
+        jobs = []
+        for p_idx in range(total_pages):
+            p_no = p_idx + 1
             if scan is not None:
-                code_rects = scan.code_rects(page_num, dpi=dpi)
+                c_rects = scan.code_rects(p_no, dpi=dpi)
             else:
-                code_rects = [c["rect"] for c in detect_barcodes_and_qr_codes(page, dpi=dpi)]
+                c_rects = [c["rect"] for c in detect_barcodes_and_qr_codes(doc[p_idx], dpi=dpi)]
+            jobs.append((pdf_path, p_no, total_pages, active_margins, output_dir,
+                         pdf_name, by_topic, topics, dpi, mask_text_in_crops, c_rects))
 
-            # Margins can be switched off on named pages (a cover that is
-            # deliberately all furniture, say), so they are resolved per page.
-            page_margins_here = page_margins.margins_for_page(
-                active_margins, page_num, len(doc))
-            # The ruled regions come back with the candidates: a text table
-            # leaves nothing behind once its grid is stripped, and a picture in
-            # a cell survives and is labelled as one.
-            image_rects, table_rects = get_all_image_candidates(
-                page, margins=page_margins_here, return_grids=True)
-
-            crops_on_page = []
-            for img_rect in image_rects:
-                # Exclude Barcode & QR Code regions from cropping
-                is_barcode_or_qr = False
-                for c_rect in code_rects:
-                    padded_c = fitz.Rect(c_rect.x0 - 5, c_rect.y0 - 5, c_rect.x1 + 5, c_rect.y1 + 5)
-                    if padded_c.contains(img_rect) or padded_c.intersects(img_rect):
-                        intersect = padded_c & img_rect
-                        if intersect.width * intersect.height > 0:
-                            is_barcode_or_qr = True
-                            break
-
-                if is_barcode_or_qr:
-                    print(f"  Page {page_num:3d}: Skipped Barcode/QR Code crop at {img_rect}")
-                    continue
-
-                if is_blank_region(page, img_rect):
-                    print(f"  Page {page_num:3d}: Skipped blank region at {img_rect}")
-                    continue
-
-                in_table = False
-                for t_rect in table_rects:
-                    padded_t = fitz.Rect(t_rect.x0 - 2, t_rect.y0 - 2, t_rect.x1 + 2, t_rect.y1 + 2)
-                    if padded_t.contains(img_rect) or padded_t.intersects(img_rect):
-                        in_table = True
-                        break
-
-                label = "table_image" if in_table else "image"
-                crops_on_page.append((label, img_rect))
-
-            if crops_on_page:
-                crops_saved_count = 0
-                
-                # Mask text characters inside crops if enabled
-                if mask_text_in_crops:
-                    for _, rect in crops_on_page:
-                        mask_text_inside_rect(page, rect)
-
-                for crop_idx, (label, rect) in enumerate(crops_on_page, start=1):
-                    # Shared with the count check, so the two cannot drift apart
-                    # about what is too small to be a graphic.
-                    r_clamped = padded_crop_rect(rect, page_rect)
-
-                    if r_clamped.width > MIN_CROP_SIDE_PT and r_clamped.height > MIN_CROP_SIDE_PT:
-                        crop_pix = page.get_pixmap(dpi=dpi, clip=r_clamped)
-
-                        # A region can pass the blank test and still come out
-                        # empty, because that test looks at the page BEFORE the
-                        # text is masked. A rect holding nothing but a caption
-                        # is white by the time it is rendered.
-                        #
-                        # An all-white crop cannot be compared: normalised
-                        # correlation against a constant template returns
-                        # essentially a random number, which is how a blank
-                        # 51x35 patch from page 16 came back as a 29% "match"
-                        # on page 59 of a translation. Dropping it here is both
-                        # cheaper and more honest than scoring it later.
-                        # The count check's own decision, called rather than
-                        # repeated. Re-implementing these two tests here is
-                        # exactly how the cropper and the count check drifted
-                        # apart before: a width rule added to one of them left
-                        # the other still discarding the data plate in topic
-                        # 2.2. One render more per crop is worth never having
-                        # two answers to the same question.
-                        if not survives_text_masking(page, rect, dpi=dpi):
-                            print(f"  Page {page_num:3d}: Skipped (empty after text "
-                                  f"masking, or table ruling) at {rect}")
-                            continue
-
-                        # The index stays per-page in both layouts, so the same
-                        # graphic keeps the same name with or without a TOC.
-                        if by_topic:
-                            topic = find_topic_for_rect(page_num, rect, topics)
-                            out_dir_for_crop = os.path.join(output_dir, pdf_name, topic_slug(topic))
-                            crop_filename = f"p{page_num:03d}_crop_{crop_idx:02d}_{label}.png"
-                            topic_title = (topic or {}).get("title", "")
-                        else:
-                            out_dir_for_crop = page_out_dir
-                            crop_filename = f"crop_{crop_idx:02d}_{label}.png"
-                            topic_title = ""
-
-                        crop_path = safe_crop_path(out_dir_for_crop, crop_filename,
-                                                   page_num)
-                        try:
-                            os.makedirs(os.path.dirname(crop_path), exist_ok=True)
-                            crop_pix.save(crop_path)
-                        except Exception as e:
-                            # One awkward topic title must not end a 33-page run.
-                            # Fall back to the page folder, which is built from
-                            # numbers and cannot be malformed, and say so.
-                            fallback_dir = os.path.join(output_dir, pdf_name,
-                                                        f"page_{page_num:03d}")
-                            print(f"  Page {page_num:3d}: could not write into "
-                                  f"{os.path.dirname(crop_path)!r} ({e}); "
-                                  f"filing under page_{page_num:03d} instead")
-                            try:
-                                os.makedirs(fallback_dir, exist_ok=True)
-                                crop_path = os.path.join(fallback_dir, crop_filename)
-                                crop_pix.save(crop_path)
-                            except Exception as e2:
-                                print(f"  Page {page_num:3d}: SKIPPED {crop_filename} - {e2}")
-                                continue
-                        manifest.append({
-                            "page": page_num, "index": crop_idx, "label": label,
-                            "topic": topic_title, "path": crop_path,
-                        })
-                        total_crops += 1
-                        crops_saved_count += 1
-
-                if crops_saved_count > 0:
-                    where = "topic folders" if by_topic else page_out_dir
-                    print(f"  Page {page_num:3d}: Saved {crops_saved_count:2d} pure graphic crop(s) -> {where}")
+        if workers > 1:
+            import concurrent.futures
+            completed = 0
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(_process_single_page_crop_job, job): job[1] for job in jobs}
+                for fut in concurrent.futures.as_completed(futures):
+                    completed += 1
+                    if progress:
+                        progress(completed, total_pages, "cropping")
+                    try:
+                        p_num, p_man, p_count = fut.result()
+                        manifest.extend(p_man)
+                        total_crops += p_count
+                        if p_count > 0:
+                            where = "topic folders" if by_topic else "page folder"
+                            print(f"  Page {p_num:3d}: Saved {p_count:2d} pure graphic crop(s) -> {where}")
+                    except Exception as e:
+                        print(f"  [WARN] Cropping failed for page: {e}")
+            manifest.sort(key=lambda m: (m["page"], m["index"]))
+        else:
+            for p_idx, job in enumerate(jobs):
+                p_num = p_idx + 1
+                if progress:
+                    progress(p_num, total_pages, "cropping")
+                p_num, p_man, p_count = _process_single_page_crop_job(job)
+                manifest.extend(p_man)
+                total_crops += p_count
+                if p_count > 0:
+                    where = "topic folders" if by_topic else "page folder"
+                    print(f"  Page {p_num:3d}: Saved {p_count:2d} pure graphic crop(s) -> {where}")
     finally:
-        if plumb_doc:
-            plumb_doc.close()
         doc.close()
 
     print(f"Saved total of {total_crops} cropped pure graphic files to: {os.path.join(output_dir, pdf_name)}")
@@ -1580,6 +1649,41 @@ def crop_pdf_elements(pdf_path, output_dir, dpi=DPI, header_margin=None, footer_
         print(f"  Filed under {len(used)} topic folder(s)\n")
     else:
         print()
+
+    try:
+        from core import image_counts
+        keys = image_counts._topic_keys(topics) if topics else {}
+        index_of = {id(t): i for i, t in enumerate(topics)} if topics else {}
+        by_topic_dict, titles, topic_pages = {}, {}, {}
+        for idx, t in enumerate(topics or []):
+            k = keys[idx]
+            titles[k] = t.get("title", "")
+            if t.get("page"):
+                topic_pages[k] = t.get("page")
+
+        for m in manifest:
+            if topics:
+                t = m.get("topic_obj")
+                if t is None:
+                    k = image_counts.FRONT_MATTER_KEY
+                    titles.setdefault(k, "(front matter, before topic 1)")
+                else:
+                    k = keys.get(index_of.get(id(t), -1), "?")
+                by_topic_dict[k] = by_topic_dict.get(k, 0) + 1
+
+        count_model = {
+            "filename": os.path.basename(pdf_path),
+            "has_toc": bool(topics),
+            "topic_count": len(topics or []),
+            "by_topic": by_topic_dict,
+            "titles": titles,
+            "topic_pages": topic_pages,
+            "total": total_crops,
+        }
+        image_counts.record_model(pdf_path, count_model, margins=active_margins)
+    except Exception as e:
+        print(f"  [WARN] Could not cache image count model from crops: {e}")
+
     return total_crops
 
 def process_input_dir(input_dir, output_dir, dpi=DPI, header_margin=None, footer_margin=None,

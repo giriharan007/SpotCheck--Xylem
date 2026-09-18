@@ -579,6 +579,8 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         self._mode = "files"
         self._detail_file = None
         self._selected = None
+        self._opened_files = set()
+        self._hovered_item = None
 
         theme.apply_treeview_style(_TREE_STYLE, row_height=22)
         self._build_ui()
@@ -671,8 +673,13 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         self.tree.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
         self.tree.pack(side="left", fill="both", expand=True)
+        self.tree.tag_configure("unopened", background=NEUTRAL_WHITE)
+        self.tree.tag_configure("opened", background="#EBF3FB")
+        self.tree.tag_configure("hover", background="#D2E6F7")
         self.tree.tag_configure("pass", foreground=PASS_FG)
         self.tree.tag_configure("fail", foreground=REVIEW_FG)
+        self.tree.bind("<Motion>", self._on_tree_motion, add="+")
+        self.tree.bind("<Leave>", self._on_tree_leave, add="+")
         # One tag per (check, pass/fail) combination, pre-configured so a
         # detail row's colour is set with a single unambiguous tag rather
         # than layering two tags and hoping ttk resolves the conflict the
@@ -700,11 +707,9 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         self.det_status = ctk.CTkLabel(head, text="", font=self._f(11, "bold"))
         self.det_status.pack(side="right", padx=(8, 0))
 
-        # The crop comparison answers "does this one graphic match". When it
-        # says no, the next question is always "what else is wrong on that
-        # page" - which needs both pages, whole, side by side.
+        # Open both whole pages side by side for direct visual inspection.
         self.compare_btn = ctk.CTkButton(
-            head, text="⇔  Compare Pages", width=132, height=26,
+            head, text="⇔  Side by Side", width=128, height=26,
             fg_color=DYNAMIC_GREEN, hover_color="#4FB003",
             text_color=DEPENDABLE_BLUE, font=self._f(10, "bold"),
             command=self._open_page_diff)
@@ -997,6 +1002,8 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         self._selected = None
         self._mode = "files"
         self._detail_file = None
+        self._opened_files.clear()
+        self._hovered_item = None
         if hasattr(self, "_span_cache"):
             self._span_cache.clear()
         self._refresh_list()
@@ -1273,9 +1280,33 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
 
     def _drill_into(self, name):
         """A file was clicked in the summary list: show everything about it."""
+        if name:
+            self._opened_files.add(name)
         self._mode = "detail"
         self._detail_file = name
         self._refresh_list()
+
+    def _on_tree_motion(self, event):
+        """Highlight hovered row dynamically on mouse movement."""
+        item = self.tree.identify_row(event.y)
+        if item == self._hovered_item:
+            return
+        if self._hovered_item and self.tree.exists(self._hovered_item):
+            tags = [t for t in self.tree.item(self._hovered_item, "tags") if t != "hover"]
+            self.tree.item(self._hovered_item, tags=tags)
+        self._hovered_item = item
+        if item and self.tree.exists(item):
+            tags = list(self.tree.item(item, "tags"))
+            if "hover" not in tags:
+                tags.insert(0, "hover")
+                self.tree.item(item, tags=tags)
+
+    def _on_tree_leave(self, _event=None):
+        """Clear hover highlight when mouse leaves the treeview."""
+        if self._hovered_item and self.tree.exists(self._hovered_item):
+            tags = [t for t in self.tree.item(self._hovered_item, "tags") if t != "hover"]
+            self.tree.item(self._hovered_item, tags=tags)
+        self._hovered_item = None
 
     def _on_select(self, _event=None):
         sel = self.tree.selection()
@@ -1299,6 +1330,8 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
             messagebox.showinfo("Nothing Selected",
                                 "Pick a result in the list first.")
             return
+        if row.get("tr_name"):
+            self._opened_files.add(row["tr_name"])
         if not callable(self._resolve_paths):
             messagebox.showinfo(
                 "Documents Not Available",
@@ -1402,7 +1435,7 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
             margins=margins,
             title_hint=f"{row.get('title', '')}  •  {row.get('status', '')}")
         if err:
-            messagebox.showerror("Could Not Compare", err)
+            messagebox.showerror("Could Not Open Side by Side", err)
 
     def _open_folder(self):
         for r in self._all_rows:
@@ -1415,6 +1448,7 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
     # Rendering — constant widget count regardless of result volume
     # ──────────────────────────────────────────────────────────
     def _refresh_list(self):
+        self._hovered_item = None
         self.tree.delete(*self.tree.get_children())
         if self._mode == "files":
             self._render_file_list()
@@ -1442,11 +1476,14 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
                   if self._all_rows else "Inspecting documents (PDF by PDF)..."))
 
         for i, s in enumerate(summaries):
+            is_opened = s["name"] in self._opened_files
+            state_tag = "opened" if is_opened else "unopened"
+            verdict_tag = "pass" if s["verdict"] == "PASS" else "fail"
             self.tree.insert(
                 "", "end", iid=str(i),
                 values=(s["verdict"], s["name"], s["score_label"],
                         s.get("time_label", "")),
-                tags=("pass" if s["verdict"] == "PASS" else "fail",))
+                tags=(state_tag, verdict_tag))
 
         # Nothing auto-selected here on purpose: landing on this view and
         # immediately jumping into the first file's detail would mean this
