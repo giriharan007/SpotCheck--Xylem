@@ -92,6 +92,12 @@ try:
 except Exception as e:
     print(f"[SPEC WARNING] PyZbar DLL search failed: {e}")
 
+# Explicitly ensure MSVCR120.dll is the 64-bit version from System32 to prevent
+# PyInstaller from resolving the 32-bit version from SysWOW64 (which causes 0xc0000020 Bad Image)
+sys32_msvcr = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32', 'msvcr120.dll')
+if os.path.isfile(sys32_msvcr):
+    all_binaries.append((sys32_msvcr, '.'))
+
 # 2. CustomTkinter Collection (Theme assets, fonts, json configs)
 try:
     ctk_datas, ctk_binaries, ctk_hidden = collect_all('customtkinter')

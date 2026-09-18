@@ -611,9 +611,8 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
                     progress=stage_progress(0.01, 0.12, "Scanning the master"))
 
     source_toc_numerics = TOC.extract_toc_numerics(source_pdf_path)
-    source_count_model = ImageCounts.count_images_by_topic(source_pdf_path, margins=active_margins)
 
-    # Crop pure graphic elements from Master English PDF for image comparison
+    # Crop pure graphic elements from Master English PDF (also populates ImageCounts model)
     eng_crops_out_dir = os.path.join(output_dir, "Cropped_Images")
     pdf_name_no_ext = os.path.splitext(os.path.basename(source_pdf_path))[0]
     eng_crops_dir = os.path.join(eng_crops_out_dir, pdf_name_no_ext)
@@ -626,6 +625,8 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     crop_pdf_images.crop_pdf_elements(
         source_pdf_path, eng_crops_out_dir, margins=active_margins,
         progress=stage_progress(0.13, 0.07, "Cropping the master"))
+
+    source_count_model = ImageCounts.count_images_by_topic(source_pdf_path, margins=active_margins)
 
     # Master text inventory, overlaps, overflows and metadata
     inventory = Untranslated.master_inventory(source_pdf_path)
@@ -728,19 +729,7 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
                       "target_qr_count": 0, "master_pages_qr": [], "target_pages_qr": [],
                       "qr_status": "FAIL", "overall_verdict": "FAIL"}
 
-        # 3. Symmetric Image Count Check (per topic, or document total)
-        time.sleep(0.01)
-        try:
-            cnt_res = ImageCounts.compare_image_counts(
-                source_count_model,
-                ImageCounts.count_images_by_topic(tr_path, margins=active_margins))
-        except Exception as e:
-            cnt_res = {"english_pdf": os.path.basename(source_pdf_path),
-                       "translated_pdf": tr_filename, "granularity": "unavailable",
-                       "master_total": 0, "target_total": 0, "mismatched_topics": [],
-                       "rows": [], "overall_verdict": "FAIL", "status": f"FAIL ({e})"}
-
-        # 4. Pure Visual Graphic Images Comparison
+        # 3. Pure Visual Graphic Images Cropping & Comparison
         time.sleep(0.01)
         try:
             crop_pdf_images.crop_pdf_elements(
@@ -759,6 +748,17 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
             img_res = {"trans_name": tr_filename, "total_crops": 0, "matched_crops": 0,
                        "match_pct": 0.0, "extra_crops": 0,
                        "overall_status": "FAIL", "crop_details": []}
+
+        # 4. Symmetric Image Count Check (instant cache hit from crop step)
+        try:
+            cnt_res = ImageCounts.compare_image_counts(
+                source_count_model,
+                ImageCounts.count_images_by_topic(tr_path, margins=active_margins))
+        except Exception as e:
+            cnt_res = {"english_pdf": os.path.basename(source_pdf_path),
+                       "translated_pdf": tr_filename, "granularity": "unavailable",
+                       "master_total": 0, "target_total": 0, "mismatched_topics": [],
+                       "rows": [], "overall_verdict": "FAIL", "status": f"FAIL ({e})"}
 
         # Unpack per-crop details for this document
         doc_crops = []

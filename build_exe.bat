@@ -198,6 +198,22 @@ if "!ICONV_OK!"=="1" (
     echo     [WARN] libiconv.dll MISSING
 )
 
+REM Verify MSVCR120.dll architecture to prevent 0xc0000020 Bad Image on target laptops
+if exist "%APP_DIR%\_internal\msvcr120.dll" (
+    python -c "import struct; f=open(r'%APP_DIR%\_internal\msvcr120.dll','rb'); f.seek(0x3c); off=struct.unpack('<I',f.read(4))[0]; f.seek(off+4); mach=struct.unpack('<H',f.read(2))[0]; exit(0 if mach==0x8664 else 1)" >nul 2>&1
+    if errorlevel 1 (
+        echo     [WARN] _internal\msvcr120.dll was 32-bit (x86)! Replacing with 64-bit System32 copy...
+        copy /y "%SystemRoot%\System32\msvcr120.dll" "%APP_DIR%\_internal\msvcr120.dll" >nul
+    ) else (
+        echo     [+] msvcr120.dll present (64-bit verified)
+    )
+) else (
+    if exist "%SystemRoot%\System32\msvcr120.dll" (
+        echo     [+] Copying 64-bit msvcr120.dll from System32...
+        copy /y "%SystemRoot%\System32\msvcr120.dll" "%APP_DIR%\_internal\msvcr120.dll" >nul
+    )
+)
+
 REM The real test: start it, let it build its tabs, read its own log. Every tab
 REM is wrapped in a try/except, so a missing module shows up here as
 REM "unavailable" and nowhere else.

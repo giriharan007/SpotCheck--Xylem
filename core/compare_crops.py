@@ -660,8 +660,12 @@ def crop_similarity(a, b):
     disagree by more than ASPECT_TOLERANCE is reported as no match at all
     rather than squashed into agreement.
     """
+    if a is b:
+        return 1.0
     if a is None or b is None or a.size == 0 or b.size == 0:
         return 0.0
+    if a.shape == b.shape and np.array_equal(a, b):
+        return 1.0
     ah, aw = a.shape[:2]
     bh, bw = b.shape[:2]
     if ah < 4 or aw < 4 or bh < 4 or bw < 4:
@@ -725,9 +729,10 @@ def crop_similarity_coarse(a, b):
 
 
 # A crop must be at least this share of the other's area before one is checked
-# for being contained in the other. Without it any small element - a circle, a
-# bracket - would be found somewhere inside any large diagram and pass.
-CONTAINMENT_MIN_AREA_RATIO = 0.30
+# for being contained in the other. If one crop is less than 65% the size of
+# another, it is missing a substantial portion of the graphic or represents
+# a fragmented/merged pair, not simply a tighter crop boundary.
+CONTAINMENT_MIN_AREA_RATIO = 0.65
 
 
 def crop_similarity_contained(a, b):
@@ -744,11 +749,15 @@ def crop_similarity_contained(a, b):
 
     Both documents render at the same resolution, so the same artwork occupies
     the same number of pixels in both. That makes the question answerable
-    directly - look for the smaller crop inside the larger - and the same three
-    plates score 98% that way.
+    directly - look for the smaller crop inside the larger.
 
-    Guarded by area, because "found somewhere inside" is a weak claim when the
-    thing being looked for is tiny.
+    Guarded by:
+      1. Minimum area ratio (>= 0.65): stops small sub-elements or one half of a
+         split diagram from matching a merged double-figure.
+      2. Residual ink check: ensures the remainder of the larger crop outside the
+         matched window does not contain significant ink (another figure or graphic).
+      3. Coverage scaling: the score is scaled by sqrt(area_ratio) so partial framing
+         is never reported as 100.0% identical.
     """
     if a is None or b is None or a.size == 0 or b.size == 0:
         return 0.0
@@ -757,14 +766,37 @@ def crop_similarity_contained(a, b):
         return 0.0                      # not contained in either direction
     if min(small.shape[:2]) < 8:
         return 0.0
-    if (small.size / float(big.size)) < CONTAINMENT_MIN_AREA_RATIO:
+    area_ratio = float(small.size) / float(big.size)
+    if area_ratio < CONTAINMENT_MIN_AREA_RATIO:
         return 0.0
     if float(small.std()) < 1e-6 or float(big.std()) < 1e-6:
         return 0.0
     res = cv2.matchTemplate(cv2.GaussianBlur(big, _PAIR_BLUR, 0),
                             cv2.GaussianBlur(small, _PAIR_BLUR, 0),
                             cv2.TM_CCOEFF_NORMED)
-    return float(cv2.minMaxLoc(res)[1])
+    _, max_val, _, max_loc = cv2.minMaxLoc(res)
+    peak_corr = float(max_val)
+    if peak_corr <= 0.0:
+        return 0.0
+
+    # Inspect the ink in the area of `big` OUTSIDE the matched `small` rectangle.
+    # If the un-matched area contains a non-trivial amount of ink, `big` is a
+    # composite/merged graphic containing other elements, not just a looser crop.
+    mx, my = max_loc
+    sh, sw = small.shape[:2]
+    mask = np.ones(big.shape, dtype=bool)
+    mask[my:my + sh, mx:mx + sw] = False
+    outside = big[mask]
+    if outside.size > 0:
+        outside_ink = int(np.sum(outside < 240))
+        outside_ink_ratio = outside_ink / float(outside.size)
+        # If outside has significant ink (> 8% of area and > 50 ink pixels),
+        # this is another graphic clustered together, NOT a containment match.
+        if outside_ink_ratio > 0.08 and outside_ink > 50:
+            return 0.0
+
+    # Scale peak correlation by coverage: a crop covering 85% of area cannot score 100%
+    return peak_corr * (area_ratio ** 0.5)
 
 
 def _group_by_topic(rows):
@@ -1014,14 +1046,20 @@ def compare_crop_sets(eng_crop_dir, tr_crop_dir, output_dir, trans_name=None,
     for folder, page, topic, fname, _img in extras:
         print(f"  {'':7s} | {fname:28s} -> EXTRA in the translation (Pg {page})")
 
-    pct = (matched / checked * 100) if checked else 0.0
+    total_distinct = checked + len(extras)
+    pct = (matched / total_distinct * 100) if total_distinct else 0.0
     status = "PASS" if pct >= threshold and not extras else "CHECK"
-    print(f"\nResult for {trans_name}: {matched} / {checked} crops matched "
-          f"({pct:.2f}%), {len(extras)} extra in the translation [{status}]\n")
+    if extras:
+        print(f"\nResult for {trans_name}: {matched} / {checked} master crops matched, "
+              f"{len(extras)} extra in translation ({pct:.2f}% score on {total_distinct} total distinct) [{status}]\n")
+    else:
+        print(f"\nResult for {trans_name}: {matched} / {checked} master crops matched "
+              f"({pct:.2f}%) [{status}]\n")
 
     return {
         "trans_name": trans_name,
-        "total_crops": checked,
+        "eng_total": checked,
+        "total_crops": total_distinct,
         "matched_crops": matched,
         "match_pct": pct,
         "extra_crops": len(extras),

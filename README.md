@@ -303,7 +303,7 @@ a run no longer means digging through nested output folders:
 - **Both sides labelled**: the detail pane names the master PDF and its page, and the translated PDF and its page, plus any vertical shift; the list carries the language tag so rows stay distinguishable across all eleven translations.
 - **Keyboard navigation**: `↑` / `↓` step through results and swap the preview, `PgUp` / `PgDn` jump ten, `Home` / `End` go to the ends. The keys work anywhere on the tab, not only when the list has focus, and stand down on the other tabs and inside text fields. `▲` `▼` buttons and an "n of N" readout sit beside the verdict.
 - **Click the image** to open it full size in the system viewer.
-- **Compare Pages** opens both whole pages side by side — see below.
+- **Side by Side** opens both whole pages side by side for direct visual inspection, with mouse wheel page turning.
 - **Clear Images** deletes the comparison images from disk after a confirmation that names the folder, the file count and the size. It only ever removes PNGs whose resolved path contains a `Cropped_Comparison` component, so source PDFs, the Excel report and the master crops under `Cropped_Images` cannot be touched; empty sub-folders are pruned and the results list is reset.
 
 Laid out as list-plus-preview rather than a scrolling wall of cards. A full run
@@ -313,12 +313,15 @@ past the point where it paints reliably. The list is a single native
 `ttk.Treeview` and exactly one image is decoded at a time, so widget count stays
 constant — 299 widgets whether the run produced 3 results or 341.
 
-### Side-by-side page comparison (`core/page_diff.py` & `gui/page_diff_view.py`)
+### Side-by-side page viewer (`gui/page_diff_view.py`)
 
 The crop comparison answers "does this one graphic match". When it says no, the next
 question is always "what else is wrong on that page" — which needs both pages, whole.
-**Compare Pages** on the Review tab opens the master page and its translation with the
-differences boxed on both, scrolling as one.
+**Side by Side** on the Review tab opens the master page and its translation side by side:
+- **Mouse Wheel Page Navigation**: Scroll down to move to the next page, scroll up to move to the previous page smoothly without clicking buttons.
+- **Instant Rendering**: Loads and flips pages instantaneously using pre-caching.
+- **Fit Page Mode**: Fits both whole pages inside the viewer side by side by default.
+- **Optional Differences**: A toggle to overlay algorithmic differences on demand.
 
 **Why it does not diff pixels.** The prose has been rewritten in another language, so
 every text block differs by design and a raw diff lights the page up. Translated text
