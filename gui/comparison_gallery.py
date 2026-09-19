@@ -105,6 +105,11 @@ SOURCE_PRIORITY = {
 # from - that is the signal that actually matters, and it must never blend
 # into whichever check's band colour happens to be next to it.
 REVIEW_BG = "#FCEAE3"
+
+# File-list row states. The opened tint was #EBF3FB, which against white is
+# almost invisible; these are far enough apart to read without comparing.
+OPENED_BG = "#CFE0F2"
+HOVER_BG = "#A9C9E8"
 REVIEW_FG = "#8A3B00"
 PASS_FG = "#274E13"
 
@@ -311,8 +316,12 @@ def cards_from_image_counts(count_results, page_lookup=None):
                         tr_page = tp
                 except Exception:
                     pass
-            title = r.get("topic_title") or ""
+            title = (r.get("topic_title") or "").strip()
             code = r.get("topic_code") or ""
+            # Outline titles already begin with their code ("1.2 Safety ..."),
+            # so prefixing it again read as "1.2 · 1.2 Safety ...". Once.
+            if code and title.startswith(code):
+                title = title[len(code):].lstrip("  .·-")
             label = f"{code} · {title}" if (code and code not in ("-",) and not code.startswith("#")) \
                 else (title or "Document total")
             m_cnt = r.get('master_count', 0)
@@ -581,6 +590,7 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         self._selected = None
         self._opened_files = set()
         self._hovered_item = None
+        self._hovered_state = None
 
         theme.apply_treeview_style(_TREE_STYLE, row_height=22)
         self._build_ui()
@@ -673,9 +683,12 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         self.tree.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
         self.tree.pack(side="left", fill="both", expand=True)
+        # Three states a file row can be in, each a visibly different shade:
+        # not yet opened (white), opened before (tinted, so a reviewer can see
+        # at a glance what is left), and under the pointer (darker still).
         self.tree.tag_configure("unopened", background=NEUTRAL_WHITE)
-        self.tree.tag_configure("opened", background="#EBF3FB")
-        self.tree.tag_configure("hover", background="#D2E6F7")
+        self.tree.tag_configure("opened", background=OPENED_BG)
+        self.tree.tag_configure("hover", background=HOVER_BG)
         self.tree.tag_configure("pass", foreground=PASS_FG)
         self.tree.tag_configure("fail", foreground=REVIEW_FG)
         self.tree.bind("<Motion>", self._on_tree_motion, add="+")
@@ -1200,6 +1213,58 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         return (0, [0])
 
     @classmethod
+    def _topic_code_of(cls, row):
+        """The numeric code a row belongs to, from whichever field carries it."""
+        for field in ("topic_code", "topic", "title"):
+            raw = str(row.get(field) or "").strip()
+            m = re.match(r"^\s*(\d+(?:\.\d+)*)", raw)
+            if m:
+                return m.group(1)
+        return None
+
+    @classmethod
+    def _anchor_counts_to_images(cls, rows):
+        """
+        Put each Image Count on the page its graphics are on, not the page its
+        topic's heading is on.
+
+        A count row was given the topic's START page, from the outline. That is
+        where the heading falls, which is routinely not where the graphics
+        are: topic 1.2 of the Start 350 manual opens at the foot of page 5 and
+        its five hazard symbols are on page 6. Sorted by page, the count landed
+        among page 5's rows and the symbols it summarises sat a screen further
+        down - and when the document path could not be resolved it had no page
+        at all and sank to the bottom of the list. Either way the reader never
+        saw "5 vs 5" above the five crops it was talking about.
+
+        The images know where they are. So each count is stamped with the
+        first page of any Images row in the same topic, and the sort's
+        priority (counts before crops) then puts it directly above them.
+        Topics with no image rows keep the heading page they had.
+        """
+        first = {}
+        for r in rows:
+            if r.get("source") != SOURCE_CROPS:
+                continue
+            code = cls._topic_code_of(r)
+            ep = cls._page_number(r.get("eng_page"))
+            tp = cls._page_number(r.get("tr_page"))
+            if code is None or ep is None:
+                continue
+            cur = first.get(code)
+            if cur is None or ep < cur[0]:
+                first[code] = (ep, tp)
+        for r in rows:
+            if r.get("source") != SOURCE_COUNTS:
+                continue
+            hit = first.get(cls._topic_code_of(r))
+            if hit is None:
+                continue
+            r["eng_page"] = hit[0]
+            if hit[1] is not None:
+                r["tr_page"] = hit[1]
+
+    @classmethod
     def _row_order(cls, row):
         """
         Where a result belongs in a reading of the document, front to back.
@@ -1286,27 +1351,44 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         self._detail_file = name
         self._refresh_list()
 
+    _STATE_TAGS = ("opened", "unopened")
+
+    def _unhover(self):
+        """Take the hover tag off the current row and give its state tag back."""
+        item = self._hovered_item
+        if item and self.tree.exists(item):
+            tags = [t for t in self.tree.item(item, "tags") if t != "hover"]
+            if self._hovered_state and self._hovered_state not in tags:
+                tags.append(self._hovered_state)
+            self.tree.item(item, tags=tags)
+        self._hovered_item = None
+        self._hovered_state = None
+
     def _on_tree_motion(self, event):
-        """Highlight hovered row dynamically on mouse movement."""
+        """
+        Highlight the row under the pointer.
+
+        The row's own state tag (opened/unopened) sets a background too, and
+        adding "hover" alongside it left Tk to pick one - and it picked the
+        state, so the hover never showed. While a row is hovered its state tag
+        is set aside and put back on leave, so hover is the only background in
+        play and always wins.
+        """
         item = self.tree.identify_row(event.y)
         if item == self._hovered_item:
             return
-        if self._hovered_item and self.tree.exists(self._hovered_item):
-            tags = [t for t in self.tree.item(self._hovered_item, "tags") if t != "hover"]
-            self.tree.item(self._hovered_item, tags=tags)
-        self._hovered_item = item
+        self._unhover()
         if item and self.tree.exists(item):
             tags = list(self.tree.item(item, "tags"))
-            if "hover" not in tags:
-                tags.insert(0, "hover")
-                self.tree.item(item, tags=tags)
+            state = next((t for t in tags if t in self._STATE_TAGS), None)
+            tags = [t for t in tags if t not in self._STATE_TAGS and t != "hover"]
+            self.tree.item(item, tags=["hover"] + tags)
+            self._hovered_item = item
+            self._hovered_state = state
 
     def _on_tree_leave(self, _event=None):
         """Clear hover highlight when mouse leaves the treeview."""
-        if self._hovered_item and self.tree.exists(self._hovered_item):
-            tags = [t for t in self.tree.item(self._hovered_item, "tags") if t != "hover"]
-            self.tree.item(self._hovered_item, tags=tags)
-        self._hovered_item = None
+        self._unhover()
 
     def _on_select(self, _event=None):
         sel = self.tree.selection()
@@ -1500,6 +1582,7 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         self._set_compare_enabled(True)
 
         rows = [r for r in self._all_rows if (r.get("tr_name") or "") == self._detail_file]
+        self._anchor_counts_to_images(rows)
         # Sorted stably, so results sharing a page keep the order their checks
         # produced them in and stay grouped.
         rows.sort(key=self._row_order)
