@@ -286,6 +286,11 @@ def safe_crop_path(directory, filename, page_num):
     return os.path.join(parent, f"page_{page_num:03d}", filename)
 
 
+def _topic_identity(t):
+    """A topic's identity that survives pickling: where it starts and its title."""
+    return (t.get("start_page"), round(float(t.get("top_y") or 0.0), 1), t.get("title"))
+
+
 def find_topic_for_rect(page_num, rect, topics):
     """
     The last topic that begins at or above this rect, in reading order.
@@ -346,7 +351,7 @@ def padded_crop_rect(rect, page_rect, pad=CROP_PAD_PT):
                      min(page_rect.height, rect.y1 + pad))
 
 
-def survives_text_masking(page, rect, dpi=DPI, pad=CROP_PAD_PT):
+def survives_text_masking(page, rect, dpi=DPI, pad=CROP_PAD_PT, pix=None):
     """
     True when a candidate still holds ink once the text inside it is masked.
 
@@ -361,12 +366,19 @@ def survives_text_masking(page, rect, dpi=DPI, pad=CROP_PAD_PT):
 
     The caller must already have masked the text inside every candidate on the
     page, exactly as crop_pdf_elements does before it renders any of them.
+
+    `pix` is the rendered crop when the caller already has it. The cropper
+    renders every crop to save it, and was then rendering it a second time in
+    here to judge it: each get_pixmap rebuilds the page's display list, so that
+    was a whole extra page render per crop. Passing the pixmap in makes the
+    two questions share one render, with the same answer as before.
     """
     r = padded_crop_rect(rect, page.rect, pad)
     if r.width <= MIN_CROP_SIDE_PT or r.height <= MIN_CROP_SIDE_PT:
         return False
     try:
-        pix = page.get_pixmap(dpi=dpi, clip=r)
+        if pix is None:
+            pix = page.get_pixmap(dpi=dpi, clip=r)
         if _is_blank_pixmap(pix):
             return False
         return not _is_ruling_not_artwork(pix, r, float(page.rect.width), dpi)
@@ -392,15 +404,62 @@ def _is_ruling_not_artwork(pix, rect, page_width, dpi=DPI):
     is none of those - it is a self-contained box with a logo or a symbol in
     it, which is exactly the ink that keeps it below RULE_PURE.
     """
+    w_pt, h_pt = float(rect.width), float(rect.height)
+    if w_pt * h_pt < SMALL_RULE_AREA_PT2 and _is_ruling_debris(pix):
+        return True                       # a scrap of cell border, see below
+
     if not _is_mostly_ruling(pix, dpi=dpi):
         return False
 
-    w_pt, h_pt = float(rect.width), float(rect.height)
     if page_width and (w_pt / page_width) >= RULING_MIN_WIDTH_FRAC:
         return True                       # as wide as the column: the table
     if min(w_pt, h_pt) < RULING_MIN_SIDE_PT:
         return True                       # a strip of ruling, not a figure
     return _rule_fraction(pix, dpi=dpi) >= RULE_PURE
+
+
+def _is_ruling_debris(pix):
+    """
+    True when a SMALL crop is nothing but hairline rules - a scrap of table.
+
+    The ruling test above cannot see these: it looks for rules at least 26pt
+    long, and a 16x14pt crop cannot hold one, so it reports no ruling at all.
+    Yet that is exactly what the corner of a cell is - a stub of horizontal
+    rule, a stub of vertical, the tail of a glyph - and the rect merge, which
+    works on boxes rather than ink, happily joins two such stubs into a box
+    large enough to pass the size filter each fails alone. One appeared in the
+    Greek translation and not the English and failed the count for its topic.
+
+    Two things separate that from a real small symbol, and both are needed:
+
+      solid == 0     nothing survives a 5x5 erode. A hairline is 1-2px at this
+                     resolution and vanishes; an arrowhead, a hazard triangle's
+                     2.5pt border, the bold letters in an Ex mark all leave
+                     something. Measured: the arrow on 3315 p69 keeps 19% of
+                     its ink, both cell corners keep 0%.
+      straight       most of the ink is long straight runs, judged against a
+                     length scaled to the crop itself rather than the 26pt
+                     page rule. A thin CURVED symbol - a circle outline - has
+                     no solid ink either, and this is what keeps it.
+    """
+    try:
+        a = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    except Exception:
+        return False
+    gray = a[:, :, 0] if pix.n == 1 else cv2.cvtColor(a[:, :, :3], cv2.COLOR_RGB2GRAY)
+    ink = (gray < INK_LEVEL).astype(np.uint8)
+    total = int(ink.sum())
+    if not total:
+        return False
+    if int(cv2.erode(ink, np.ones((5, 5), np.uint8)).sum()) > 0:
+        return False                      # something solid: a symbol, keep it
+    run = max(3, int(DEBRIS_RUN_FRACTION * min(ink.shape)))
+    horiz = cv2.morphologyEx(ink, cv2.MORPH_OPEN,
+                             cv2.getStructuringElement(cv2.MORPH_RECT, (run, 1)))
+    vert = cv2.morphologyEx(ink, cv2.MORPH_OPEN,
+                            cv2.getStructuringElement(cv2.MORPH_RECT, (1, run)))
+    straight = int(cv2.bitwise_or(horiz, vert).sum()) / float(total)
+    return straight >= DEBRIS_STRAIGHT_FRACTION
 
 
 def _rule_fraction(pix, dpi=DPI):
@@ -526,7 +585,7 @@ def get_table_bboxes(fitz_page, pdfplumber_page=None):
 
     return table_rects
 
-def merge_rects_tight(rect_list, gap=4):
+def merge_rects_tight(rect_list, gap=2):
     """
     Tightly merges bounding boxes that intersect or touch (gap <= 4pt),
     or are vertically aligned sub-parts of a single icon (such as an icon and its underline bar).
@@ -570,103 +629,15 @@ def merge_rects_tight(rect_list, gap=4):
     return rects
 
 
-def merge_figure_components(rect_list, max_gap=16.0, barrier_page=None, scale=None,
-                            grid_regions=None, page=None):
+def merge_figure_components(rect_list, max_gap=12.0):
     """
     Merges bounding boxes that intersect, overlap, or are aligned sub-components
     of a single technical illustration or diagram (e.g. pump casing, baseplate,
     motor, mounting feet, and straps in Figure 1).
-    Does NOT group distant icons or graphics separated by substantial white space,
-    nor does it merge across table row dividers, barrier rules, or grid boundaries.
+    Does NOT group distant icons or graphics separated by substantial white space.
     """
     rects = [fitz.Rect(r) for r in rect_list]
     changed = True
-
-    lines = []
-    if page is not None:
-        try:
-            for d in page.get_drawings():
-                r = fitz.Rect(d['rect'])
-                if (r.height <= 2.5 and r.width >= 15) or (r.width <= 2.5 and r.height >= 15):
-                    lines.append(r)
-        except Exception:
-            lines = []
-
-    pw = page.rect.width if page is not None else 419.527
-    edge_touch = page_margins.EDGE_TOUCH
-    max_edge_w = pw * EDGE_ARTIFACT_MAX_WIDTH
-
-    def is_edge(r):
-        if r.width > max_edge_w:
-            return False
-        return r.x0 <= edge_touch or r.x1 >= pw - edge_touch
-
-    def has_barrier(r1, r2):
-        # 0. Edge artifacts (thumb tabs / crop marks) must never merge with interior graphics
-        if is_edge(r1) or is_edge(r2):
-            return True
-
-        # 1. Check raster barrier page if available
-        if barrier_page is not None and scale is not None:
-            # Vertical gap
-            y_top = int(min(r1.y1, r2.y1) * scale)
-            y_bot = int(max(r1.y0, r2.y0) * scale)
-            x_l = int(max(r1.x0, r2.x0) * scale)
-            x_r = int(min(r1.x1, r2.x1) * scale)
-            if y_bot > y_top and x_r > x_l:
-                if barrier_page[y_top:y_bot, x_l:x_r].any():
-                    return True
-            # Horizontal gap
-            x_l = int(min(r1.x1, r2.x1) * scale)
-            x_r = int(max(r1.x0, r2.x0) * scale)
-            y_top = int(max(r1.y0, r2.y0) * scale)
-            y_bot = int(min(r1.y1, r2.y1) * scale)
-            if x_r > x_l and y_bot > y_top:
-                if barrier_page[y_top:y_bot, x_l:x_r].any():
-                    return True
-
-        # 2. Check vector divider lines
-        if lines:
-            # Vertical separation
-            y_top = min(r1.y1, r2.y1)
-            y_bot = max(r1.y0, r2.y0)
-            if y_bot > y_top:
-                x_l = max(r1.x0, r2.x0)
-                x_r = min(r1.x1, r2.x1)
-                for l in lines:
-                    if l.height <= 2.5:
-                        ly = (l.y0 + l.y1) / 2.0
-                        if y_top - 1.0 <= ly <= y_bot + 1.0:
-                            if l.x0 <= x_l + 10.0 and l.x1 >= x_r - 10.0:
-                                return True
-            # Horizontal separation
-            x_l = min(r1.x1, r2.x1)
-            x_r = max(r1.x0, r2.x0)
-            if x_r > x_l:
-                y_top = max(r1.y0, r2.y0)
-                y_bot = min(r1.y1, r2.y1)
-                for l in lines:
-                    if l.width <= 2.5:
-                        lx = (l.x0 + l.x1) / 2.0
-                        if x_l - 1.0 <= lx <= x_r + 1.0:
-                            if l.y0 <= y_top + 10.0 and l.y1 >= y_bot - 10.0:
-                                return True
-
-        # 3. Check table / grid regions
-        if grid_regions:
-            for g in grid_regions:
-                g_rect = fitz.Rect(g)
-                if r1 in g_rect and r2 in g_rect:
-                    # Inside a table, non-intersecting graphics belong to separate cells/rows
-                    return True
-
-        # 4. Standalone small icons vertically stacked in a column
-        if (r1.width <= 60 and r1.height <= 60 and r2.width <= 60 and r2.height <= 60
-                and abs(r1.width - r2.width) < 10 and abs(r1.x0 - r2.x0) < 10):
-            return True
-
-        return False
-
     while changed:
         changed = False
         out = []
@@ -687,17 +658,10 @@ def merge_figure_components(rect_list, max_gap=16.0, barrier_page=None, scale=No
                 should_merge = False
                 if intersects:
                     should_merge = True
-                else:
-                    if not has_barrier(cur, rj):
-                        if h_overlap > 0 and v_overlap >= -max_gap:
-                            # Horizontally overlapping with vertical proximity
-                            should_merge = True
-                        elif v_overlap > 0 and h_overlap >= -max_gap:
-                            # Vertically overlapping with horizontal proximity
-                            should_merge = True
-                        elif h_overlap >= -2.0 and v_overlap >= -2.0:
-                            # Tight corner or diagonal touch
-                            should_merge = True
+                elif h_overlap > 0 and v_overlap >= -max_gap:
+                    should_merge = True
+                elif v_overlap > 0 and h_overlap >= -max_gap:
+                    should_merge = True
 
                 if should_merge:
                     cur.include_rect(rj)
@@ -808,6 +772,12 @@ RULE_PURE = 0.85
 # ruling or a leader line, not a figure. Genuine small symbols are not ruled at
 # all and never reach this test.
 RULING_MIN_SIDE_PT = 24.0
+
+# For a small crop with no solid ink, how much of it must be straight runs -
+# each at least this fraction of the crop's shorter side - before it is
+# called debris rather than a symbol. Both cell corners measured 0.82-0.91.
+DEBRIS_STRAIGHT_FRACTION = 0.75
+DEBRIS_RUN_FRACTION = 0.5
 
 # How many rule crossings make a lattice. Four is the smallest real table - one
 # cell has four corners - and it is well above what a drawing produces, where a
@@ -1248,8 +1218,7 @@ def ink_clusters(fitz_page, table_rects=None, gap_pt=CLUSTER_GAP_PT, dpi=INK_DPI
 
     regions_pt = [fitz.Rect(x0 / scale, y0 / scale, x1 / scale, y1 / scale)
                   for x0, y0, x1, y1 in regions]
-    kept = merge_figure_components(kept, barrier_page=barrier_page, scale=scale,
-                                   grid_regions=regions_pt, page=fitz_page)
+    kept = merge_figure_components(kept)
 
     if return_grids:
         return kept, regions_pt
@@ -1431,9 +1400,12 @@ def _judge_candidates(merged_rects, pw, ph, dropped_by, is_edge_artifact,
         elif include_ignored:
             ignored.append((r, "too small"))
 
-    final_candidates = merge_figure_components(final_candidates,
-                                               grid_regions=grid_regions,
-                                               page=page)
+    # A second pass, after the margin and size filters. It is not redundant:
+    # dropping a stray sliver can leave two halves of one figure adjacent that
+    # the first pass saw as separated, and on the N3001 manual this pass is
+    # what rejoins a split pump body and folds corner-bracket fragments into
+    # the drawing they belong to - eight fewer junk crops on the master alone.
+    final_candidates = merge_figure_components(final_candidates)
 
     # Sort top to bottom, left to right
     final_candidates.sort(key=lambda r: (r.y0, r.x0))
@@ -1482,6 +1454,16 @@ def detect_barcodes_and_qr_codes(page, dpi=150):
     Delegate barcode and QR code detection to Barcode_QR_Check module.
     """
     return Barcode_QR_Check.detect_barcodes_and_qr_codes(page, dpi=dpi)
+
+def _crop_page_for_pool(job):
+    """
+    One page's crop job in the shape docscan's pool wants: (page_no, result).
+
+    Module-level so it pickles to a worker process.
+    """
+    p_num, p_man, p_count = _process_single_page_crop_job(job)
+    return p_num, (p_man, p_count)
+
 
 def _process_single_page_crop_job(args):
     """Process a single PDF page for pure graphic extraction. Thread-safe."""
@@ -1532,7 +1514,7 @@ def _process_single_page_crop_job(args):
                 r_clamped = padded_crop_rect(rect, page_rect)
                 if r_clamped.width > MIN_CROP_SIDE_PT and r_clamped.height > MIN_CROP_SIDE_PT:
                     crop_pix = page.get_pixmap(dpi=dpi, clip=r_clamped)
-                    if not survives_text_masking(page, rect, dpi=dpi):
+                    if not survives_text_masking(page, rect, dpi=dpi, pix=crop_pix):
                         continue
 
                     if by_topic:
@@ -1611,23 +1593,24 @@ def crop_pdf_elements(pdf_path, output_dir, dpi=DPI, header_margin=None, footer_
                          pdf_name, by_topic, topics, dpi, mask_text_in_crops, c_rects))
 
         if workers > 1:
-            import concurrent.futures
-            completed = 0
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = {pool.submit(_process_single_page_crop_job, job): job[1] for job in jobs}
-                for fut in concurrent.futures.as_completed(futures):
-                    completed += 1
-                    if progress:
-                        progress(completed, total_pages, "cropping")
-                    try:
-                        p_num, p_man, p_count = fut.result()
-                        manifest.extend(p_man)
-                        total_crops += p_count
-                        if p_count > 0:
-                            where = "topic folders" if by_topic else "page folder"
-                            print(f"  Page {p_num:3d}: Saved {p_count:2d} pure graphic crop(s) -> {where}")
-                    except Exception as e:
-                        print(f"  [WARN] Cropping failed for page: {e}")
+            # Pages go to docscan's shared PROCESS pool, not a thread pool. The
+            # per-page work is CPU-bound Python - clustering, the merge, the
+            # filters - and under the GIL four threads gave 1.4x, not 4x: on a
+            # 152-page manual, 122s single-threaded became 86s, with 83s of
+            # that spent by the main thread waiting on a lock. Worse, a busy
+            # thread holds the same lock the window needs to repaint, which
+            # is why switching tabs during a run froze the interface. Separate
+            # processes get the cores AND leave the window alone. The pool
+            # already exists for the scan, so nothing new starts here.
+            results = docscan._map_pages(_crop_page_for_pool, jobs,
+                                         progress=progress, label="cropping")
+            for p_num in sorted(results):
+                p_man, p_count = results[p_num]
+                manifest.extend(p_man)
+                total_crops += p_count
+                if p_count > 0:
+                    where = "topic folders" if by_topic else "page folder"
+                    print(f"  Page {p_num:3d}: Saved {p_count:2d} pure graphic crop(s) -> {where}")
             manifest.sort(key=lambda m: (m["page"], m["index"]))
         else:
             for p_idx, job in enumerate(jobs):
@@ -1653,7 +1636,14 @@ def crop_pdf_elements(pdf_path, output_dir, dpi=DPI, header_margin=None, footer_
     try:
         from core import image_counts
         keys = image_counts._topic_keys(topics) if topics else {}
-        index_of = {id(t): i for i, t in enumerate(topics)} if topics else {}
+        # Keyed on what a topic IS, not on the Python object. The manifest
+        # comes back from worker processes, so its topic dicts are pickled
+        # copies with new identities - keyed on id() every lookup missed, every
+        # crop fell into "?", and that model was then cached and served to the
+        # count check: one row reading E(359) vs T(359) for the whole manual
+        # instead of a row per topic.
+        index_of = ({_topic_identity(t): i for i, t in enumerate(topics)}
+                    if topics else {})
         by_topic_dict, titles, topic_pages = {}, {}, {}
         for idx, t in enumerate(topics or []):
             k = keys[idx]
@@ -1668,7 +1658,7 @@ def crop_pdf_elements(pdf_path, output_dir, dpi=DPI, header_margin=None, footer_
                     k = image_counts.FRONT_MATTER_KEY
                     titles.setdefault(k, "(front matter, before topic 1)")
                 else:
-                    k = keys.get(index_of.get(id(t), -1), "?")
+                    k = keys.get(index_of.get(_topic_identity(t), -1), "?")
                 by_topic_dict[k] = by_topic_dict.get(k, 0) + 1
 
         count_model = {
