@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>SpotCheck Xylem - Detailed Project Report</title>
+<style>
+body{font-family:Arial,sans-serif;line-height:1.45;color:#222;margin:42px}h1{color:#003E51;border-bottom:3px solid #007DA3;padding-bottom:8px}h2{color:#003E51;margin-top:28px}h3{color:#007DA3;margin-top:20px}table{border-collapse:collapse;width:100%;margin:12px 0}th,td{border:1px solid #b8c8d2;padding:7px;vertical-align:top}th{background:#003E51;color:white}code,pre{font-family:Consolas,monospace;background:#eef5fa;padding:2px 4px}pre{padding:10px;white-space:pre-wrap}li{margin:4px 0}.note{background:#eef5fa;border-left:5px solid #007DA3;padding:10px}</style>
+</head>
+<body>
+<h1>SpotCheck — Xylem PDF Quality &amp; Visual Inspection Engine</h1>
+<p><b>Repository:</b> giriharan007/SpotCheck--Xylem<br><b>Primary language:</b> Python (98.4%)<br><b>Secondary languages:</b> Batchfile (1.3%), Shell (0.3%)</p>
+
+<h2>1. Executive Summary</h2>
+<p>SpotCheck is a desktop quality-assurance application for comparing an English technical-manual PDF with one or more translated PDFs. It detects missing or reordered TOC topics, barcode and QR-code problems, missing/extra/moved graphics, image-count mismatches, layout-region defects, text collisions, untranslated English, document metadata differences, and page-level visual differences.</p>
+<p>The system has two deliberately separated layers: <code>core/</code> contains headless PDF and image-inspection logic, while <code>gui/</code> contains the Xylem-branded desktop interface. Results are shown interactively and exported to a multi-sheet Excel workbook with comparison and evidence images.</p>
+
+<h2>2. Runtime Architecture</h2>
+<pre>run_gui.py
+  └── gui.app_window.SpotCheckApp
+        ├── core.pipeline.run_quality_inspection()
+        ├── gui.region_dialog.RegionInspectorFrame
+        ├── gui.comparison_gallery.ComparisonGalleryFrame
+        ├── gui.text_checks_tab.TextChecksFrame
+        └── gui.metadata_tab.MetadataFrame
+
+core.pipeline
+  ├── core.docscan       shared cached page scans / multiprocessing
+  ├── core.toc           TOC numerics and topic page mapping
+  ├── core.barcode_qr    barcode and QR validation
+  ├── core.crop_images   graphic extraction and cropping
+  ├── core.compare_crops visual crop matching
+  ├── core.image_counts  symmetric graphic counting
+  ├── core.region_engine stylesheet-region checks
+  ├── core.page_diff     full-page graphic differences
+  ├── core.text_overlap  colliding text detection
+  ├── core.untranslated  English-left-behind detection
+  ├── core.metadata      document facts and column detection
+  └── openpyxl           Excel report generation</pre>
+
+<h2>3. Complete Feature Inventory</h2>
+<h3>3.1 Input and batch processing</h3>
+<ul><li>Accepts a master PDF file or a folder containing exactly one PDF.</li><li>Accepts a translated PDF or a folder of translated PDFs.</li><li>Validates paths and rejects ambiguous master folders.</li><li>Creates output folders automatically.</li><li>Remembers valid paths and the selected template between sessions.</li><li>Runs long inspections on background threads and reports named progress stages.</li></ul>
+
+<h3>3.2 TOC and translation structure</h3>
+<ul><li>Reads PDF bookmarks/outlines with PyMuPDF.</li><li>Compares numeric topic identifiers such as <code>1</code>, <code>1.1</code>, and <code>3.2.1</code>, independent of translated titles.</li><li>Detects missing, extra, and reordered topics.</li><li>Builds topic page spans and maps master pages to translated pages after reflow.</li><li>Falls back to page-number matching when no usable outline exists.</li></ul>
+
+<h3>3.3 Barcode and QR-code checks</h3>
+<ul><li>Uses Pyzbar/ZBar decoding, OpenCV QR/barcode fallback detectors, and decode-independent structural detection.</li><li>Records code type, decoded data where available, bounding box, page number, and detection method.</li><li>Compares master and translation counts and page locations.</li><li>Excludes barcodes and QR codes from ordinary visual image comparison because their data legitimately changes by language/document.</li><li>Reports <code>CHECK (No Detector)</code> instead of falsely passing a 0/0 result when no detector is available.</li></ul>
+
+<h3>3.4 Graphic extraction and comparison</h3>
+<ul><li>Extracts raster images, vector diagrams, logos, icons, hazard symbols, and pictures inside tables.</li><li>Renders pages, masks text, clusters connected ink regions, and removes page furniture.</li><li>Recognizes ruled table lattices and removes text-only table grids.</li><li>Excludes blank regions, barcodes, QR codes, margins, thumb tabs, separators, and isolated rules.</li><li>Groups crops by TOC topic when possible and by page otherwise.</li><li>Uses safe Windows-compatible topic names, reserved-name handling, path-length protection, and page-folder fallback.</li><li>Searches each master crop across translated pages with OpenCV normalized template matching.</li><li>Uses coarse-to-fine matching, credibility thresholds, topic-scoped searches, page mapping, tie-breaking by proximity, and repeated-crop caching.</li><li>Creates side-by-side comparison PNGs with similarity, expected page, translated page, and status.</li></ul>
+
+<h3>3.5 Symmetric image counts</h3>
+<ul><li>Counts graphics in both documents instead of only searching for master graphics.</li><li>Catches graphics added to translations and graphics deleted from translations.</li><li>Compares per topic when both documents have TOCs, otherwise compares document totals.</li><li>Uses the same graphic detector and margins as crop extraction so the two checks agree.</li></ul>
+
+<h3>3.6 Stylesheet Region Inspector</h3>
+<ul><li>Draws, moves, resizes, deletes, and previews regions on rendered master pages.</li><li>Supports nested regions such as Region 1.1 and automatic renumbering.</li><li>Supports first-page, last-page, all-page, odd-page, and even-page scopes.</li><li>Supports mirrored-layout alternative groups where any variant may pass.</li><li>Supports exact text, visual-only, presence-only, same-pattern, scope-only, and normal layout/presence modes.</li><li>Supports editable expected text, pinned text, token-snapped scoped exact matching, barcode/QR presence checks, per-region tolerances, and per-region thresholds.</li><li>Uses TOC page mapping, edge-based sheet-size anchoring, per-sheet geometry, and optional scale-with-page behavior.</li></ul>
+
+<h3>3.7 Text quality checks</h3>
+<ul><li><b>Text overlap:</b> finds text spans whose actual ink collides, avoiding false positives caused only by font bounding boxes.</li><li><b>Not translated:</b> compares normalized translated lines against an English master inventory and uses English function-word density as supporting evidence.</li><li>Skips first and last pages by default because covers and back matter may intentionally remain English.</li><li>Produces evidence images and publishes findings to both the Text Checks and Review tabs.</li></ul>
+
+<h3>3.8 Metadata and layout inspection</h3>
+<ul><li>Reports file size, pages, sheet size, orientation, dimensions, rotation, encryption, PDF version, producer, title, and TOC-entry count.</li><li>Classifies ISO A0–A8, Letter, Legal, Tabloid, and custom page dimensions.</li><li>Detects text columns using body-line projections and gutter analysis.</li><li>Optionally excludes tables to prevent table gaps from being mistaken for document columns.</li><li>Samples evenly distributed pages and can list every page.</li><li>Highlights translated documents that differ from the master in page count, sheet size, or columns.</li></ul>
+
+<h3>3.9 Review and page-diff workflow</h3>
+<ul><li>Displays region, crop, overlap, and untranslated findings in one gallery.</li><li>Filters all, passed, and needs-review results.</li><li>Uses a scalable Treeview/list-plus-preview design instead of thousands of widgets.</li><li>Provides keyboard navigation and external image opening.</li><li>Opens a synchronized side-by-side whole-page diff.</li><li>Classifies full-page graphics as missing, extra, or moved while masking translated prose.</li><li>Safely deletes only comparison PNGs inside the application’s comparison-output tree.</li></ul>
+
+<h3>3.10 Reporting</h3>
+<p><code>core.pipeline</code> creates <code>PDF_Quality_Inspection_Report.xlsx</code> with:</p>
+<ol><li>Overview</li><li>TOC</li><li>Barcode &amp; QR</li><li>Images</li><li>Image Counts</li><li>Meta Data</li><li>Stylesheet Result</li><li>Text Overlap</li><li>Not Translated</li></ol>
+<p>The workbook contains styled headers, borders, automatic column sizing, colored pass/fail cells, page movement, similarity, evidence details, active margins, region results, metadata, and defect counts.</p>
+
+<h2>4. File-by-File Inventory</h2>
+<table><tr><th>File / Directory</th><th>Purpose</th></tr>
+<tr><td><code>run_gui.py</code></td><td>Desktop entry point. Initializes frozen multiprocessing support and starts the main GUI.</td></tr>
+<tr><td><code>logger_config.py</code></td><td>Creates timestamped logs, captures stdout/stderr/exceptions, and configures native library paths.</td></tr>
+<tr><td><code>settings.py</code></td><td>Best-effort persistent storage for paths, template name, and margins with atomic writes and writable-directory fallback.</td></tr>
+<tr><td><code>settings.json</code></td><td>Remembered local Windows paths, selected template, and margin settings.</td></tr>
+<tr><td><code>requirements.txt</code></td><td>Runtime, image-processing, GUI, PDF, Excel, and packaging dependencies.</td></tr>
+<tr><td><code>check_imports.py</code></td><td>Fast pre-build import verification for application modules and third-party packages.</td></tr>
+<tr><td><code>SpotCheck.spec</code></td><td>PyInstaller specification with hidden imports, data files, and native binaries.</td></tr>
+<tr><td><code>build_exe.bat</code></td><td>Windows dependency installation, import check, packaging, DLL verification, and smoke testing.</td></tr>
+<tr><td><code>build_app.sh</code></td><td>macOS/Linux dependency installation and PyInstaller automation.</td></tr>
+<tr><td><code>core/__init__.py</code></td><td>Documents the headless backend package and module responsibilities.</td></tr>
+<tr><td><code>core/pipeline.py</code></td><td>Main inspection orchestrator and Excel report generator.</td></tr>
+<tr><td><code>core/toc.py</code></td><td>TOC numeric extraction, comparison, topic spans, and page mapping.</td></tr>
+<tr><td><code>core/barcode_qr.py</code></td><td>Barcode/QR decoding, structural detection, counting, and comparison.</td></tr>
+<tr><td><code>core/docscan.py</code></td><td>Reusable document scan cache, worker pool, page jobs, and frozen-build support.</td></tr>
+<tr><td><code>core/crop_images.py</code></td><td>Pure graphic detection, clustering, filtering, topic grouping, and crop creation.</td></tr>
+<tr><td><code>core/compare_crops.py</code></td><td>Cross-page graphic template matching and comparison-image creation.</td></tr>
+<tr><td><code>core/image_counts.py</code></td><td>Symmetric per-topic/document graphic count validation.</td></tr>
+<tr><td><code>core/margins.py</code></td><td>Margin normalization, page exemptions, content boxes, and margin classification.</td></tr>
+<tr><td><code>core/metadata.py</code></td><td>PDF facts, sheet classification, sample-page selection, and column detection.</td></tr>
+<tr><td><code>core/page_diff.py</code></td><td>Headless masked page comparison and missing/extra/moved graphic classification.</td></tr>
+<tr><td><code>core/templates.py</code></td><td>JSON stylesheet-template persistence, scopes, variants, anchors, and geometry.</td></tr>
+<tr><td><code>core/region_engine.py</code></td><td>Headless region text, presence, pattern, visual, exact, and scoped matching.</td></tr>
+<tr><td><code>core/text_overlap.py</code></td><td>Two-stage text collision detection and evidence generation.</td></tr>
+<tr><td><code>core/untranslated.py</code></td><td>English master inventory and untranslated-English detection.</td></tr>
+<tr><td><code>gui/__init__.py</code></td><td>Documents the presentation-layer package.</td></tr>
+<tr><td><code>gui/theme.py</code></td><td>Xylem palette, typography, contrast colors, and Treeview styling.</td></tr>
+<tr><td><code>gui/app_window.py</code></td><td>Main window, tabs, path pickers, worker orchestration, live log, and cleanup safeguards.</td></tr>
+<tr><td><code>gui/region_dialog.py</code></td><td>Interactive ROI editor, margin editor, stylesheet template manager, and region runner.</td></tr>
+<tr><td><code>gui/comparison_gallery.py</code></td><td>Review gallery for all comparison and text-check findings.</td></tr>
+<tr><td><code>gui/page_diff_view.py</code></td><td>Full-page side-by-side diff viewer.</td></tr>
+<tr><td><code>gui/metadata_tab.py</code></td><td>Metadata summary and per-page display.</td></tr>
+<tr><td><code>gui/text_checks_tab.py</code></td><td>Text-overlap and untranslated-text user interface.</td></tr>
+<tr><td><code>Tables/Table_extraction.py</code></td><td>Standalone pdfplumber table/text-box extraction and masking utility.</td></tr>
+<tr><td><code>Tables/Compare_Tables.py</code></td><td>Standalone OCR-free table-structure comparison utility with split-table handling and Excel/JSON output.</td></tr>
+<tr><td><code>templates/10_xylem.template.json</code></td><td>Reusable Xylem stylesheet regions, modes, anchors, margins, and page scopes.</td></tr>
+<tr><td><code>Document/implementation_plan.md</code></td><td>Research and implementation design notes.</td></tr>
+<tr><td><code>Document/*.docx</code></td><td>Planning, research, presentation, and project documentation artifacts.</td></tr>
+<tr><td><code>.gitignore</code></td><td>Excludes caches, generated builds, logs, inputs/outputs, temporary files, and heavy assets.</td></tr>
+</table>
+
+<h2>5. Technology Stack and Why It Is Used</h2>
+<table><tr><th>Technology</th><th>Use in this project</th><th>General reason for using it</th></tr>
+<tr><td>Python</td><td>All application and inspection logic</td><td>Rapid development and a mature ecosystem for PDFs, image processing, GUIs, and reporting.</td></tr>
+<tr><td>PyMuPDF</td><td>PDF pages, text, outlines, geometry, rendering, and drawing inspection</td><td>Fast, broad PDF API with good control over page coordinates and rendering.</td></tr>
+<tr><td>OpenCV</td><td>Template matching, morphology, connected components, QR/barcode fallback, page diff</td><td>Efficient computer-vision primitives for visual comparison and shape analysis.</td></tr>
+<tr><td>NumPy</td><td>Pixel masks, grayscale analysis, ink statistics, and numerical image operations</td><td>Fast vectorized array operations.</td></tr>
+<tr><td>Pillow</td><td>Image conversion, resizing, previews, and composites</td><td>Simple, reliable Python image manipulation and GUI integration.</td></tr>
+<tr><td>Pyzbar/ZBar</td><td>Barcode and QR decoding</td><td>Reads actual encoded data where presence-only detection is insufficient.</td></tr>
+<tr><td>pdfplumber</td><td>Secondary table detection and standalone utilities</td><td>Useful PDF text/table extraction complement to PyMuPDF.</td></tr>
+<tr><td>OpenPyXL</td><td>Excel report creation and formatting</td><td>Creates native XLSX files without Excel automation.</td></tr>
+<tr><td>CustomTkinter</td><td>Modern Xylem-branded desktop controls and tabs</td><td>Provides a more modern appearance while preserving Tkinter’s desktop portability.</td></tr>
+<tr><td>Tkinter/ttk</td><td>Native canvases, dialogs, Treeviews, scrolling, and fallback UI</td><td>Built into Python and reliable for desktop widgets and large tables.</td></tr>
+<tr><td>Threading/queues</td><td>Responsive GUI during scans and safe main-thread UI updates</td><td>Prevents long PDF operations from freezing Tkinter.</td></tr>
+<tr><td>ProcessPoolExecutor</td><td>Parallel per-page scanning for long documents</td><td>Uses multiple CPU cores for expensive PDF/image analysis.</td></tr>
+<tr><td>JSON</td><td>Settings and reusable templates</td><td>Human-readable, portable configuration format.</td></tr>
+<tr><td>PyInstaller</td><td>Standalone executable packaging</td><td>Allows distribution to users without requiring a Python installation.</td></tr>
+</table>
+
+<h2>6. Running the Project</h2>
+<pre>git clone https://github.com/giriharan007/SpotCheck--Xylem.git
+cd SpotCheck--Xylem
+pip install -r requirements.txt
+python run_gui.py</pre>
+<p>Command-line execution:</p>
+<pre>python -m core.pipeline --english "Input\\English" --translated "Input\\Translated" --output "Output"
+python -m core.barcode_qr --master "&lt;master.pdf&gt;" --target "Input\\Translated"
+python -m gui.region_dialog</pre>
+<p>Packaging:</p>
+<pre>python check_imports.py
+.\\build_exe.bat
+./build_app.sh</pre>
+
+<h2>7. Quality Verdict Rules</h2>
+<ul><li>TOC passes only when numeric topic sequences match exactly.</li><li>Barcode/QR checks pass when master and translated counts match; structural-only detection is explicitly reported.</li><li>Image comparison uses an approximately 80% pass threshold and a separate credibility floor.</li><li>Symmetric image counts pass only when both documents contain the same counts at the selected granularity.</li><li>Region verdicts depend on the selected mode and configured thresholds.</li><li>Text collisions and untranslated lines lower the final report verdict.</li><li>The final master verdict is intended to be PASS only when all required active checks pass.</li></ul>
+
+<h2>8. Engineering Observations</h2>
+<div class="note"><b>Repository consistency:</b> The committed implementation is more extensive than some older README descriptions. The pipeline currently creates additional report sheets for metadata, stylesheet results, text overlap, and untranslated text. The README also references a test file that was not present in the observed top-level tree.</div>
+<ul><li>The architecture cleanly separates headless inspection code from GUI code.</li><li>Document scanning is optimized through caching and process-level parallelism.</li><li>Visual comparison deliberately avoids comparing translated prose and language-specific code content as ordinary pixels.</li><li>The committed <code>settings.json</code> contains machine-specific Windows paths and is better treated as local configuration.</li><li>The <code>Tables/</code> scripts are auxiliary and not part of the main unified pipeline.</li><li>There is no obvious conventional automated test suite in the observed repository tree.</li></ul>
+
+<h2>9. Conclusion</h2>
+<p>SpotCheck is a specialized PDF localization and DTP quality platform rather than a simple PDF-diff script. Its main design principle is to compare the document properties that should remain invariant—structure, graphics, code presence, region placement, sheet geometry, and layout—while deliberately ignoring properties that are expected to change, such as translated prose, localized barcode data, QR URLs, and pagination caused by text reflow.</p>
+</body>
+</html>
