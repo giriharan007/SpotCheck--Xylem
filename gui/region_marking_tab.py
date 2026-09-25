@@ -1,5 +1,5 @@
 """
-gui/region_dialog.py
+gui/region_marking_tab.py
 
 CustomTkinter Multi-Region ROI Selector window.
 
@@ -291,7 +291,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
 
     A plain CTkFrame rather than a window, so it lives as a tab inside the main
     application window. RegionInspectorDialog below wraps it in a Toplevel for
-    standalone use (`python -m gui.region_dialog`).
+    standalone use (`python -m gui.region_marking_tab`).
 
     Construct it with no paths and call load() later — that is how the main
     window uses it, since the user picks the PDFs on the Inspection tab.
@@ -1210,21 +1210,22 @@ class RegionInspectorFrame(ctk.CTkFrame):
             _do_fit()
 
     def _on_tab_wheel(self, event):
-        """Smooth wheel scrolling for the tab canvas without dropped touchpad deltas."""
+        """Fast and smooth wheel scrolling for the tab canvas."""
         step = self._wheel_direction(event)
         if not step:
             return None
         delta = getattr(event, "delta", 0)
         if delta == 0:
-            delta = -120 if step > 0 else 120
+            units = step * 25
+        else:
+            self._tab_wheel_debt = getattr(self, "_tab_wheel_debt", 0.0) + delta
+            units = int(-self._tab_wheel_debt / 4.8)  # 120 delta -> 25 units
+            if units != 0:
+                self._tab_wheel_debt += units * 4.8
 
-        # Accumulate small deltas for smooth touchpad response
-        self._tab_wheel_debt = getattr(self, "_tab_wheel_debt", 0.0) + delta
-        units = int(self._tab_wheel_debt / 30.0)
         if units != 0:
-            self._tab_wheel_debt -= units * 30.0
             try:
-                self._scroll._parent_canvas.yview_scroll(-units, "units")
+                self._scroll._parent_canvas.yview_scroll(units, "units")
             except Exception:
                 pass
         return "break"
@@ -1279,7 +1280,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
             return None
         if (first, last) == (0.0, 1.0) or (step < 0 and first <= 0.0) or (step > 0 and last >= 1.0):
             return self._on_tab_wheel(event)
-        tree.yview_scroll(step, "units")
+        tree.yview_scroll(step * 3, "units")
         return "break"
 
     # ──────────────────────────────────────────────────────────
@@ -3501,7 +3502,7 @@ def open_region_inspector(parent=None, eng_pdf_path=None, tr_target_path=None, o
     The main application does NOT use this — it embeds RegionInspectorFrame as a
     tab. This remains for standalone development of the ROI tool:
 
-        python -m gui.region_dialog
+        python -m gui.region_marking_tab
     """
     eng_path = eng_pdf_path or ""
     tr_path = tr_target_path or ""

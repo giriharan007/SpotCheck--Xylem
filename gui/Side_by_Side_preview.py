@@ -1,5 +1,5 @@
 """
-gui/page_diff_view.py
+gui/Side_by_Side_preview.py
 
 Side-by-side page viewer: the master page and its translation shown side by side.
 
@@ -53,7 +53,7 @@ _RESAMPLE = getattr(Image, "Resampling", Image).BILINEAR
 FOCUS_COLOR = DYNAMIC_GREEN
 
 PAGE_WHEEL_STEP = 60
-WHEEL_COOLDOWN_SEC = 0.16
+WHEEL_COOLDOWN_SEC = 0.35
 
 # Module-level LRU cache for rendered base page images: (pdf_path, page_no, dpi) -> (PIL.Image, (pt_w, pt_h))
 _RENDER_CACHE = {}
@@ -804,39 +804,66 @@ class PageDiffWindow(ctk.CTkToplevel):
         if not step:
             return "break"
 
-        now = time.time()
-        cooldown = self._last_wheel_time.get(side, 0.0)
+        cv = self.panes[side]["canvas"]
 
-        if self.wheel_turns_page.get():
-            delta = getattr(event, "delta", 0)
-            if delta and abs(delta) < 120:
-                # Accumulate trackpad delta per side
-                self._wheel_delta_acc[side] = self._wheel_delta_acc.get(side, 0) + delta
-                if abs(self._wheel_delta_acc[side]) >= 120:
-                    acc_step = -int(self._wheel_delta_acc[side] / 120)
-                    self._wheel_delta_acc[side] = 0
-                    if now - cooldown > WHEEL_COOLDOWN_SEC:
-                        self._last_wheel_time[side] = now
-                        if self.lock_scroll.get():
-                            self._go_page(acc_step)
-                        else:
-                            self._go_page_side(side, acc_step)
-            else:
-                self._wheel_delta_acc[side] = 0
-                if now - cooldown > WHEEL_COOLDOWN_SEC:
-                    self._last_wheel_time[side] = now
-                    if self.lock_scroll.get():
-                        self._go_page(step)
-                    else:
-                        self._go_page_side(side, step)
-            return "break"
-        else:
-            # Independent vertical scroll within page
+        # If user disabled wheel page flipping, scroll strictly within the page
+        if not self.wheel_turns_page.get():
             if self.lock_scroll.get():
                 self._yview_both("scroll", step * PAGE_WHEEL_STEP, "units")
             else:
-                self.panes[side]["canvas"].yview("scroll", step * PAGE_WHEEL_STEP, "units")
+                cv.yview("scroll", step * PAGE_WHEEL_STEP, "units")
             return "break"
+
+        # Check vertical visibility of the canvas for the active side
+        try:
+            yview = cv.yview()
+        except Exception:
+            yview = (0.0, 1.0)
+
+        at_top = (yview[0] <= 0.002)
+        at_bottom = (yview[1] >= 0.998)
+
+        # 1. If scrolling down and NOT at the end of the current page, scroll within page
+        if step > 0 and not at_bottom:
+            if self.lock_scroll.get():
+                self._yview_both("scroll", step * PAGE_WHEEL_STEP, "units")
+            else:
+                cv.yview("scroll", step * PAGE_WHEEL_STEP, "units")
+            return "break"
+
+        # 2. If scrolling up and NOT at the top of the current page, scroll within page
+        if step < 0 and not at_top:
+            if self.lock_scroll.get():
+                self._yview_both("scroll", step * PAGE_WHEEL_STEP, "units")
+            else:
+                cv.yview("scroll", step * PAGE_WHEEL_STEP, "units")
+            return "break"
+
+        # 3. Only when at the end of the current page (down) or top of the current page (up):
+        # Move to next / previous page, debounced to avoid multi-page skipping
+        now = time.time()
+        cooldown = self._last_wheel_time.get(side, 0.0)
+        if now - cooldown > WHEEL_COOLDOWN_SEC:
+            self._last_wheel_time[side] = now
+            self._wheel_delta_acc[side] = 0
+            if self.lock_scroll.get():
+                self._go_page(step)
+            else:
+                self._go_page_side(side, step)
+
+            # When stepping forward, show top of new page; when stepping back, show bottom
+            target_pos = 0.0 if step > 0 else 1.0
+            def _set_pos():
+                try:
+                    if self.lock_scroll.get():
+                        self._yview_both("moveto", target_pos)
+                    else:
+                        cv.yview_moveto(target_pos)
+                except Exception:
+                    pass
+            self.after(50, _set_pos)
+
+        return "break"
 
     def _on_zoom_wheel(self, event, side):
         """Ctrl + Wheel zooms in/out."""

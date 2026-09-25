@@ -54,16 +54,10 @@ all_hiddenimports = [
     'gui',
     'gui.theme',
     'gui.app_window',
-    'gui.region_dialog',
-    'gui.comparison_gallery',
-    'gui.page_diff_view',
+    'gui.region_marking_tab',
+    'gui.Review_tab',
+    'gui.Side_by_Side_preview',
     'gui.metadata_tab',
-    # Every tab is imported inside a try/except in _build_*_tab, so a module
-    # the analysis missed would not crash the build OR the application - the
-    # tab would just quietly say it was unavailable, and the feature would be
-    # gone from the shipped exe with nothing in the log. Naming them costs
-    # nothing and removes that failure mode.
-    'gui.text_checks_tab',
 ]
 
 all_datas = []

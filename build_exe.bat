@@ -132,11 +132,10 @@ if not "!BUILD_RC!"=="0" (
         --hidden-import "core.metadata" ^
         --hidden-import "core.page_diff" ^
         --hidden-import "gui.app_window" ^
-        --hidden-import "gui.region_dialog" ^
-        --hidden-import "gui.comparison_gallery" ^
-        --hidden-import "gui.page_diff_view" ^
+        --hidden-import "gui.region_marking_tab" ^
+        --hidden-import "gui.Review_tab" ^
+        --hidden-import "gui.Side_by_Side_preview" ^
         --hidden-import "gui.metadata_tab" ^
-        --hidden-import "gui.text_checks_tab" ^
         run_gui.py >> "%BUILD_LOG%" 2>&1
     if errorlevel 1 (
         echo [ERROR] Both builds failed. See %BUILD_LOG%.

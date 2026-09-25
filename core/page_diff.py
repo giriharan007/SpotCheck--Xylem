@@ -51,7 +51,7 @@ comparison and the count check about what is even on the page. An earlier draft
 did exactly that - segmenting the render itself - and reported five phantom
 deletions on a correct page, because the two pages' blobs merged differently.
 
-Nothing here imports a GUI toolkit; gui/page_diff_view.py draws the result.
+Nothing here imports a GUI toolkit; gui/Side_by_Side_preview.py draws the result.
 """
 
 import os

@@ -4,7 +4,7 @@ core/region_engine.py
 Region (ROI) extraction, similarity scoring and side-by-side comparison engine.
 
 Pure backend: no Tkinter / CustomTkinter dependency. Everything here can be
-driven from a script, a test, or the GUI dialog in gui/region_dialog.py.
+driven from a script, a test, or the GUI tab in gui/region_marking_tab.py.
 
 Provides:
   - get_page_count / render_pdf_page_image : PDF page access & rendering

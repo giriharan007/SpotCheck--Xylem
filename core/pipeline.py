@@ -597,6 +597,193 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
         print("ERROR: No translated PDF files found to inspect!")
         return
 
+    # 1b. Compare Table of Contents (TOC) FIRST before any other feature comparison
+    print("=" * 80)
+    print("TABLE OF CONTENTS (TOC) PRE-CHECK")
+    print("=" * 80)
+    say(0.01, "Checking Table of Contents")
+    source_toc_numerics = TOC.extract_toc_numerics(source_pdf_path)
+    source_count = len(source_toc_numerics)
+    print(f"Master English Source : {os.path.basename(source_pdf_path)} ({source_count} TOC topics)")
+
+    initial_toc_checks = {}
+    any_count_matched = False
+    for tr_path in translated_files:
+        tr_filename = os.path.basename(tr_path)
+        try:
+            target_toc_numerics = TOC.extract_toc_numerics(tr_path)
+            toc_res = TOC.compare_toc_numerics(source_toc_numerics, target_toc_numerics)
+            toc_res["english_pdf"] = os.path.basename(source_pdf_path)
+            toc_res["translated_pdf"] = tr_filename
+        except Exception as e:
+            target_toc_numerics = []
+            toc_res = {
+                "english_pdf": os.path.basename(source_pdf_path),
+                "translated_pdf": tr_filename,
+                "diff_msg": str(e),
+                "status": "FAIL",
+                "source_numerics_str": ", ".join(source_toc_numerics),
+                "target_numerics_str": "",
+                "english_topic_count": source_count,
+                "translated_topic_count": 0,
+                "missing_topics": list(source_toc_numerics),
+                "extra_topics": [],
+            }
+        target_count = len(target_toc_numerics)
+        counts_match = (source_count == target_count)
+        toc_matched = counts_match and (toc_res.get("status") == "PASS")
+        if toc_matched:
+            any_count_matched = True
+            print(f"  [TOC MATCH] {tr_filename}: Both have {source_count} topics and TOC matches.")
+        else:
+            reason = toc_res.get("diff_msg") or ("Count mismatch" if not counts_match else "Content mismatch")
+            print(f"  [TOC NOT MATCHED] {tr_filename}: {reason}. Skipping QR/Barcode, cropping, images, and text checks.")
+        initial_toc_checks[tr_path] = (target_toc_numerics, toc_res, toc_matched)
+    print("-" * 80)
+
+    # If no translated file has matching TOC, break immediately in the beginning
+    if not any_count_matched:
+        print()
+        print("!" * 80)
+        print("BREAKING AT THE BEGINNING: TOC IS NOT MATCHED!")
+        print("TOC is not matched. All further checks (Barcode & QR, cropping images,")
+        print("image comparison, text collision, etc.) are SKIPPED.")
+        print("!" * 80)
+        print()
+
+        say(0.95, "TOC not matched - writing report")
+        total_seconds = time.perf_counter() - run_started
+        timing_rows = [{
+            "filename": os.path.basename(source_pdf_path),
+            "role": "master",
+            "seconds": 0.0,
+        }]
+
+        toc_results = []
+        bc_qr_results = []
+        count_results = []
+        img_results_summary = []
+        img_crop_details_list = []
+        region_results = []
+        overlap_results = []
+        untranslated_results = []
+        overflow_results = []
+        metadata_rows = []
+
+        for idx, tr_path in enumerate(translated_files, start=1):
+            tr_filename = os.path.basename(tr_path)
+            target_toc_numerics, toc_res, counts_match = initial_toc_checks[tr_path]
+            toc_res["status"] = "FAIL"
+            toc_res["diff_msg"] = (
+                f"TOC count mismatch: Master has {source_count} topic(s), "
+                f"Translated has {len(target_toc_numerics)} topic(s). TOC is not matched."
+            )
+            toc_results.append(toc_res)
+
+            bc_res = {
+                "english_pdf": os.path.basename(source_pdf_path),
+                "translated_pdf": tr_filename,
+                "master_barcode_count": 0, "target_barcode_count": 0,
+                "master_pages_barcode": [], "target_pages_barcode": [],
+                "barcode_status": "SKIPPED",
+                "master_qr_count": 0, "target_qr_count": 0,
+                "master_pages_qr": [], "target_pages_qr": [],
+                "qr_status": "SKIPPED",
+                "overall_verdict": "SKIPPED",
+            }
+            bc_qr_results.append(bc_res)
+
+            img_res = {
+                "trans_name": tr_filename,
+                "total_crops": 0,
+                "matched_crops": 0,
+                "match_pct": 0.0,
+                "extra_crops": 0,
+                "overall_status": "SKIPPED",
+                "crop_details": [],
+            }
+            img_results_summary.append(img_res)
+
+            cnt_res = {
+                "english_pdf": os.path.basename(source_pdf_path),
+                "translated_pdf": tr_filename,
+                "granularity": "SKIPPED",
+                "master_total": 0,
+                "target_total": 0,
+                "mismatched_topics": [],
+                "rows": [],
+                "overall_verdict": "SKIPPED",
+                "status": "SKIPPED (TOC not matched)",
+            }
+            count_results.append(cnt_res)
+
+            timing_rows.append({
+                "filename": tr_filename,
+                "role": "translation",
+                "seconds": 0.0,
+            })
+
+            doc_payload = {
+                "idx": idx,
+                "filename": tr_filename,
+                "english_pdf": os.path.basename(source_pdf_path),
+                "toc_res": toc_res,
+                "bc_res": None,
+                "cnt_res": None,
+                "img_res": None,
+                "img_crop_details": [],
+                "region_results": [],
+                "overlap_results": [],
+                "untranslated_results": [],
+                "overflow_results": [],
+                "metadata_rows": [],
+                "seconds": 0.0,
+            }
+
+            if on_doc_complete:
+                try:
+                    on_doc_complete(doc_payload)
+                except Exception as ex:
+                    safe_print(f"  [WARN] on_doc_complete error: {ex}")
+
+        unified_report_path = os.path.join(output_dir, "PDF_Quality_Inspection_Report.xlsx")
+        os.makedirs(output_dir, exist_ok=True)
+        generate_unified_excel_report(
+            toc_results,
+            bc_qr_results,
+            img_results_summary,
+            img_crop_details_list,
+            count_results,
+            unified_report_path,
+            run_margins=active_margins,
+            metadata_rows=metadata_rows,
+            region_results=region_results,
+            region_note="TOC not matched - inspection stopped at beginning.",
+            overlap_results=overlap_results,
+            untranslated_results=untranslated_results,
+            timing_rows=timing_rows,
+            total_seconds=round(total_seconds, 1),
+        )
+
+        say(1.0, "TOC is not matched - inspection stopped")
+        return {
+            "english_pdf": os.path.basename(source_pdf_path),
+            "report_path": unified_report_path,
+            "toc_results": toc_results,
+            "bc_qr_results": bc_qr_results,
+            "img_results_summary": img_results_summary,
+            "img_crop_details": img_crop_details_list,
+            "count_results": count_results,
+            "region_results": region_results,
+            "region_note": "TOC not matched - inspection stopped at beginning.",
+            "metadata_rows": metadata_rows,
+            "overlap_results": overlap_results,
+            "untranslated_results": untranslated_results,
+            "overflow_results": overflow_results,
+            "timing_rows": timing_rows,
+            "total_seconds": round(total_seconds, 1),
+        }
+
     # 2. Extract Master Source Models & Crop Graphic Elements
     #
     # The master is scanned once here - barcodes, QR codes and tables - and the
@@ -609,8 +796,6 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     DocScan.forget()
     DocScan.prepare(source_pdf_path, tables=False, codes=True,
                     progress=stage_progress(0.01, 0.12, "Scanning the master"))
-
-    source_toc_numerics = TOC.extract_toc_numerics(source_pdf_path)
 
     # Crop pure graphic elements from Master English PDF (also populates ImageCounts model)
     eng_crops_out_dir = os.path.join(output_dir, "Cropped_Images")
@@ -708,15 +893,90 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
         doc_t0 = time.perf_counter()
 
         # 1. TOC check
-        try:
-            target_toc_numerics = TOC.extract_toc_numerics(tr_path)
-            toc_res = TOC.compare_toc_numerics(source_toc_numerics, target_toc_numerics)
-            toc_res["english_pdf"] = os.path.basename(source_pdf_path)
-            toc_res["translated_pdf"] = tr_filename
-        except Exception as e:
-            target_toc_numerics = []
-            toc_res = {"english_pdf": os.path.basename(source_pdf_path), "translated_pdf": tr_filename,
-                       "diff_msg": str(e), "status": "FAIL", "target_numerics_str": ""}
+        if tr_path in initial_toc_checks:
+            target_toc_numerics, toc_res, toc_matched = initial_toc_checks[tr_path]
+        else:
+            try:
+                target_toc_numerics = TOC.extract_toc_numerics(tr_path)
+                toc_res = TOC.compare_toc_numerics(source_toc_numerics, target_toc_numerics)
+                toc_res["english_pdf"] = os.path.basename(source_pdf_path)
+                toc_res["translated_pdf"] = tr_filename
+            except Exception as e:
+                target_toc_numerics = []
+                toc_res = {"english_pdf": os.path.basename(source_pdf_path), "translated_pdf": tr_filename,
+                           "diff_msg": str(e), "status": "FAIL", "target_numerics_str": ""}
+            counts_match = (len(source_toc_numerics) == len(target_toc_numerics))
+            toc_matched = counts_match and (toc_res.get("status") == "PASS")
+
+        if not toc_matched:
+            source_cnt = len(source_toc_numerics)
+            target_cnt = len(target_toc_numerics)
+            toc_res["status"] = "FAIL"
+            if not toc_res.get("diff_msg") or toc_res.get("diff_msg") == "PASS":
+                toc_res["diff_msg"] = (
+                    f"TOC mismatch: Master has {source_cnt} topic(s), "
+                    f"Translated has {target_cnt} topic(s). TOC is not matched."
+                )
+            safe_print(
+                f"  [{idx:02d}/{num_files:02d}] {tr_filename[:28]:<28} | "
+                f"TOC: FAIL | "
+                f"BREAKING: TOC not matched ({toc_res['diff_msg']}). "
+                f"QR/Barcode and further steps SKIPPED."
+            )
+            elapsed = time.perf_counter() - doc_t0
+            bc_res = {
+                "english_pdf": os.path.basename(source_pdf_path),
+                "translated_pdf": tr_filename,
+                "master_barcode_count": 0, "target_barcode_count": 0,
+                "master_pages_barcode": [], "target_pages_barcode": [],
+                "barcode_status": "SKIPPED",
+                "master_qr_count": 0, "target_qr_count": 0,
+                "master_pages_qr": [], "target_pages_qr": [],
+                "qr_status": "SKIPPED",
+                "overall_verdict": "SKIPPED",
+            }
+            img_res = {
+                "trans_name": tr_filename,
+                "total_crops": 0,
+                "matched_crops": 0,
+                "match_pct": 0.0,
+                "extra_crops": 0,
+                "overall_status": "SKIPPED",
+                "crop_details": [],
+            }
+            cnt_res = {
+                "english_pdf": os.path.basename(source_pdf_path),
+                "translated_pdf": tr_filename,
+                "granularity": "SKIPPED",
+                "master_total": 0,
+                "target_total": 0,
+                "mismatched_topics": [],
+                "rows": [],
+                "overall_verdict": "SKIPPED",
+                "status": "SKIPPED (TOC not matched)",
+            }
+            doc_payload = {
+                "idx": idx,
+                "filename": tr_filename,
+                "english_pdf": os.path.basename(source_pdf_path),
+                "toc_res": toc_res,
+                "bc_res": None,
+                "cnt_res": None,
+                "img_res": None,
+                "img_crop_details": [],
+                "region_results": [],
+                "overlap_results": [],
+                "untranslated_results": [],
+                "overflow_results": [],
+                "metadata_rows": [],
+                "seconds": round(elapsed, 1),
+            }
+            if on_doc_complete:
+                try:
+                    on_doc_complete(doc_payload)
+                except Exception as ex:
+                    safe_print(f"  [WARN] on_doc_complete error: {ex}")
+            return doc_payload
 
         # 2. Barcode & QR Code Count Check
         time.sleep(0.01)

@@ -33,6 +33,16 @@ def extract_toc_numerics(pdf_path):
     finally:
         doc.close()
 
+    if not numerics:
+        try:
+            printed = topics_from_text(pdf_path)
+            for t in printed:
+                m = TOPIC_CODE.match(t.get("title", ""))
+                if m:
+                    numerics.append(m.group(1))
+        except Exception:
+            pass
+
     return numerics
 
 

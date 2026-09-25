@@ -42,11 +42,10 @@ MODULES = [
     "core.margin_overflow",
     "gui.theme",
     "gui.app_window",
-    "gui.region_dialog",
-    "gui.comparison_gallery",
-    "gui.page_diff_view",
+    "gui.region_marking_tab",
+    "gui.Review_tab",
+    "gui.Side_by_Side_preview",
     "gui.metadata_tab",
-    "gui.text_checks_tab",
 ]
 
 # Third-party packages, checked separately so a missing dependency is reported

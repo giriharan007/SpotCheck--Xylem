@@ -4,7 +4,7 @@ gui/app_window.py
 Main SpotCheck desktop window.
 
 Presentation layer only: the inspection itself is executed by core.pipeline on a
-worker thread, and the Region Inspector lives in gui.region_dialog. All colors
+worker thread, and the Region Inspector lives in gui.region_marking_tab. All colors
 and fonts come from gui.theme, so the two windows can no longer drift apart.
 """
 
@@ -187,7 +187,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         self.last_run_results = None
 
         # With CustomTkinter present, the application is a two-tab window:
-        # "Inspection" (this file) and "Region Inspector" (gui.region_dialog),
+        # "Inspection" (this file) and "Region Inspector" (gui.region_marking_tab),
         # both children of the same window rather than separate top-levels.
         # The plain-Tk fallback has no tabs and no inspector, since the
         # inspector itself requires CustomTkinter.
@@ -1395,8 +1395,8 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         no preview showing, is not a reason to abandon the clear.
         """
         for tab in (getattr(self, "comparison_gallery", None),
-                    getattr(self, "text_checks_tab", None),
-                    getattr(self, "region_tab", None)):
+                    getattr(self, "metadata_tab", None),
+                    getattr(self, "region_inspector", None)):
             if tab is None:
                 continue
             for attr in ("det_image", "crop_thumb_lbl", "region_preview_lbl"):
@@ -1583,7 +1583,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
         _sync_region_inspector() hands the configured paths over via load().
         """
         try:
-            from gui.region_dialog import RegionInspectorFrame
+            from gui.region_marking_tab import RegionInspectorFrame
             self.region_inspector = RegionInspectorFrame(
                 self._tab_region, on_results=self._on_region_results,
                 on_templates_changed=self._on_templates_changed,
@@ -1724,32 +1724,8 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             print(f"[WARN] Could not load master into the Region Inspector: {e}")
 
     def _build_text_checks_tab(self):
-        """
-        Colliding text, and English left in a translation.
-
-        Neither question is about a place on the page, so neither belongs in the
-        region stylesheet: a collision happens wherever a line runs long, and a
-        missed segment is wherever the translator's eye slipped.
-        """
-        try:
-            from gui.text_checks_tab import TextChecksFrame
-            self.text_checks_tab = TextChecksFrame(
-                self._tab_text_checks,
-                get_documents=self._text_check_documents,
-                get_margins=self._active_margins,
-                get_output_dir=lambda: (self.out_dir_var.get() or "").strip(),
-                on_results=self._on_text_check_results,
-            )
-            self.text_checks_tab.pack(fill="both", expand=True)
-        except Exception as e:
-            tb = traceback.format_exc()
-            print(f"[ERROR] Failed to build Text Checks tab: {e}\n{tb}")
-            self.text_checks_tab = None
-            ctk.CTkLabel(
-                self._tab_text_checks,
-                text=f"Text checks unavailable:\n{e}",
-                font=self._get_font(12), text_color=VIVID_MAGENTA, justify="left",
-            ).pack(padx=20, pady=20, anchor="w")
+        """No longer used — text collision and untranslated checks are viewed inside the Review tab."""
+        self.text_checks_tab = None
 
     def _text_check_documents(self):
         """(master, [translations]) - the overlap check reads both sides."""
@@ -1822,7 +1798,7 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
     def _build_comparisons_tab(self):
         """Embed the comparison-image gallery as a third tab."""
         try:
-            from gui.comparison_gallery import ComparisonGalleryFrame
+            from gui.Review_tab import ComparisonGalleryFrame
             self.comparison_gallery = ComparisonGalleryFrame(
                 self._tab_comparisons,
                 is_active=lambda: self.tabview is not None

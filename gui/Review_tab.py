@@ -1,5 +1,5 @@
 """
-gui/comparison_gallery.py
+gui/Review_tab.py
 
 In-app viewer for the side-by-side comparison images.
 
@@ -32,7 +32,7 @@ Sources that feed it:
   - Overlap / Not Translated : the text checks
 
 A result that needs a closer look opens both whole pages side by side through
-gui/page_diff_view.py, which is where "what actually differs" gets answered.
+gui/Side_by_Side_preview.py, which is where "what actually differs" gets answered.
 """
 
 import os
@@ -411,8 +411,10 @@ def cards_from_barcode(bc_qr_results):
     """
     rows = []
     for r in bc_qr_results or []:
-        m, t = r.get("master_barcode_count", 0), r.get("target_barcode_count", 0)
         status = r.get("barcode_status", "")
+        if status in ("SKIPPED", "N/A", "") or r.get("overall_verdict") == "SKIPPED":
+            continue
+        m, t = r.get("master_barcode_count", 0), r.get("target_barcode_count", 0)
         detail = (f"Barcodes — {status}\n"
                   f"    master page(s): {_pages_str(r.get('master_pages_barcode'))}\n"
                   f"    translated page(s): {_pages_str(r.get('target_pages_barcode'))}")
@@ -440,8 +442,10 @@ def cards_from_qr(bc_qr_results):
     """The QR-CODE count check, on its own - one row per translated document."""
     rows = []
     for r in bc_qr_results or []:
-        m, t = r.get("master_qr_count", 0), r.get("target_qr_count", 0)
         status = r.get("qr_status", "")
+        if status in ("SKIPPED", "N/A", "") or r.get("overall_verdict") == "SKIPPED":
+            continue
+        m, t = r.get("master_qr_count", 0), r.get("target_qr_count", 0)
         detail = (f"QR codes — {status}\n"
                   f"    master page(s): {_pages_str(r.get('master_pages_qr'))}\n"
                   f"    translated page(s): {_pages_str(r.get('target_pages_qr'))}")
@@ -1507,7 +1511,7 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
             except Exception:
                 margins = None
 
-        from gui.page_diff_view import open_page_diff
+        from gui.Side_by_Side_preview import open_page_diff
         _win, err = open_page_diff(
             self.winfo_toplevel(),
             master_pdf, eng_page,
