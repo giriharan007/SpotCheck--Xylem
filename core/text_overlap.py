@@ -140,7 +140,13 @@ def _candidates(page, clip=None):
             if overlap < MIN_OVERLAP_PT2:
                 continue
             smaller = min(_area(ab), _area(bb)) or 1e-6
-            if overlap / smaller >= MIN_OVERLAP_FRACTION:
+            w_ov = max(0.0, min(ab[2], bb[2]) - max(ab[0], bb[0]))
+            h_ov = max(0.0, min(ab[3], bb[3]) - max(ab[1], bb[1]))
+            # Significant if:
+            # - fraction >= MIN_OVERLAP_FRACTION (0.20)
+            # - cross-collision with rotated/vertical text (w_ov >= 6.0 and h_ov >= 6.0)
+            # - substantial overlap area (>= 25.0 pt2)
+            if (overlap / smaller >= MIN_OVERLAP_FRACTION) or (w_ov >= 6.0 and h_ov >= 6.0) or (overlap >= 25.0):
                 hits.append((a, b, overlap))
     return hits
 
@@ -169,14 +175,36 @@ def _glyphs_collide(page, a_bbox, b_bbox):
     if ov_bot <= ov_top:
         return False, "the boxes do not overlap vertically"
 
-    # To see daylight between the two lines, we must see enough of the lines
-    # themselves. Looking only at [ov_top, ov_bot] is fatal when one line's font
-    # bbox reaches past its ink: the crop then contains only one line's ink,
-    # sees no blank lines inside that single line, and reports collision.
-    # Expanding slightly into both spans ensures both lines are properly sampled.
-    pad_y = 5.0
-    scan_top = max(min(a_bbox[1], b_bbox[1]), ov_top - pad_y)
-    scan_bot = min(max(a_bbox[3], b_bbox[3]), ov_bot + pad_y)
+    ha = a_bbox[3] - a_bbox[1]
+    hb = b_bbox[3] - b_bbox[1]
+    v_overlap = ov_bot - ov_top
+    h_overlap = x1 - x0
+
+    # 1. Direct superimposition on the same line (e.g. topic 7.6):
+    # Two lines share >= 50% of vertical height and >= 8pt horizontal span.
+    # They occupy the same line, so vertical daylight checking between lines is inapplicable.
+    if v_overlap >= 0.50 * min(ha, hb) and h_overlap >= 8.0:
+        rows_ov, _ = _ink_rows(page, (x0, ov_top, x1, ov_bot))
+        if rows_ov.size and rows_ov.max() > 0:
+            return True, f"direct superimposition ({v_overlap:.1f} pt vertical overlap on same line)"
+
+    # 2. Cross collision (horizontal text crossing vertical/rotated text, e.g. topic 8.2):
+    is_cross = ((a_bbox[2] - a_bbox[0] > 2.0 * ha and hb > 1.5 * (b_bbox[2] - b_bbox[0])) or
+                (b_bbox[2] - b_bbox[0] > 2.0 * hb and ha > 1.5 * (a_bbox[2] - a_bbox[0])))
+    if is_cross and h_overlap >= 6.0 and v_overlap >= 6.0:
+        rows_ov, _ = _ink_rows(page, (x0, ov_top, x1, ov_bot))
+        if rows_ov.size and rows_ov.max() > 0:
+            return True, f"cross collision ({h_overlap:.1f}x{v_overlap:.1f} pt intersection with rotated/vertical text)"
+
+    # 3. Stacked lines (one line above another on tight leading):
+    # To check if there is daylight BETWEEN line A and line B, the sample should be bounded by
+    # the centers of the two lines, never expanding into whitespace beyond them.
+    if a_bbox[1] <= b_bbox[1]:
+        scan_top = max(a_bbox[1], ov_top - 2.0)
+        scan_bot = min(b_bbox[3], ov_bot + 2.0)
+    else:
+        scan_top = max(b_bbox[1], ov_top - 2.0)
+        scan_bot = min(a_bbox[3], ov_bot + 2.0)
 
     rows, pix_w = _ink_rows(page, (x0, scan_top, x1, scan_bot))
     if not rows.size or not rows.max():
@@ -193,12 +221,14 @@ def _glyphs_collide(page, a_bbox, b_bbox):
         return False, (f"{gap_pt:.2f} pt of white separates the two lines - "
                        f"the boxes overlap, the letters do not")
 
-    # Low-ink runs (anti-aliasing fringe where rows have <= 3% ink)
-    low_ink_run = _longest_run_below(interior, threshold=max(2, int(pix_w * 0.03)))
-    low_gap_pt = low_ink_run / (INK_DPI / 72.0)
-    if low_gap_pt >= 1.0:
-        return False, (f"{low_gap_pt:.2f} pt of daylight separates the lines - "
-                       f"only antialiasing fringe in between")
+    # Anti-aliasing fringe test: gap must be in the interior (not edge tails)
+    if len(interior) >= 6:
+        mid_interior = interior[2:-2]
+        low_ink_run = _longest_run_below(mid_interior, threshold=max(2, int(pix_w * 0.03)))
+        low_gap_pt = low_ink_run / (INK_DPI / 72.0)
+        if low_gap_pt >= 1.0:
+            return False, (f"{low_gap_pt:.2f} pt of daylight separates the lines - "
+                           f"only antialiasing fringe in between")
 
     return True, ("no white between them (largest gap "
                   f"{gap_pt:.2f} pt) - the ink is printed through itself")
