@@ -199,12 +199,10 @@ def _glyphs_collide(page, a_bbox, b_bbox):
     # 3. Stacked lines (one line above another on tight leading):
     # To check if there is daylight BETWEEN line A and line B, the sample should be bounded by
     # the centers of the two lines, never expanding into whitespace beyond them.
-    if a_bbox[1] <= b_bbox[1]:
-        scan_top = max(a_bbox[1], ov_top - 2.0)
-        scan_bot = min(b_bbox[3], ov_bot + 2.0)
-    else:
-        scan_top = max(b_bbox[1], ov_top - 2.0)
-        scan_bot = min(a_bbox[3], ov_bot + 2.0)
+    mid_a = (a_bbox[1] + a_bbox[3]) / 2.0
+    mid_b = (b_bbox[1] + b_bbox[3]) / 2.0
+    scan_top = min(mid_a, mid_b)
+    scan_bot = max(mid_a, mid_b)
 
     rows, pix_w = _ink_rows(page, (x0, scan_top, x1, scan_bot))
     if not rows.size or not rows.max():

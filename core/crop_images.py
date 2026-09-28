@@ -741,7 +741,7 @@ MIN_FURNITURE_SPAN = 0.25
 # A cluster made this much of long straight strokes is ruling, not artwork.
 # A table cell outline measures 1.0; a hazard triangle, whose sides are
 # diagonal, measures 0; the densest line drawing in the manual measures 0.42.
-RULE_ONLY_FRACTION = 0.85
+RULE_ONLY_FRACTION = 0.92
 
 # ...and for a small cluster, where a partial cell border is common. Measured:
 # leftover cell fragment 564pt2 at 0.80, cover barcode 2958pt2 at 0.64, hazard
@@ -766,7 +766,7 @@ RULING_MIN_WIDTH_FRAC = 0.55
 # or a boxed figure always carries something that is not a rule - a logo, a
 # curve, a symbol - and lands well below this even when it reads as heavily
 # ruled overall.
-RULE_PURE = 0.85
+RULE_PURE = 0.92
 
 # Narrower than this on its shorter side, a rule-dominated crop is a strip of
 # ruling or a leader line, not a figure. Genuine small symbols are not ruled at
@@ -1102,6 +1102,19 @@ def ink_clusters(fitz_page, table_rects=None, gap_pt=CLUSTER_GAP_PT, dpi=INK_DPI
     out of a table.
     """
     mask, scale = _ink_mask(fitz_page, dpi=dpi)
+
+    # Remove narrow edge-anchored furniture (such as language thumb tabs and crop marks)
+    # from the ink mask BEFORE dilation, so the clustering gap does not bridge edge
+    # furniture directly into adjacent figures or charts.
+    pw = fitz_page.rect.width
+    touch_px = int(round(page_margins.EDGE_TOUCH * scale))
+    max_w_px = int(round(pw * EDGE_ARTIFACT_MAX_WIDTH * scale))
+    cnt, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    for i in range(1, cnt):
+        x, y, w, h, _ = stats[i]
+        if w <= max_w_px and (x <= touch_px or (x + w) >= (mask.shape[1] - touch_px)):
+            mask[labels == i] = 0
+
     rule_px = max(3, int(round(RULE_MIN_LENGTH_PT * scale)))
 
     # Where the ruled regions are, measured before anything is removed. These
@@ -1154,12 +1167,28 @@ def ink_clusters(fitz_page, table_rects=None, gap_pt=CLUSTER_GAP_PT, dpi=INK_DPI
         horiz = _row_dividers(sub, rule_px)
         if horiz is None:
             continue
+
+        # If non-rule artwork (curves in a chart, schematic lines) crosses these
+        # horizontal rules, the region is an illustration / coordinate grid plot,
+        # NOT a table dividing independent rows of icons. Slicing it would break
+        # the graph curve into ribbons.
+        h_rules = cv2.morphologyEx(sub, cv2.MORPH_OPEN,
+                                   cv2.getStructuringElement(cv2.MORPH_RECT, (rule_px, 1)))
+        v_rules = cv2.morphologyEx(sub, cv2.MORPH_OPEN,
+                                   cv2.getStructuringElement(cv2.MORPH_RECT, (1, rule_px)))
+        rules = cv2.bitwise_or(h_rules, v_rules)
+        non_rules = cv2.bitwise_and(sub, cv2.bitwise_not(rules))
+        dil_div = cv2.dilate(horiz, np.ones((3, 3), np.uint8))
+        crossings = cv2.bitwise_and(dil_div, non_rules)
+        cross_cnt = int((crossings > 0).sum())
+        non_rule_cnt = int((non_rules > 0).sum())
+        ratio = cross_cnt / float(non_rule_cnt) if non_rule_cnt else 0.0
+        if cross_cnt > 20 and ratio > 0.03:
+            continue
+
         # Just wide enough to cover the rule and its anti-aliased edge, so a
         # cluster cannot span it and no icon loses more than a pixel.
         thin = cv2.dilate(horiz, np.ones((3, 1), np.uint8))
-        region_slice = mask[ry0:ry1, rx0:rx1]
-        mask[ry0:ry1, rx0:rx1] = cv2.bitwise_and(region_slice,
-                                                 cv2.bitwise_not(thin))
         np.maximum(barrier_page[ry0:ry1, rx0:rx1], thin,
                    out=barrier_page[ry0:ry1, rx0:rx1])
 

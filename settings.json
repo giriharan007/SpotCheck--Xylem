@@ -1,7 +1,7 @@
 {
-  "english_pdf": "C:\\Xylem Project\\SpotCheck\\Input\\Batch-4\\90003501_7.0_en-US_2026-04_PL.9X6MV 1.pdf",
-  "translated_dir": "C:\\Xylem Project\\SpotCheck\\Input\\Batch-4",
-  "output_dir": "C:\\Xylem Project\\SpotCheck\\Input\\Batch-4\\SpotCheck_Output",
+  "english_pdf": "C:\\Xylem Project\\SpotCheck\\Input\\884318_10.0_en-US_2025-06_TS.N3001.pdf",
+  "translated_dir": "C:\\Xylem Project\\SpotCheck\\Input",
+  "output_dir": "C:\\Xylem Project\\SpotCheck\\Input\\SpotCheck_Output",
   "template": "10_xylem_A4_1c_single",
   "margins": {
     "header": 37.0,

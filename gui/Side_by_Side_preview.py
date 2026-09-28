@@ -27,9 +27,9 @@ import tkinter as tk
 from PIL import Image, ImageTk
 
 try:
-    import fitz
-except ImportError:
     import pymupdf as fitz
+except ImportError:
+    import fitz
 
 from gui import theme
 from gui.theme import (
