@@ -1,5 +1,5 @@
 import pdfplumber
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
 
 
@@ -7,13 +7,18 @@ from pathlib import Path
 # CONFIGURATION
 # ============================================================
 
-PDF_PATH = r"C:\Xylem Project\SpotCheck\Input\English\894387_5.0_en-US_2026-04_IOM.Start350.pdf"
-OUTPUT_DIR = r"C:\Xylem Project\SpotCheck\Output\Table images\English"
+PDF_PATH = r"C:\Xylem Project\SpotCheck\Input\Batch-6\887192_19.0_el-GR_2026-07_IOM.N3001.pdf"
+OUTPUT_DIR = r"C:\Xylem Project\SpotCheck\Input\Batch-6\Table extraction gr"
 
 DPI = 100
 PADDING = 3
 
 BG_COLOR = (255, 255, 255)
+
+# Label settings (consecutive numbering across the whole PDF)
+LABEL_COLOR = (200, 0, 0)
+LABEL_FONT_SIZE = 14
+DRAW_OUTLINE = True
 
 
 # ============================================================
@@ -98,6 +103,44 @@ def get_text_in_bbox(page, bbox):
         return text or ""
     except Exception:
         return ""
+
+
+# ============================================================
+# LABEL HELPERS
+# ============================================================
+
+def load_font(size):
+    for name in ("arialbd.ttf", "arial.ttf", "DejaVuSans-Bold.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def draw_label(draw, font, text, px0, ptop, px1, pbottom):
+    """
+    Draw 'Table N' tag just above the region (or inside its top-left
+    corner if there is no room above), plus an optional thin outline.
+    """
+    if DRAW_OUTLINE:
+        draw.rectangle((px0, ptop, px1, pbottom), outline=LABEL_COLOR, width=1)
+
+    left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+    tw, th = right - left, bottom - top
+    pad = 3
+    box_h = th + pad * 2
+
+    y = ptop - box_h - 1
+    if y < 0:
+        y = ptop + 1
+
+    draw.rectangle(
+        (px0, y, px0 + tw + pad * 2, y + box_h),
+        fill=(255, 255, 255),
+        outline=LABEL_COLOR,
+    )
+    draw.text((px0 + pad - left, y + pad - top), text, fill=LABEL_COLOR, font=font)
 
 
 # ============================================================
@@ -388,6 +431,10 @@ def mask_pdf_tables(pdf_path,out_dir,dpi=100,padding=3,bg_color=(255, 255, 255),
     )
 
     scale = dpi / 72.0
+    font = load_font(LABEL_FONT_SIZE)
+
+    # Consecutive counter across the entire PDF
+    table_counter = 0
 
     print("=" * 70)
     print("TABLE / TEXT-BOX EXTRACTION")
@@ -442,9 +489,10 @@ def mask_pdf_tables(pdf_path,out_dir,dpi=100,padding=3,bg_color=(255, 255, 255),
                 page_image.size,
                 bg_color
             )
+            draw = ImageDraw.Draw(masked)
 
             # ------------------------------------------------
-            # Copy detected regions
+            # Copy detected regions + label them
             # ------------------------------------------------
 
             for region in regions:
@@ -489,6 +537,12 @@ def mask_pdf_tables(pdf_path,out_dir,dpi=100,padding=3,bg_color=(255, 255, 255),
                     (px0, ptop)
                 )
 
+                # Consecutive label: Table 1, Table 2, ... Table n
+                table_counter += 1
+                region["label"] = f"Table {table_counter}"
+
+                draw_label(draw, font, region["label"], px0, ptop, px1, pbottom)
+
             # ------------------------------------------------
             # Save
             # ------------------------------------------------
@@ -514,17 +568,14 @@ def mask_pdf_tables(pdf_path,out_dir,dpi=100,padding=3,bg_color=(255, 255, 255),
             )
 
             # Print detection information
-            for i, region in enumerate(
-                regions,
-                start=1
-            ):
+            for region in regions:
 
                 bbox = region["bbox"]
 
                 preview = region["text"][:80].encode('ascii', 'ignore').decode('ascii')
 
                 print(
-                    f"    Region {i}: "
+                    f"    {region['label']}: "
                     f"{region['type']} "
                     f"{bbox} "
                     f"| {preview}"
@@ -532,7 +583,7 @@ def mask_pdf_tables(pdf_path,out_dir,dpi=100,padding=3,bg_color=(255, 255, 255),
 
     print()
     print("=" * 70)
-    print("COMPLETED")
+    print(f"COMPLETED - {table_counter} table(s) labeled in total")
     print("=" * 70)
 
 

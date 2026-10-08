@@ -40,6 +40,7 @@ from core import region_engine as RegionEngine
 from core import text_overlap as TextOverlap
 from core import untranslated as Untranslated
 from core import margin_overflow as MarginOverflow
+from core import links as Links
 
 
 # ============================================================
@@ -82,19 +83,19 @@ def generate_unified_excel_report(
     overlap_results=None,
     untranslated_results=None,
     timing_rows=None,
-    total_seconds=None
+    total_seconds=None,
+    link_results=None
 ):
     """
-    Generate ONE single unified Excel report containing 5 worksheets:
+    Generate ONE single unified Excel report containing worksheets:
       1. Overview    : Executive overview of all sub-check verdicts and Master Verdict
       2. TOC         : Topic numerics, missing topics, and Overall status
-      3. Barcode & QR: Barcode & QR code count and presence matching
-      4. Images      : Crop-by-crop visual graphic matching
-      5. Image Counts: Symmetric per-topic counts - catches a graphic added to or
-                       missing from a translation, which one-directional crop
-                       matching cannot see
-      6. Text Overlap: Text printed through other text, in any document
-      7. Not Translated: English left behind in a translation
+      3. Links       : Hyperlink consistency (URLs, anchor texts, pages, internal/external)
+      4. Barcode & QR: Barcode & QR code count and presence matching
+      5. Images      : Crop-by-crop visual graphic matching
+      6. Image Counts: Symmetric per-topic counts
+      7. Text Overlap: Text printed through other text, in any document
+      8. Not Translated: English left behind in a translation
     """
     overlap_results = overlap_results or []
     untranslated_results = untranslated_results or []
@@ -134,6 +135,7 @@ def generate_unified_excel_report(
         "English Master PDF",
         "Translated PDF",
         "TOC",
+        "Links",
         "Images",
         "Image Counts",
         "Barcode & QR",
@@ -154,16 +156,25 @@ def generate_unified_excel_report(
         img_status = img_res["overall_status"]
         cnt_status = count_results[i]["overall_verdict"]
 
-        # Colliding text and untranslated English are defects like any other,
-        # so they carry the master verdict down with them. A manual that reads
-        # PASS while a sentence of English sits in the middle of it is a report
-        # nobody can act on.
+        link_res = link_results[i] if link_results and i < len(link_results) else None
+        link_status = link_res.get("status", "PASS") if link_res else "PASS"
+        if link_res and link_status not in ("PASS", "SKIPPED"):
+            n_missing = len(link_res.get("missing_in_translated", []))
+            n_extra = len(link_res.get("extra_in_translated", []))
+            n_issues = n_missing + n_extra
+            link_disp = f"FAIL ({n_issues})" if n_issues else "FAIL"
+        else:
+            link_disp = link_status
+
+        # Colliding text, untranslated English, and broken links are defects
+        # that carry the master verdict down with them.
         n_overlap, n_untranslated = _count_for(toc_res["translated_pdf"])
         overlap_status = "PASS" if not n_overlap else f"FAIL ({n_overlap})"
         untr_status = "PASS" if not n_untranslated else f"FAIL ({n_untranslated})"
 
         master_pass = (
             toc_status == "PASS" and
+            link_status in ("PASS", "SKIPPED") and
             bc_status == "PASS" and
             img_status == "PASS" and
             cnt_status == "PASS" and
@@ -176,6 +187,7 @@ def generate_unified_excel_report(
             toc_res["english_pdf"],
             toc_res["translated_pdf"],
             toc_status,
+            link_disp,
             img_status,
             cnt_status,
             bc_status,
@@ -237,6 +249,208 @@ def generate_unified_excel_report(
             res["status"],
         ]
         ws_toc.append(row_data)
+
+    # --------------------------------------------------------
+    # TAB: LINKS (Dedicated Worksheet)
+    # --------------------------------------------------------
+    ws_links = wb.create_sheet(title="Links")
+
+    headers_links = [
+        "English Master PDF",
+        "Translated PDF",
+        "Link Category",
+        "Issue / Type",
+        "Target URL / Destination",
+        "Anchor Text",
+        "Master Page(s)",
+        "Translated Page(s)",
+        "Master Count",
+        "Translated Count",
+        "Context / Details",
+        "Overall Link Status",
+    ]
+    ws_links.append(headers_links)
+
+    if link_results:
+        for res in link_results:
+            m_pdf = res.get("english_pdf", "")
+            t_pdf = res.get("translated_pdf", "")
+            status = res.get("status", "SKIPPED")
+            m_total = res.get("english_total", 0)
+            t_total = res.get("translated_total", 0)
+
+            if status == "PASS":
+                bd = res.get("english_breakdown", {})
+                bd_str = ", ".join(f"{k}: {v}" for k, v in bd.items()) if bd else "all matched"
+                ws_links.append([
+                    m_pdf,
+                    t_pdf,
+                    "All Links",
+                    "All Links Matched",
+                    "All URLs & destinations matched",
+                    "-",
+                    "All",
+                    "All",
+                    m_total,
+                    t_total,
+                    f"All {m_total} links matched ({bd_str})",
+                    "PASS",
+                ])
+            elif status == "SKIPPED":
+                ws_links.append([
+                    m_pdf,
+                    t_pdf,
+                    "All Links",
+                    "SKIPPED",
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    m_total,
+                    t_total,
+                    "Link inspection skipped",
+                    "SKIPPED",
+                ])
+            else:
+                missing_items = res.get("missing_in_translated", [])
+                extra_items = res.get("extra_in_translated", [])
+                int_diff = res.get("internal_link_diff") or {}
+                missing_int = int_diff.get("missing_internal_links", [])
+                extra_int = int_diff.get("extra_internal_links", [])
+
+                has_emitted_any = False
+
+                # 1. Missing external/QR links
+                for m in missing_items:
+                    if m.get("type") == "internal":
+                        continue
+                    has_emitted_any = True
+                    ws_links.append([
+                        m_pdf,
+                        t_pdf,
+                        m.get("type", "").upper(),
+                        "MISSING LINK",
+                        m.get("target", ""),
+                        m.get("english_text", ""),
+                        ", ".join(map(str, m.get("english_pages", []))) or "-",
+                        "-",
+                        m.get("english_count", 0),
+                        m.get("translated_count", 0),
+                        f"Missing {m.get('missing_count', 1)} link(s) in translation",
+                        "FAIL",
+                    ])
+
+                # 2. Extra external/QR links
+                for e in extra_items:
+                    if e.get("type") == "internal":
+                        continue
+                    has_emitted_any = True
+                    ws_links.append([
+                        m_pdf,
+                        t_pdf,
+                        e.get("type", "").upper(),
+                        "EXTRA LINK",
+                        e.get("target", ""),
+                        e.get("translated_text", ""),
+                        "-",
+                        ", ".join(map(str, e.get("translated_pages", []))) or "-",
+                        e.get("english_count", 0),
+                        e.get("translated_count", 0),
+                        f"Extra {e.get('extra_count', 1)} link(s) in translation",
+                        "FAIL",
+                    ])
+
+                # 3. Missing internal links
+                if missing_int:
+                    for mi in missing_int:
+                        has_emitted_any = True
+                        near = " / ".join(f"p.{x['page']} \"{x['text']}\"" for x in mi.get("translated_neighbors", []))
+                        ws_links.append([
+                            m_pdf,
+                            t_pdf,
+                            "INTERNAL",
+                            "MISSING INTERNAL LINK",
+                            mi.get("url", ""),
+                            mi.get("text", ""),
+                            str(mi.get("page", "-")),
+                            "-",
+                            1,
+                            0,
+                            f"Expected near translated: {near}" if near else "Missing internal TOC/link",
+                            "FAIL",
+                        ])
+                elif any(m.get("type") == "internal" for m in missing_items):
+                    int_m = next(m for m in missing_items if m.get("type") == "internal")
+                    has_emitted_any = True
+                    ws_links.append([
+                        m_pdf,
+                        t_pdf,
+                        "INTERNAL",
+                        "INTERNAL COUNT MISMATCH",
+                        "Internal links (TOC / cross-references)",
+                        "-",
+                        "-",
+                        "-",
+                        int_m.get("english_count", 0),
+                        int_m.get("translated_count", 0),
+                        f"Master has {int_m.get('english_count', 0)} internal links, translated has {int_m.get('translated_count', 0)}",
+                        "FAIL",
+                    ])
+
+                # 4. Extra internal links
+                if extra_int:
+                    for ei in extra_int:
+                        has_emitted_any = True
+                        near = " / ".join(f"p.{x['page']} \"{x['text']}\"" for x in ei.get("english_neighbors", []))
+                        ws_links.append([
+                            m_pdf,
+                            t_pdf,
+                            "INTERNAL",
+                            "EXTRA INTERNAL LINK",
+                            ei.get("url", ""),
+                            ei.get("text", ""),
+                            "-",
+                            str(ei.get("page", "-")),
+                            0,
+                            1,
+                            f"Near master links: {near}" if near else "Extra internal TOC/link in translation",
+                            "FAIL",
+                        ])
+                elif any(e.get("type") == "internal" for e in extra_items):
+                    int_e = next(e for e in extra_items if e.get("type") == "internal")
+                    has_emitted_any = True
+                    ws_links.append([
+                        m_pdf,
+                        t_pdf,
+                        "INTERNAL",
+                        "INTERNAL COUNT MISMATCH",
+                        "Internal links (TOC / cross-references)",
+                        "-",
+                        "-",
+                        "-",
+                        int_e.get("english_count", 0),
+                        int_e.get("translated_count", 0),
+                        f"Translated has {int_e.get('translated_count', 0)} internal links, master has {int_e.get('english_count', 0)}",
+                        "FAIL",
+                    ])
+
+                if not has_emitted_any:
+                    ws_links.append([
+                        m_pdf,
+                        t_pdf,
+                        "All Links",
+                        "MISMATCH",
+                        "-",
+                        "-",
+                        "-",
+                        "-",
+                        m_total,
+                        t_total,
+                        f"Link count or target mismatch (Master: {m_total}, Target: {t_total})",
+                        "FAIL",
+                    ])
+    else:
+        ws_links.append(["(links check was not run for this batch)"])
 
     # --------------------------------------------------------
     # TAB 3: BARCODE & QR (Dedicated Worksheet)
@@ -451,6 +665,7 @@ def generate_unified_excel_report(
                 cell.alignment = Alignment(
                     horizontal="left" if (
                         (ws.title in ("TOC", "Images") and col_idx in (3, 4))
+                        or (ws.title == "Links" and col_idx in (5, 6, 11))
                         or (ws.title == "Text Overlap" and col_idx in (4, 5))
                         or (ws.title == "Not Translated" and col_idx in (3, 4))
                     ) else "center",
@@ -461,7 +676,7 @@ def generate_unified_excel_report(
                 if val.startswith("PASS") or val.startswith("Present") or val.startswith("Equal") or val in ("Matched", "MATCH (PASS)", "Same Page"):
                     cell.fill = pass_fill
                     cell.font = pass_font
-                elif val.startswith("FAIL") or val.startswith("Not Present") or val.startswith("Not Equal") or val.startswith("Not Matched") or val in ("CHECK", "MISSING") or "Missing:" in val or "Extra:" in val or "EXTRA" in val.upper():
+                elif val.startswith("FAIL") or val.startswith("Not Present") or val.startswith("Not Equal") or val.startswith("Not Matched") or val in ("CHECK", "MISSING") or "Missing:" in val or "Extra:" in val or "EXTRA" in val.upper() or "MISMATCH" in val.upper():
                     cell.fill = fail_fill
                     cell.font = fail_font
 
@@ -471,6 +686,10 @@ def generate_unified_excel_report(
             col_letter = openpyxl.utils.get_column_letter(col[0].column)
             if ws.title == "TOC" and col[0].column in (3, 4):
                 ws.column_dimensions[col_letter].width = 50
+            elif ws.title == "Links" and col[0].column in (5, 6, 11):
+                ws.column_dimensions[col_letter].width = 45
+            elif ws.title == "Links" and col[0].column in (1, 2):
+                ws.column_dimensions[col_letter].width = 28
             elif ws.title == "Images" and col[0].column in (1, 2, 3):
                 ws.column_dimensions[col_letter].width = 30
             elif ws.title == "Text Overlap" and col[0].column in (4, 5):
@@ -660,6 +879,7 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
         }]
 
         toc_results = []
+        link_results = []
         bc_qr_results = []
         count_results = []
         img_results_summary = []
@@ -679,6 +899,22 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
                 f"Translated has {len(target_toc_numerics)} topic(s). TOC is not matched."
             )
             toc_results.append(toc_res)
+
+            link_res = {
+                "english_pdf": os.path.basename(source_pdf_path),
+                "translated_pdf": tr_filename,
+                "english_total": 0,
+                "translated_total": 0,
+                "english_breakdown": {},
+                "translated_breakdown": {},
+                "count_match": False,
+                "targets_match": False,
+                "status": "SKIPPED",
+                "missing_in_translated": [],
+                "extra_in_translated": [],
+                "internal_link_diff": None,
+            }
+            link_results.append(link_res)
 
             bc_res = {
                 "english_pdf": os.path.basename(source_pdf_path),
@@ -728,6 +964,7 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
                 "filename": tr_filename,
                 "english_pdf": os.path.basename(source_pdf_path),
                 "toc_res": toc_res,
+                "link_res": None,
                 "bc_res": None,
                 "cnt_res": None,
                 "img_res": None,
@@ -763,6 +1000,7 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
             untranslated_results=untranslated_results,
             timing_rows=timing_rows,
             total_seconds=round(total_seconds, 1),
+            link_results=link_results,
         )
 
         say(1.0, "TOC is not matched - inspection stopped")
@@ -770,6 +1008,7 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
             "english_pdf": os.path.basename(source_pdf_path),
             "report_path": unified_report_path,
             "toc_results": toc_results,
+            "link_results": link_results,
             "bc_qr_results": bc_qr_results,
             "img_results_summary": img_results_summary,
             "img_crop_details": img_crop_details_list,
@@ -839,11 +1078,18 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
         except Exception as e:
             print(f"  [WARN] Master metadata collection failed: {e}")
 
+    master_links = []
+    try:
+        master_links = Links.extract_links(source_pdf_path)
+    except Exception as e:
+        print(f"  [WARN] Master link extraction failed: {e}")
+
     master_seconds = time.perf_counter() - master_t0
 
     print(f"  Source Topics        : {len(source_toc_numerics)} sections")
     print(f"  Source Images        : {source_count_model['total']} "
           f"({'per-topic' if source_count_model['has_toc'] else 'document total - no TOC'})")
+    print(f"  Source Links         : {len(master_links)} links")
     print(f"  Master scanned in    : {master_seconds:.1f}s")
     print()
 
@@ -864,6 +1110,7 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
     print()
 
     toc_results = []
+    link_results = []
     bc_qr_results = []
     count_results = []
     img_results_summary = []
@@ -955,11 +1202,26 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
                 "overall_verdict": "SKIPPED",
                 "status": "SKIPPED (TOC not matched)",
             }
+            link_res = {
+                "english_pdf": os.path.basename(source_pdf_path),
+                "translated_pdf": tr_filename,
+                "english_total": len(master_links),
+                "translated_total": 0,
+                "english_breakdown": {},
+                "translated_breakdown": {},
+                "count_match": False,
+                "targets_match": False,
+                "status": "SKIPPED",
+                "missing_in_translated": [],
+                "extra_in_translated": [],
+                "internal_link_diff": None,
+            }
             doc_payload = {
                 "idx": idx,
                 "filename": tr_filename,
                 "english_pdf": os.path.basename(source_pdf_path),
                 "toc_res": toc_res,
+                "link_res": link_res,
                 "bc_res": None,
                 "cnt_res": None,
                 "img_res": None,
@@ -989,7 +1251,39 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
                       "target_qr_count": 0, "master_pages_qr": [], "target_pages_qr": [],
                       "qr_status": "FAIL", "overall_verdict": "FAIL"}
 
-        # 3. Pure Visual Graphic Images Cropping & Comparison
+        # 3. Hyperlinks extraction & consistency comparison
+        time.sleep(0.01)
+        try:
+            tr_links = Links.extract_links(tr_path)
+            link_res = Links.compare_links(
+                master_links, tr_links,
+                en_id=os.path.basename(source_pdf_path),
+                tr_id=tr_filename,
+                normalize=True,
+                en_path=str(source_pdf_path),
+                tr_path=str(tr_path),
+            )
+        except Exception as e:
+            safe_print(f"  [WARN] Link comparison failed for {tr_filename}: {e}")
+            link_res = {
+                "english_pdf": os.path.basename(source_pdf_path),
+                "translated_pdf": tr_filename,
+                "english_pdf_path": str(source_pdf_path),
+                "translated_pdf_path": str(tr_path),
+                "english_total": len(master_links),
+                "translated_total": 0,
+                "english_breakdown": {},
+                "translated_breakdown": {},
+                "count_match": False,
+                "targets_match": False,
+                "status": "FAIL",
+                "missing_in_translated": [],
+                "extra_in_translated": [],
+                "internal_link_diff": None,
+                "error": str(e),
+            }
+
+        # 4. Pure Visual Graphic Images Cropping & Comparison
         time.sleep(0.01)
         try:
             crop_pdf_images.crop_pdf_elements(
@@ -1090,6 +1384,7 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
 
         master_pass = (
             toc_res["status"] == "PASS" and
+            link_res["status"] == "PASS" and
             bc_res["overall_verdict"] == "PASS" and
             img_res["overall_status"] == "PASS" and
             cnt_res["overall_verdict"] == "PASS" and
@@ -1108,6 +1403,7 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
         safe_print(
             f"  [{idx:02d}/{num_files:02d}] {tr_filename[:28]:<28} | "
             f"TOC: {toc_res['status']:<4} | "
+            f"Links: {link_res['status']:<4} | "
             f"BC/QR: {bc_res['overall_verdict']:<4} | "
             f"Img: {img_res['overall_status']:<4} | "
             f"Cnt: {cnt_res['overall_verdict']:<4} | "
@@ -1122,6 +1418,7 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
             "filename": tr_filename,
             "english_pdf": os.path.basename(source_pdf_path),
             "toc_res": toc_res,
+            "link_res": link_res,
             "bc_res": bc_res,
             "cnt_res": cnt_res,
             "img_res": img_res,
@@ -1134,7 +1431,7 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
             "seconds": round(elapsed, 1),
         }
 
-        # Send full document results across all 9 checks immediately to GUI
+        # Send full document results across all modules immediately to GUI
         if on_doc_complete:
             try:
                 on_doc_complete(doc_payload)
@@ -1144,13 +1441,14 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
         return doc_payload
 
     # Inspect translated PDFs sequentially, PDF by PDF.
-    # As soon as each PDF completes all 9 checks, on_doc_complete updates the Review tab
+    # As soon as each PDF completes all checks, on_doc_complete updates the Review tab
     # and Meta Data tab with this PDF's complete results before the loop moves to the next PDF.
     for idx, tr_path in enumerate(translated_files, start=1):
         here = DOC_BASE + doc_slice * (idx - 1)
         say(here, f"{os.path.basename(tr_path)} ({idx} of {num_files})")
         res = _inspect_single_doc((idx, tr_path))
         toc_results.append(res["toc_res"])
+        link_results.append(res["link_res"])
         bc_qr_results.append(res["bc_res"])
         count_results.append(res["cnt_res"])
         img_results_summary.append(res["img_res"])
@@ -1230,6 +1528,7 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
         untranslated_results=untranslated_results,
         timing_rows=timing_rows,
         total_seconds=round(total_seconds, 1),
+        link_results=link_results,
     )
 
     # The workers have nothing left to do; hand the cores back before the
@@ -1246,6 +1545,7 @@ def run_quality_inspection(source_pdf_path, translated_path_or_folder, output_di
         "english_pdf": os.path.basename(source_pdf_path),
         "report_path": unified_report_path,
         "toc_results": toc_results,
+        "link_results": link_results,
         "bc_qr_results": bc_qr_results,
         "img_results_summary": img_results_summary,
         "img_crop_details": img_crop_details_list,

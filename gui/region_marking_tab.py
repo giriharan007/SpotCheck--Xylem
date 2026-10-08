@@ -459,6 +459,23 @@ class RegionInspectorFrame(ctk.CTkFrame):
         self._update_source_label()
         self._load_and_render_page()
 
+    def on_tab_visible(self):
+        """
+        Called when the Region Inspector tab is made visible in the window.
+        Guarantees that the canvas renders the current page cleanly on screen.
+        """
+        if self.eng_pdf_path and self.total_pages > 0:
+            try:
+                self.canvas.update_idletasks()
+            except Exception:
+                pass
+            self._load_and_render_page()
+
+    def _on_canvas_mapped(self, event=None):
+        """When canvas first maps onto the screen, re-render if page image is missing."""
+        if self.eng_pdf_path and self.total_pages > 0 and not self.canvas.find_withtag("page_img"):
+            self._load_and_render_page()
+
     def _update_source_label(self):
         """Refresh the strip that says which document is currently loaded."""
         try:
@@ -576,6 +593,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
         self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
         self.canvas.bind("<Motion>", self._on_canvas_motion)
+        self.canvas.bind("<Map>", self._on_canvas_mapped)
 
         # Helper Tip Bar
         tip_frame = ctk.CTkFrame(left_card, fg_color=UI_CARD_WELL, corner_radius=6)
@@ -2980,11 +2998,12 @@ class RegionInspectorFrame(ctk.CTkFrame):
 
             self.pil_image = img
             self.page_width_pt = pw
-            self.page_height_pt = ph
-            self.tk_image = ImageTk.PhotoImage(img, master=self)
+            self.tk_image = ImageTk.PhotoImage(img, master=self.canvas)
+            self.canvas.image = self.tk_image
 
             self.canvas.delete("all")
             self.canvas.create_image(10, 10, anchor="nw", image=self.tk_image, tags="page_img")
+            self.canvas.tag_lower("page_img")
             self.canvas.config(scrollregion=(0, 0, img.width + 30, img.height + 30))
 
             with fitz.open(self.eng_pdf_path) as doc_eng:

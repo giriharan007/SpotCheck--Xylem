@@ -39,6 +39,7 @@ all_hiddenimports = [
     'core',
     'core.pipeline',
     'core.toc',
+    'core.links',
     'core.barcode_qr',
     'core.crop_images',
     'core.compare_crops',

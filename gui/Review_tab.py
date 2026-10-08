@@ -63,6 +63,7 @@ SOURCE_REGIONS = "Region Checks"
 SOURCE_CROPS = "Images"
 SOURCE_COUNTS = "Image Counts"
 SOURCE_TOC = "TOC"
+SOURCE_LINKS = "Links"
 SOURCE_BARCODE = "Barcode"
 SOURCE_QR = "QR Code"
 SOURCE_OVERLAP = "Overlap"
@@ -77,6 +78,7 @@ SOURCE_BAND_COLOR = {
     SOURCE_CROPS: "#F3EAFF",
     SOURCE_COUNTS: "#EAFBF0",
     SOURCE_TOC: "#FDEAF3",
+    SOURCE_LINKS: "#E8F4F8",
     SOURCE_BARCODE: "#EEF0FF",
     SOURCE_QR: "#E8ECFF",
     SOURCE_OVERLAP: "#E9F7F7",
@@ -94,11 +96,12 @@ SOURCE_PRIORITY = {
     SOURCE_CROPS: 2,
     SOURCE_REGIONS: 3,
     SOURCE_TOC: 4,
-    SOURCE_BARCODE: 5,
-    SOURCE_QR: 6,
-    SOURCE_OVERLAP: 7,
-    SOURCE_UNTRANSLATED: 8,
-    SOURCE_OVERFLOW: 9,
+    SOURCE_LINKS: 5,
+    SOURCE_BARCODE: 6,
+    SOURCE_QR: 7,
+    SOURCE_OVERLAP: 8,
+    SOURCE_UNTRANSLATED: 9,
+    SOURCE_OVERFLOW: 10,
 }
 
 # A row that needs review gets this tint regardless of which check it came
@@ -389,6 +392,301 @@ def cards_from_toc_results(toc_results):
             "shift": 0.0,
             "image": "",
         })
+    return rows
+
+
+def cards_from_links(link_results):
+    """
+    Normalise link comparison results into gallery cards/rows.
+    Shows missing or extra hyperlinks (both external/QR and internal) in the Review tab.
+    """
+    rows = []
+    for r in link_results or []:
+        status = r.get("status", "")
+        if status in ("SKIPPED", "N/A", ""):
+            continue
+
+        eng_name = r.get("english_pdf", "")
+        tr_name = r.get("translated_pdf", "")
+        eng_total = r.get("english_total", 0)
+        tr_total = r.get("translated_total", 0)
+
+        is_pass = (status == "PASS")
+        bd_en = r.get("english_breakdown", {})
+        bd_tr = r.get("translated_breakdown", {})
+        bd_en_str = ", ".join(f"{k}: {v}" for k, v in bd_en.items()) if bd_en else f"{eng_total} links"
+        bd_tr_str = ", ".join(f"{k}: {v}" for k, v in bd_tr.items()) if bd_tr else f"{tr_total} links"
+
+        if is_pass:
+            detail_msg = f"All {eng_total} hyperlinks match between master and translation.\n({bd_en_str})"
+        else:
+            diff_cnt = abs(tr_total - eng_total)
+            dir_str = "fewer" if tr_total < eng_total else "more"
+            detail_msg = (
+                f"Hyperlink discrepancy between master and translation:\n"
+                f"    Master total: {eng_total} ({bd_en_str})\n"
+                f"    Translated total: {tr_total} ({bd_tr_str})\n"
+                f"    Difference: translation has {diff_cnt} {dir_str} link(s).\n"
+                f"Check detailed link findings below for specific differences."
+            )
+
+        # Whole-document summary row (always present in Review tab)
+        rows.append({
+            "source": SOURCE_LINKS,
+            "title": f"Hyperlinks ({eng_total} links)",
+            "eng_name": eng_name,
+            "eng_page": "-",
+            "tr_name": tr_name,
+            "tr_page": "-",
+            "status": "PASS" if is_pass else "COUNT MISMATCH",
+            "passed": is_pass,
+            "score": f"{tr_total}/{eng_total}",
+            "detail": detail_msg,
+            "shift": 0.0,
+            "image": "",
+        })
+
+        if is_pass:
+            continue
+
+        # If not PASS: emit detailed rows for missing / extra links
+        missing_items = r.get("missing_in_translated", [])
+        extra_items = r.get("extra_in_translated", [])
+        int_diff = r.get("internal_link_diff") or {}
+        missing_int = int_diff.get("missing_internal_links", [])
+        extra_int = int_diff.get("extra_internal_links", [])
+
+        has_emitted = False
+
+        en_path = r.get("english_pdf_path") or eng_name
+        tr_path = r.get("translated_pdf_path") or tr_name
+
+        # 1. Missing external / QR / file links
+        for m in missing_items:
+            m_type = m.get("type", "external")
+            if m_type == "internal":
+                continue  # Handled below in detail
+            has_emitted = True
+            m_pages = m.get("english_pages", [])
+            p_str = ", ".join(map(str, m_pages)) if m_pages else "-"
+            first_p = str(m_pages[0]) if m_pages else "-"
+            tr_p = "-"
+            if first_p != "-" and os.path.isfile(en_path) and os.path.isfile(tr_path):
+                try:
+                    from core import toc as TOC
+                    mp, _, _ = TOC.matching_page(en_path, tr_path, int(first_p))
+                    if mp:
+                        tr_p = str(mp)
+                except Exception:
+                    pass
+            target = m.get("target", "")
+            title_tgt = (target[:35] + "...") if len(target) > 35 else target
+            rows.append({
+                "source": SOURCE_LINKS,
+                "title": f"Missing {m_type.upper()} Link · {title_tgt}",
+                "eng_name": eng_name,
+                "eng_page": first_p,
+                "tr_name": tr_name,
+                "tr_page": tr_p,
+                "topic_eng_page": first_p,
+                "status": f"MISSING ({m.get('missing_count', 1)}x)",
+                "passed": False,
+                "score": f"{m.get('translated_count', 0)}/{m.get('english_count', 0)}",
+                "detail": (
+                    f"Missing {m_type.upper()} link in translation:\n"
+                    f"    Target URL: {target}\n"
+                    f"    Master Anchor Text: \"{m.get('english_text', '')}\"\n"
+                    f"    Master Page(s): {p_str}\n"
+                    f"    Expected Translated Page: {tr_p}\n"
+                    f"    Master Count: {m.get('english_count', 0)}, Translated Count: {m.get('translated_count', 0)}"
+                ),
+                "shift": 0.0,
+                "image": "",
+            })
+
+        # 2. Extra external / QR / file links
+        for e in extra_items:
+            e_type = e.get("type", "external")
+            if e_type == "internal":
+                continue
+            has_emitted = True
+            e_pages = e.get("translated_pages", [])
+            p_str = ", ".join(map(str, e_pages)) if e_pages else "-"
+            first_p = str(e_pages[0]) if e_pages else "-"
+            eng_p = "-"
+            if first_p != "-" and os.path.isfile(en_path) and os.path.isfile(tr_path):
+                try:
+                    from core import toc as TOC
+                    mp, _, _ = TOC.matching_page(tr_path, en_path, int(first_p))
+                    if mp:
+                        eng_p = str(mp)
+                except Exception:
+                    pass
+            target = e.get("target", "")
+            title_tgt = (target[:35] + "...") if len(target) > 35 else target
+            rows.append({
+                "source": SOURCE_LINKS,
+                "title": f"Extra {e_type.upper()} Link · {title_tgt}",
+                "eng_name": eng_name,
+                "eng_page": eng_p,
+                "tr_name": tr_name,
+                "tr_page": first_p,
+                "topic_eng_page": eng_p,
+                "status": f"EXTRA ({e.get('extra_count', 1)}x)",
+                "passed": False,
+                "score": f"{e.get('translated_count', 0)}/{e.get('english_count', 0)}",
+                "detail": (
+                    f"Extra {e_type.upper()} link in translation (not present in master):\n"
+                    f"    Target URL: {target}\n"
+                    f"    Translated Anchor Text: \"{e.get('translated_text', '')}\"\n"
+                    f"    Translated Page(s): {p_str}\n"
+                    f"    Corresponding Master Page: {eng_p}\n"
+                    f"    Master Count: {e.get('english_count', 0)}, Translated Count: {e.get('translated_count', 0)}"
+                ),
+                "shift": 0.0,
+                "image": "",
+            })
+
+        # 3. Missing internal links
+        if missing_int:
+            for mi in missing_int:
+                has_emitted = True
+                near = " / ".join(f"p.{x['page']} \"{x['text']}\"" for x in mi.get("translated_neighbors", []))
+                text_snippet = mi.get("text", "")[:35]
+                eng_p = mi.get("page", "-")
+                topic_info = mi.get("topic") or ""
+                tr_p = "-"
+                if os.path.isfile(en_path) and os.path.isfile(tr_path):
+                    try:
+                        from core import toc as TOC
+                        if topic_info:
+                            tr_spans = TOC.topic_page_spans(tr_path)
+                            if topic_info in tr_spans:
+                                tr_p = str(tr_spans[topic_info][0])
+                        if tr_p == "-" and eng_p != "-":
+                            matched_p, matched_top, _ = TOC.matching_page(en_path, tr_path, int(eng_p))
+                            if matched_p:
+                                tr_p = str(matched_p)
+                            if not topic_info and matched_top:
+                                topic_info = matched_top
+                    except Exception:
+                        pass
+                topic_str = f" (Topic {topic_info})" if topic_info else ""
+                rows.append({
+                    "source": SOURCE_LINKS,
+                    "title": f"Missing Internal Link · p.{eng_p}{topic_str} {text_snippet}",
+                    "eng_name": eng_name,
+                    "eng_page": str(eng_p),
+                    "tr_name": tr_name,
+                    "tr_page": tr_p,
+                    "topic_eng_page": str(eng_p),
+                    "roi_rect": mi.get("rect"),
+                    "status": "MISSING (internal)",
+                    "passed": False,
+                    "score": "0/1",
+                    "detail": (
+                        f"Internal link present in English master is missing in translation:\n"
+                        f"    Master Page: {eng_p}{topic_str}\n"
+                        f"    Expected Translated Page: {tr_p}\n"
+                        f"    Anchor Text: \"{mi.get('text', '')}\"\n"
+                        f"    Destination: {mi.get('url', '')}\n"
+                        f"    Expected near translated links: {near or 'N/A'}"
+                    ),
+                    "shift": 0.0,
+                    "image": "",
+                })
+        elif any(m.get("type") == "internal" for m in missing_items):
+            int_m = next(m for m in missing_items if m.get("type") == "internal")
+            has_emitted = True
+            rows.append({
+                "source": SOURCE_LINKS,
+                "title": f"Internal Links Mismatch (missing {int_m.get('missing_count', 1)})",
+                "eng_name": eng_name,
+                "eng_page": "-",
+                "tr_name": tr_name,
+                "tr_page": "-",
+                "status": f"MISSING ({int_m.get('missing_count', 1)}x)",
+                "passed": False,
+                "score": f"{int_m.get('translated_count', 0)}/{int_m.get('english_count', 0)}",
+                "detail": (
+                    f"Internal links count mismatch:\n"
+                    f"    Master internal links: {int_m.get('english_count', 0)}\n"
+                    f"    Translated internal links: {int_m.get('translated_count', 0)}"
+                ),
+                "shift": 0.0,
+                "image": "",
+            })
+
+        # 4. Extra internal links
+        if extra_int:
+            for ei in extra_int:
+                has_emitted = True
+                near = " / ".join(f"p.{x['page']} \"{x['text']}\"" for x in ei.get("english_neighbors", []))
+                text_snippet = ei.get("text", "")[:35]
+                tr_p = ei.get("page", "-")
+                topic_info = ei.get("topic") or ""
+                eng_p = "-"
+                if os.path.isfile(en_path) and os.path.isfile(tr_path):
+                    try:
+                        from core import toc as TOC
+                        if topic_info:
+                            en_spans = TOC.topic_page_spans(en_path)
+                            if topic_info in en_spans:
+                                eng_p = str(en_spans[topic_info][0])
+                        if eng_p == "-" and tr_p != "-":
+                            matched_p, matched_top, _ = TOC.matching_page(tr_path, en_path, int(tr_p))
+                            if matched_p:
+                                eng_p = str(matched_p)
+                            if not topic_info and matched_top:
+                                topic_info = matched_top
+                    except Exception:
+                        pass
+                topic_str = f" (Topic {topic_info})" if topic_info else ""
+                rows.append({
+                    "source": SOURCE_LINKS,
+                    "title": f"Extra Internal Link · p.{tr_p}{topic_str} {text_snippet}",
+                    "eng_name": eng_name,
+                    "eng_page": eng_p,
+                    "tr_name": tr_name,
+                    "tr_page": str(tr_p),
+                    "topic_eng_page": eng_p,
+                    "roi_rect": ei.get("rect"),
+                    "status": "EXTRA (internal)",
+                    "passed": False,
+                    "score": "1/0",
+                    "detail": (
+                        f"Extra internal link in translation not found in English master:\n"
+                        f"    Translated Page: {tr_p}{topic_str}\n"
+                        f"    Corresponding Master Page: {eng_p}\n"
+                        f"    Anchor Text: \"{ei.get('text', '')}\"\n"
+                        f"    Destination: {ei.get('url', '')}\n"
+                        f"    English neighbours: {near or 'N/A'}"
+                    ),
+                    "shift": 0.0,
+                    "image": "",
+                })
+        elif any(e.get("type") == "internal" for e in extra_items):
+            int_e = next(e for e in extra_items if e.get("type") == "internal")
+            has_emitted = True
+            rows.append({
+                "source": SOURCE_LINKS,
+                "title": f"Internal Links Mismatch (extra {int_e.get('extra_count', 1)})",
+                "eng_name": eng_name,
+                "eng_page": "-",
+                "tr_name": tr_name,
+                "tr_page": "-",
+                "status": f"EXTRA ({int_e.get('extra_count', 1)}x)",
+                "passed": False,
+                "score": f"{int_e.get('translated_count', 0)}/{int_e.get('english_count', 0)}",
+                "detail": (
+                    f"Internal links count mismatch:\n"
+                    f"    Master internal links: {int_e.get('english_count', 0)}\n"
+                    f"    Translated internal links: {int_e.get('translated_count', 0)}"
+                ),
+                "shift": 0.0,
+                "image": "",
+            })
+
     return rows
 
 
@@ -1037,6 +1335,8 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         new_rows = []
         if doc_data.get("toc_res"):
             new_rows.extend(cards_from_toc_results([doc_data["toc_res"]]))
+        if doc_data.get("link_res"):
+            new_rows.extend(cards_from_links([doc_data["link_res"]]))
         if doc_data.get("bc_res"):
             new_rows.extend(cards_from_barcode([doc_data["bc_res"]]))
             new_rows.extend(cards_from_qr([doc_data["bc_res"]]))
@@ -1130,6 +1430,11 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         happen to talk about section numbers.
         """
         self._replace(SOURCE_TOC, cards_from_toc_results(toc_results), preserve_mode=True)
+        self._refresh_list()
+
+    def load_link_results(self, link_results):
+        """Publish hyperlink comparison results to the gallery."""
+        self._replace(SOURCE_LINKS, cards_from_links(link_results), preserve_mode=True)
         self._refresh_list()
 
     def load_barcode_qr(self, bc_qr_results):
@@ -1458,7 +1763,10 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
         # master page of its own ("—"). Its roi_rect is in that page's own
         # coordinates too, so it belongs on the "trans" pane, not "master".
         is_self_row = bool(row.get("self_path"))
-        focus_side = "trans" if (is_self_row or row.get("eng_page") in ("—", "-", None)) else "master"
+        status_upper = str(row.get("status", "")).upper()
+        title_upper = str(row.get("title", "")).upper()
+        is_extra = "EXTRA" in status_upper or title_upper.startswith("EXTRA")
+        focus_side = "trans" if (is_self_row or is_extra or row.get("eng_page") in ("—", "-", None)) else "master"
 
         if is_self_row:
             tr_page = _page(row.get("tr_page"), 1)
@@ -1472,6 +1780,9 @@ class ComparisonGalleryFrame(ctk.CTkFrame):
                 eng_page = TOC.page_mapper(trans_pdf, master_pdf)(tr_page)
             except Exception:
                 eng_page = tr_page
+        elif row.get("source") == SOURCE_LINKS and row.get("eng_page") not in ("—", "-", None) and row.get("tr_page") not in ("—", "-", None):
+            eng_page = _page(row.get("eng_page"), 1)
+            tr_page = _page(row.get("tr_page"), 1)
         else:
             # "—" for a row with no master page at all. Fall back to topic_eng_page
             # if available, else translated page, so the two sides start off aligned.

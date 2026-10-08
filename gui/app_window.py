@@ -247,6 +247,9 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             if cur == TAB_INSPECTION:
                 if hasattr(self, "log_textbox") and self.log_textbox.winfo_ismapped():
                     self.log_textbox.see("end")
+            elif cur == TAB_REGION:
+                if self.region_inspector is not None:
+                    self.region_inspector.on_tab_visible()
             elif cur == TAB_METADATA:
                 if self.metadata_tab is not None and self._all_metadata_rows:
                     self.metadata_tab.show_rows(self._all_metadata_rows)
@@ -1277,6 +1280,13 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
             except Exception as e:
                 print(f"[WARN] Could not publish TOC numbering results: {e}")
 
+            # Hyperlinks consistency results (URLs, internal TOC links, QR codes)
+            try:
+                self.comparison_gallery.load_link_results(
+                    self.last_run_results.get("link_results", []))
+            except Exception as e:
+                print(f"[WARN] Could not publish link results to the gallery: {e}")
+
             # Barcode & QR-code counts, per translated file - a barcode or QR
             # code dropped in a translation. Used to be Excel-only.
             try:
@@ -1408,9 +1418,14 @@ class SpotCheckApp(ctk.CTk if HAS_CTK else tk.Tk):
                     widget.image = None
                 except Exception:
                     pass
-            for attr in ("preview_tk_img", "_preview_img", "tk_image"):
+            for attr in ("preview_tk_img", "_preview_img"):
                 try:
                     setattr(tab, attr, None)
+                except Exception:
+                    pass
+            if tab is not getattr(self, "region_inspector", None):
+                try:
+                    setattr(tab, "tk_image", None)
                 except Exception:
                     pass
 

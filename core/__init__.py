@@ -12,6 +12,7 @@ Modules:
   crop_images    : vector & raster clustering and pure graphic crop extraction
   compare_crops  : cross-page pure graphic template comparison
   image_counts   : symmetric image-count check (per topic, or document total)
+  links          : hyperlink extraction, cross-language URL & internal link consistency verification
   region_engine  : user-defined ROI extraction, scoped exact match, comparison images
 
 Page 1 and last-page field checks were removed: those manuals are stylesheet-based,

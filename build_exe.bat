@@ -126,6 +126,7 @@ if not "!BUILD_RC!"=="0" (
         --hidden-import "logger_config" ^
         --hidden-import "settings" ^
         --hidden-import "core.pipeline" ^
+        --hidden-import "core.links" ^
         --hidden-import "core.docscan" ^
         --hidden-import "core.text_overlap" ^
         --hidden-import "core.untranslated" ^

@@ -6,6 +6,8 @@
 
 **SpotCheck** is an automated quality assurance and visual inspection engine designed for technical documentation at Xylem. It compares multi-language translated PDF manuals against a Master English Source PDF to ensure 100% layout fidelity, metadata accuracy, legal compliance, and graphical consistency.
 
+> 📘 **Looking for step-by-step instructions?** See the comprehensive [User Guide](file:///c:/Xylem%20Project/SpotCheck/USER_GUIDE.md) for end-user operational guidelines, workflow steps, Review Tab navigation, and Side-by-Side viewer tips.
+
 ---
 
 ## Key Features & Inspection Modules
@@ -17,17 +19,18 @@
                                                    │
                               SpotCheck Unified Engine (core/pipeline.py)
                                                    │
-                    ┌──────────────────────┬───────┴───────┬──────────────────────┐
-                    ▼                      ▼               ▼                      ▼
-                  [TOC]            [Barcode & QR]   [Visual Graphics]    [Region Inspector]
-            • Section Numbers      • Barcode Counts  • Pure Graphics      • User-drawn regions
-            • Order Match          • QR Code Counts  • Text Masking       • Scoped exact match
-            • Missing Sections     • Multi-page Scan • Layout Shift       • Visual match mode
-                    │                      │               │                      │
-                    └──────────────────────┴───────┬───────┴──────────────────────┘
+         ┌──────────────────┬──────────────┼───────────────┬──────────────────┬─────────────────┐
+         ▼                  ▼              ▼               ▼                  ▼                 ▼
+       [TOC]           [Hyperlinks]  [Barcode & QR] [Visual Graphics] [Region Inspector] [Text & Margins]
+ • Section Numbers   • Web URLs     • Barcodes     • Pure Graphics    • User ROI regions • Text Overlaps
+ • Sequence Order    • Internal GoTo• QR Codes     • Text Masking     • Scoped exact     • Untranslated
+ • Missing Sections  • 2D Position  • Structural   • Layout Shifts    • Visual match     • Margin Overflows
+         │                  │              │               │                  │                 │
+         └──────────────────┴──────────────┴───────┬───────┴──────────────────┴─────────────────┘
                                                    │
                                   ┌────────────────▼────────────────┐
-                                  │ Unified 4-Tab Excel QA Report   │
+                                  │  Unified 10-Sheet Excel QA Report│
+                                  │  & Interactive Review Dashboard │
                                   └─────────────────────────────────┘
 ```
 
@@ -60,7 +63,15 @@
 - **Multi-Engine Decoding**: Decodes 1D barcodes and 2D QR codes via `pyzbar` with OpenCV fallback detectors across all pages.
 - **Non-Visual Validation**: Matches absolute barcode and QR counts per document and per page, preventing false visual diffs caused by differing URLs or localized serial numbers.
 
-### 3. Pure Graphic Element Extraction & Visual Comparison (`core/crop_images.py` & `core/compare_crops.py`)
+### 3. Hyperlink & Cross-Reference Verification (`core/links.py`)
+- **Multi-Type Extraction**: Extracts external web URLs (URI), GoTo internal page targets, named destinations, and QR code targets directly using PyMuPDF (`page.get_links()`).
+- **URL & Anchor Normalization**: Normalizes schemes (`http`/`https`), trailing slashes, query parameters, casing, and anchor fragments to prevent false discrepancy reports.
+- **2D Positional Topic Locator (`extract_topics_with_positions`)**: Evaluates the 2D visual layout of headings and sub-headings across pages. If multiple sub-sections (e.g., `2.1` and `2.2`) share a single page, links are mapped to the exact sub-topic above which they physically reside, eliminating ambiguous or wrong topic attributions in the Review tab.
+- **SequenceMatcher Alignment**: Performs fuzzy sequence alignment for internal cross-references to identify missing, extra, or count-mismatched internal links across languages after text reflow.
+- **Zero Temporary JSON Files**: Runs 100% in-memory with findings flowing directly into the **Links** Excel worksheet and the interactive **Review** tab.
+- **Non-TOC Fallback**: If a document lacks PDF bookmark outlines, link comparisons seamlessly bind to physical page numbers.
+
+### 4. Pure Graphic Element Extraction & Visual Comparison (`core/crop_images.py` & `core/compare_crops.py`)
 
 **Crop layout adapts to the document.** When the PDF has a table of contents,
 crops are filed under the topic they sit beneath; when it does not, they fall back
@@ -140,7 +151,7 @@ Verified on the Swedish copy: master page 20 is found at translated page 18 via 
 page 16 at 15 via topic 4.1, and all 29 crops match. A topic-scoped search that finds
 nothing widens to the whole document rather than reporting a false deletion.
 
-### 4. Symmetric Image Count Check (`core/image_counts.py`)
+### 5. Symmetric Image Count Check (`core/image_counts.py`)
 
 The crop comparison is one-directional — it crops the master and hunts each crop in
 the translation — so it cannot see a graphic the translation *added*, and it can miss
@@ -160,16 +171,27 @@ Blank regions are excluded from both counting and cropping — an empty crop mat
 anything at 100%, and a graphic painted over would otherwise still count as present.
 Across the master and all eleven translations, zero real candidates are blank.
 
-### 5. Unified Multi-Sheet Excel QA Report (`core/pipeline.py`)
-Generates a styled, executive-ready Excel workbook (`PDF_Quality_Inspection_Report.xlsx`) with 5 worksheets:
+### 6. Text Quality & Margin Overflow Checks (`core/text_overlap.py`, `core/untranslated.py`, `core/margin_overflow.py`)
+- **Text Overlap (`core/text_overlap.py`)**: Detects text spans colliding into each other using physical glyph bounding boxes. Prevents false alarms caused by non-overlapping font bounding rectangles.
+- **Untranslated English (`core/untranslated.py`)**: Identifies English sentences and phrases left behind in translated manuals by matching against the English master inventory and assessing English grammatical function-word density.
+- **Margin Overflow (`core/margin_overflow.py`)**: Flags localized paragraphs and callouts expanding past stylesheet left and right margins (especially prominent in languages with longer average word lengths like German or Finnish).
+- First and last pages are skipped by default to allow for untranslated back-cover copyright notices and addresses.
 
-1. **Overview**: Executive dashboard of all sub-check verdicts and overall Master Verdict.
+### 7. Unified 10-Sheet Excel QA Report (`core/pipeline.py`)
+Generates a styled, executive-ready Excel workbook (`PDF_Quality_Inspection_Report.xlsx`) with 10 worksheets:
+
+1. **Overview**: Executive dashboard of all sub-check verdicts, defect counts, run timings, and overall Master Verdict.
 2. **TOC**: Topic numbering list, missing section codes, and section order status.
-3. **Barcode & QR**: Barcode and QR code counts and page breakdown tables.
-4. **Images**: Crop-by-crop visual comparison with page movement tracking and similarity percentages.
-5. **Image Counts**: Per-topic image counts for both documents, or the document total when there is no TOC.
+3. **Links**: Dedicated hyperlink verification sheet detailing category (URI, GoTo, QR), issue type, target destination, anchor text, master/translated pages, counts, and status.
+4. **Barcode & QR**: Barcode and QR code counts, page breakdown tables, and detection method.
+5. **Images**: Crop-by-crop visual comparison with page movement tracking, similarity percentages, and match status.
+6. **Image Counts**: Symmetric per-topic image counts for both documents, or the document total when there is no TOC.
+7. **Meta Data**: Document facts including file size, page count, sheet size (A0–A8/Letter/Legal/Custom), orientation, and column layout.
+8. **Stylesheet Result**: User-defined Region Inspector measurements, match types, scores, vertical shifts, and verdicts.
+9. **Text Overlap**: Detailed list of colliding text spans, collision area (pt²), and affected pages.
+10. **Not Translated**: Detailed inventory of untranslated English lines, function-word density, and evidence type.
 
-Master Verdict is `PASS` only when TOC, Barcode & QR, Images and Image Counts all pass.
+Master Verdict is `PASS` only when TOC, Links, Barcode & QR, Images, Image Counts, and Region Inspector all pass with zero text collisions, untranslated lines, or margin overflows.
 
 ---
 
@@ -189,7 +211,7 @@ SpotCheck features a modern desktop graphical interface styled according to **Xy
 - **Live Streamed Console**: Thread-safe redirection of inspection execution logs to a built-in terminal box.
 - **One-Click Post-Action Workflow**: Direct buttons to open the generated Excel QA report or the output folder.
 
-### Region Inspector (`gui/region_dialog.py`)
+### Region Inspector (`gui/region_marking_tab.py`)
 
 An interactive ROI workbench that lives as the second tab of the main window:
 
@@ -293,83 +315,43 @@ and a three-page sample is under a second.
 add one entry to the matching list, and the tab grows a column — `gui/metadata_tab.py`
 builds both tables from those specifications and needs no edit.
 
-### Review (`gui/comparison_gallery.py`)
+### Review Tab (`gui/Review_tab.py`)
 
-Every comparison image the engine writes to disk is also browsable in-app, so reviewing
-a run no longer means digging through nested output folders:
+Every inspection result produced by the engine is browsable in-app within a unified, high-performance Review Tab, eliminating the need to dig through nested output directories:
 
-- **Two sources**: *Region Checks* (from a Region Inspector batch) and *Images* (from a full pipeline inspection).
-- **Segregated by verdict**: *All* / *Passed* / *Needs Review*, with live counts.
-- **Both sides labelled**: the detail pane names the master PDF and its page, and the translated PDF and its page, plus any vertical shift; the list carries the language tag so rows stay distinguishable across all eleven translations.
-- **Keyboard navigation**: `↑` / `↓` step through results and swap the preview, `PgUp` / `PgDn` jump ten, `Home` / `End` go to the ends. The keys work anywhere on the tab, not only when the list has focus, and stand down on the other tabs and inside text fields. `▲` `▼` buttons and an "n of N" readout sit beside the verdict.
-- **Click the image** to open it full size in the system viewer.
-- **Side by Side** opens both whole pages side by side for direct visual inspection, with mouse wheel page turning.
-- **Clear Images** deletes the comparison images from disk after a confirmation that names the folder, the file count and the size. It only ever removes PNGs whose resolved path contains a `Cropped_Comparison` component, so source PDFs, the Excel report and the master crops under `Cropped_Images` cannot be touched; empty sub-folders are pruned and the results list is reset.
+- **10 Integrated Check Sources**:
+  - `TOC`: Section numbering sequence matching and missing topic indicators.
+  - `Links`: Hyperlink verification (web URLs, internal GoTo targets, missing/extra links, count mismatches).
+  - `Images`: Master-to-translation visual crop comparisons with similarity percentages.
+  - `Image Counts`: Symmetric graphic count checks highlighting additions or deletions.
+  - `Region Checks`: Stylesheet Region Inspector results (layout shifts, exact tokens).
+  - `Barcode` & `QR Code`: Count verification and page locations.
+  - `Overlap`: Text span collision detection.
+  - `Not Translated`: English lines left behind in translations.
+  - `Margin Overflow`: Text expanding into stylesheet margins.
+- **Color-Banded Categorization**: Each check type features a distinct soft tint so reviewers can instantly distinguish inspection modules without scanning every row label.
+- **Segregated by Verdict**: Filter by *All*, *Passed*, or *Needs Review / Issues* with live issue counters.
+- **Master/Detail Architecture**: Uses a native `ttk.Treeview` for fast scrolling across thousands of results paired with on-demand image rendering. Widget count remains strictly constant regardless of manual length.
+- **Interactive Review Cards**: Detailed inspection cards display the English Master PDF and page, the Translated PDF and page, topic codes, status badges, and exact link/text details.
+- **Keyboard Navigation**: `↑` / `↓` step through results, `PgUp` / `PgDn` jump ten, `Home` / `End` move to the ends.
+- **One-Click Side-by-Side Review**: Click **Side by Side** to launch the dual-page visual difference viewer anchored directly to the selected finding's page and topic.
+- **Clear Images**: Safely cleans up temporary comparison images from disk with a safety guard that never touches source PDFs or master crops.
 
-Laid out as list-plus-preview rather than a scrolling wall of cards. A full run
-produces one comparison per crop per language (11 x 31 = 341 on the Start 350
-manual); a card per result built over 10,000 CustomTkinter widgets and pushed Tk
-past the point where it paints reliably. The list is a single native
-`ttk.Treeview` and exactly one image is decoded at a time, so widget count stays
-constant — 299 widgets whether the run produced 3 results or 341.
+### Side-by-Side Dual-Page Viewer (`gui/Side_by_Side_preview.py`)
 
-### Side-by-side page viewer (`gui/page_diff_view.py`)
+When an image or link check fails, reviewers need to inspect both pages in complete context. The **Side-by-Side Preview** opens the master page and its translated counterpart side by side:
 
-The crop comparison answers "does this one graphic match". When it says no, the next
-question is always "what else is wrong on that page" — which needs both pages, whole.
-**Side by Side** on the Review tab opens the master page and its translation side by side:
-- **Mouse Wheel Page Navigation**: Scroll down to move to the next page, scroll up to move to the previous page smoothly without clicking buttons.
-- **Instant Rendering**: Loads and flips pages instantaneously using pre-caching.
-- **Fit Page Mode**: Fits both whole pages inside the viewer side by side by default.
-- **Optional Differences**: A toggle to overlay algorithmic differences on demand.
-
-**Why it does not diff pixels.** The prose has been rewritten in another language, so
-every text block differs by design and a raw diff lights the page up. Translated text
-is also a different length, so paragraphs reflow and push artwork down. Both are
-handled before anything is compared:
-
-- every text span on both pages is painted white, in memory, so only artwork is left;
-- each master graphic is then hunted for **anywhere** on the translated page by
-  normalised cross-correlation, rather than checked in place.
-
-A first attempt subtracted the two masked renders and reported 17–22 differences per
-page on a de-DE translation that is entirely correct — each shifted graphic appearing
-twice, as a hole and as a surprise. Matching instead brings it to a handful, and the
-handful is labelled:
-
-| | |
-|---|---|
-| **Missing from the translation** | not found anywhere on the page |
-| **Extra in the translation** | on the translation, claimed by nothing on the master |
-| **Moved** | found, but more than 3 pt away — the shift is printed beside it |
-
-A matched graphic is painted out of the working copy before the next is hunted, so a
-page carrying several identical hazard icons cannot match them all to the one survivor
-— the same trap `image_counts.py` exists to close. Barcodes and QR codes are excluded,
-because each language legitimately carries its own part number.
-
-What counts as a graphic is `crop_images.get_all_image_candidates`, the same detector
-the crop comparison and the count check use, with the template's ignored margins
-applied — so this view cannot disagree with the rest of the tool about what is on the
-page.
-
-Every difference is drawn **twice**: solid on the side it is on, dashed at the same
-coordinates on the other, so the eye lands on the same spot in both panes. The region
-that was under review is outlined in green. **Previous / Next** step through the
-findings and scroll both panes to each one. **Ignore translated text** is on by
-default; clearing it compares the text too, which is only useful on a page that was
-not supposed to be translated at all.
-
-Verified against a planted defect: erasing one hazard icon from page 7 of the German
-copy is reported as `1 missing from the translation` at the right coordinates, with the
-two genuine reflow shifts on that page correctly separated out as `moved`.
-
-Cards are fed from results already in memory — `run_quality_inspection` returns its
-results, and the Region Inspector publishes its batch through an `on_results` callback.
-
-`RegionInspectorFrame` is a plain `CTkFrame`, so it embeds directly in the window's
-tabview. `RegionInspectorDialog` wraps the same frame in a `CTkToplevel` for standalone
-development (`python -m gui.region_dialog`); the application itself never uses it.
+- **Interactive Dual Canvases**: Displays Master PDF on the left and Translated PDF on the right with synchronized or independent scrolling.
+- **Coordinate-Based Page Anchoring**: Resizing or maximizing the window preserves the active viewing location using document-relative point coordinates, preventing unintended auto-scrolling, jumping, or disorientation.
+- **Sync-Scroll Loop Guard**: An internal rendering guard prevents cross-canvas scroll feedback loops, ensuring smooth navigation.
+- **Fit Width & Fit Page Modes**: Toggle between **Fit Width** (ideal for examining text and small diagrams) and **Fit Page** (ideal for whole-sheet geometry review).
+- **Proportional Step Zoom**: Instant zoom controls (`+`, `-`, `100%`) with automatic page centering.
+- **Visual Defect Highlights**: Algorithmic differences are drawn directly on the canvases:
+  - **Missing**: Graphic present on master but not found in translation.
+  - **Extra**: Graphic present in translation that belongs to no master element.
+  - **Moved**: Graphic shifted beyond the layout tolerance, annotated with the exact shift in points.
+- **Exact Topic & Page Targeting**: When opened from a Review card (e.g. a Missing Link or Image crop), the viewer instantly loads and focuses on the exact master and translated pages corresponding to that topic.
+- **Ignore Translated Text Toggle**: Automatically paints translated prose white before comparing artwork, preventing false diffs caused by normal translation reflow.
 
 ---
 
@@ -384,36 +366,40 @@ SpotCheck/
 ├── run_gui.py                     # Application entry point
 ├── logger_config.py               # Runtime logger & native DLL search paths
 ├── settings.py                    # Remembers the configured paths between sessions
+├── USER_GUIDE.md                  # Comprehensive end-user operational guidelines
 │
 ├── core/                          # ── BACKEND: inspection engine (no Tkinter) ──
 │   ├── __init__.py
-│   ├── pipeline.py                # Unified orchestration & Excel report generator
+│   ├── pipeline.py                # Unified orchestration & 10-sheet Excel report generator
 │   ├── toc.py                     # TOC bookmark & topic numerics validator
+│   ├── links.py                   # Hyperlink & cross-reference extraction & 2D position matching
 │   ├── barcode_qr.py              # Barcode & QR code count & presence verification
 │   ├── docscan.py                 # One page scan per document, cached & page-parallel
 │   ├── crop_images.py             # Vector & raster clustering, pure graphic crops
 │   ├── compare_crops.py           # Cross-page pure graphic template comparison
 │   ├── image_counts.py            # Symmetric image-count check (topic or total)
 │   ├── margins.py                 # Ignored page margins: header/footer/left/right bands
+│   ├── margin_overflow.py         # Margin overflow check: text spilling past margins
 │   ├── metadata.py                # File size, page count, sheet size, column layout
 │   ├── page_diff.py               # What differs between a master page and its translation
 │   ├── templates.py               # Stylesheet templates: margins, page scope & variants
-│   └── region_engine.py           # ROI extraction, scoped exact match & comparison
+│   ├── region_engine.py           # ROI extraction, scoped exact match & comparison
+│   ├── text_overlap.py            # Overlapping text collision detection
+│   └── untranslated.py            # English-left-behind detection
 │
 ├── gui/                           # ── FRONTEND: desktop interface (CustomTkinter) ──
 │   ├── __init__.py
 │   ├── theme.py                   # Xylem palette, typography & ttk styling (shared)
 │   ├── app_window.py              # Main window & tab host: pickers, live log, run control
-│   ├── region_dialog.py           # Region Inspector ROI selector (embedded tab)
+│   ├── region_marking_tab.py      # Region Inspector ROI editor & stylesheet template manager
 │   ├── metadata_tab.py            # Meta Data tab: per-document and per-page facts
-│   ├── comparison_gallery.py      # Review tab: pass/fail image review
-│   └── page_diff_view.py          # Side-by-side page comparison window
+│   ├── Review_tab.py              # Review tab: unified 10-source inspection gallery
+│   └── Side_by_Side_preview.py    # Side-by-side dual-canvas PDF diff viewer with zoom
 │
 ├── Tables/                        # Standalone table structure comparison utilities
 │   ├── Compare_Tables.py
 │   └── Table_extraction.py
 │
-├── test_topic_image_extraction.py # Standalone topic-wise image extraction test
 ├── build_exe.bat                  # Windows 1-click PyInstaller packaging
 ├── SpotCheck.spec                 # PyInstaller build specification
 ├── requirements.txt               # Python package dependencies
@@ -829,9 +815,12 @@ To build a portable, standalone Windows application:
 ## Quality Status Thresholds
 
 - **TOC**: Topic sequence matching (`PASS`), missing / extra topic flagging (`FAIL`).
-- **Barcode & QR**: Exact count and page match (`PASS (Count N/N)`).
-- **Images**: Image similarity ≥ 80.0% (`MATCH (PASS)`).
-- **Master Verdict**: `PASS` only when TOC, Barcode & QR, and Images all evaluate to `PASS`.
+- **Links**: Exact destination and count matching (`PASS`). Missing links, extra links, or destination mismatches evaluate to `FAIL` with issue count annotations (`FAIL (N)`).
+- **Barcode & QR**: Exact count and page match (`PASS (Count N/N)`). Structural-only detections reported as `PASS (Count N/N structural)`. Missing detector reported as `CHECK (No Detector)`.
+- **Images**: Pure graphic template similarity ≥ 80.0% (`MATCH (PASS)`).
+- **Image Counts**: Symmetric graphic counts match per topic (with TOC) or document total (without TOC) (`PASS`). Additions or deletions flag `FAIL`.
+- **Text Quality & Margins**: Any text collision (`FAIL`), untranslated English line (`FAIL`), or text margin overflow (`FAIL`) lowers the document verdict.
+- **Master Verdict**: `PASS` only when TOC, Links, Barcode & QR, Images, Image Counts, and Region Inspector all evaluate to `PASS` with zero text/margin defects.
 
 ### Region Inspector verdicts
 

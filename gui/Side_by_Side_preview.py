@@ -117,8 +117,8 @@ class PageDiffWindow(ctk.CTkToplevel):
         self.trans_pages = page_diff.page_count(trans_pdf)
         self._trans_offset = self.trans_page - self.master_page
 
-        # Viewing state
-        self.fit_mode = "page"           # "page", "width", or "custom"
+        # Viewing state: default to "width" when focused on a specific finding for maximum readability
+        self.fit_mode = "width" if self.focus_rect else "page"
         self.custom_zoom = 1.0
         self.zooms = {"master": 1.0, "trans": 1.0}
 
@@ -318,15 +318,22 @@ class PageDiffWindow(ctk.CTkToplevel):
             font=self._f(10), command=lambda: self._zoom(-0.15)
         ).pack(side="right", padx=2, pady=6)
 
-        ctk.CTkButton(
-            bar, text="Fit Width", width=68, height=26, fg_color=UI_CARD_BG,
-            text_color=DEPENDABLE_BLUE, border_width=1, border_color=UI_BORDER,
-            font=self._f(10), command=self._set_fit_width
-        ).pack(side="right", padx=3, pady=6)
+        self.fit_width_btn = ctk.CTkButton(
+            bar, text="Fit Width", width=68, height=26,
+            fg_color=XYLEM_BLUE if self.fit_mode == "width" else UI_CARD_BG,
+            text_color=NEUTRAL_WHITE if self.fit_mode == "width" else DEPENDABLE_BLUE,
+            border_width=1, border_color=UI_BORDER,
+            font=self._f(10, "bold" if self.fit_mode == "width" else "normal"),
+            command=self._set_fit_width
+        )
+        self.fit_width_btn.pack(side="right", padx=3, pady=6)
 
         self.fit_page_btn = ctk.CTkButton(
-            bar, text="Fit Page", width=68, height=26, fg_color=XYLEM_BLUE,
-            text_color=NEUTRAL_WHITE, font=self._f(10, "bold"),
+            bar, text="Fit Page", width=68, height=26,
+            fg_color=XYLEM_BLUE if self.fit_mode == "page" else UI_CARD_BG,
+            text_color=NEUTRAL_WHITE if self.fit_mode == "page" else DEPENDABLE_BLUE,
+            border_width=1, border_color=UI_BORDER,
+            font=self._f(10, "bold" if self.fit_mode == "page" else "normal"),
             command=self._set_fit_page)
         self.fit_page_btn.pack(side="right", padx=3, pady=6)
 
@@ -449,6 +456,7 @@ class PageDiffWindow(ctk.CTkToplevel):
 
             # Double-click to toggle Fit Page / 100%
             cv.bind("<Double-Button-1>", lambda _e: self._toggle_fit_zoom())
+            cv.bind("<Configure>", self._on_canvas_resize)
 
             self.panes[side] = {
                 "card": card, "canvas": cv, "name": name_lbl, "page_lbl": side_lbl,
@@ -477,9 +485,42 @@ class PageDiffWindow(ctk.CTkToplevel):
     # ──────────────────────────────────────────────────────────
     def _initial_load(self):
         """Initial render once widget dimensions are established."""
+        self.update_idletasks()
+        m_cv = self.panes.get("master", {}).get("canvas")
+        if m_cv and (m_cv.winfo_width() <= 100 or m_cv.winfo_height() <= 100):
+            self.after(50, self._initial_load)
+            return
         self._load_and_render_side("master")
         self._load_and_render_side("trans")
         self._set_active_side("master")
+        if self.focus_rect:
+            self._scroll_to_focus()
+
+    def _scroll_to_focus(self):
+        """Scroll both canvases so the focus region is vertically centered and visible on initial load."""
+        if not self.focus_rect or getattr(self, "_has_scrolled_to_focus", False):
+            return
+        self._has_scrolled_to_focus = True
+
+        side = self.focus_side if self.focus_side in self._pt_sizes else "master"
+        pt_size = self._pt_sizes.get(side)
+        if not pt_size or pt_size[1] <= 0:
+            return
+
+        y_top = self.focus_rect[1]
+        y_bot = self.focus_rect[3] if len(self.focus_rect) > 3 else y_top
+        y_mid = (y_top + y_bot) / 2.0
+
+        rel_pos = max(0.0, min(1.0, (y_mid - 80.0) / float(pt_size[1])))
+
+        def _do_scroll():
+            try:
+                for pane in self.panes.values():
+                    pane["canvas"].yview_moveto(rel_pos)
+            except Exception:
+                pass
+
+        self.after(100, _do_scroll)
 
     def _load_and_render_side(self, side):
         """Load and display a single side independently."""
@@ -530,12 +571,31 @@ class PageDiffWindow(ctk.CTkToplevel):
             return
 
         cv = self.panes[side]["canvas"]
-        cw = max(100, cv.winfo_width())
-        ch = max(100, cv.winfo_height())
+        cw = cv.winfo_width()
+        ch = cv.winfo_height()
+        if cw <= 100 or ch <= 100:
+            return
+
+        # Measure current visible top fraction of the page before re-rendering so resize doesn't jump
+        saved_top_frac = None
+        try:
+            old_scale = self.zooms.get(side, 1.0)
+            old_nh = int(base_img.height * old_scale)
+            sr = cv.cget("scrollregion")
+            if sr:
+                old_H = float(sr.split()[3])
+            else:
+                old_H = max(ch, old_nh)
+            old_pos_y = max(0, (old_H - old_nh) // 2)
+            yv = cv.yview()[0]
+            top_px = yv * old_H - old_pos_y
+            saved_top_frac = max(0.0, min(1.0, top_px / max(1, old_nh)))
+        except Exception:
+            saved_top_frac = None
 
         if self.fit_mode == "page":
             scale = min((cw - 16) / max(1, base_img.width), (ch - 16) / max(1, base_img.height))
-            scale = max(0.15, min(scale, 2.0))
+            scale = max(0.15, min(scale, 2.5))
             self.zooms[side] = scale
         elif self.fit_mode == "width":
             scale = (cw - 20) / max(1, base_img.width)
@@ -561,19 +621,38 @@ class PageDiffWindow(ctk.CTkToplevel):
         pos_y = max(0, (ch - nh) // 2)
 
         cv.create_image(pos_x, pos_y, anchor="nw", image=photo, tags="page_img")
-        cv.config(scrollregion=(0, 0, max(cw, nw + pos_x * 2), max(ch, nh + pos_y * 2)))
+        new_H = max(ch, nh + pos_y * 2)
+        cv.config(scrollregion=(0, 0, max(cw, nw + pos_x * 2), new_H))
         self._draw_overlays_side(side)
+
+        # Restore visible vertical position so view does not auto-scroll on resize
+        if saved_top_frac is not None and nh > ch:
+            target_top_px = pos_y + saved_top_frac * nh
+            new_yv = max(0.0, min(1.0, target_top_px / max(1, new_H)))
+            cv.yview_moveto(new_yv)
 
     def _render_view(self):
         """Re-render both sides."""
-        self._render_side("master")
-        self._render_side("trans")
+        self._rendering = True
+        try:
+            self._render_side("master")
+            self._render_side("trans")
+        finally:
+            self._rendering = False
         avg_zoom = int(self.zooms.get("master", 1.0) * 100)
         self.zoom_lbl.configure(text=f"{avg_zoom}%")
         if self.fit_mode == "page":
-            self.fit_page_btn.configure(fg_color=XYLEM_BLUE, text_color=NEUTRAL_WHITE)
+            self.fit_page_btn.configure(fg_color=XYLEM_BLUE, text_color=NEUTRAL_WHITE, font=self._f(10, "bold"))
+            if hasattr(self, "fit_width_btn"):
+                self.fit_width_btn.configure(fg_color=UI_CARD_BG, text_color=DEPENDABLE_BLUE, font=self._f(10, "normal"))
+        elif self.fit_mode == "width":
+            self.fit_page_btn.configure(fg_color=UI_CARD_BG, text_color=DEPENDABLE_BLUE, font=self._f(10, "normal"))
+            if hasattr(self, "fit_width_btn"):
+                self.fit_width_btn.configure(fg_color=XYLEM_BLUE, text_color=NEUTRAL_WHITE, font=self._f(10, "bold"))
         else:
-            self.fit_page_btn.configure(fg_color=UI_CARD_BG, text_color=DEPENDABLE_BLUE)
+            self.fit_page_btn.configure(fg_color=UI_CARD_BG, text_color=DEPENDABLE_BLUE, font=self._f(10, "normal"))
+            if hasattr(self, "fit_width_btn"):
+                self.fit_width_btn.configure(fg_color=UI_CARD_BG, text_color=DEPENDABLE_BLUE, font=self._f(10, "normal"))
 
     def _draw_overlays_side(self, side):
         """Draw focus region and optional difference boxes for one side."""
@@ -1006,12 +1085,21 @@ class PageDiffWindow(ctk.CTkToplevel):
             self.fit_mode = "page"
         self._render_view()
 
-    def _on_window_resize(self, event):
-        """Recalculate layout on window resize when in Fit Page/Width mode."""
-        if event.widget == self and self.fit_mode in ("page", "width"):
+    def _on_canvas_resize(self, event=None):
+        """Recalculate layout whenever canvas dimensions change in Fit Page/Width mode."""
+        if getattr(self, "fit_mode", "page") in ("page", "width"):
             if self._resize_timer:
                 self.after_cancel(self._resize_timer)
-            self._resize_timer = self.after(120, self._render_view)
+            self._resize_timer = self.after(60, self._render_view)
+
+    def _on_window_resize(self, event=None):
+        """Recalculate layout on window resize when in Fit Page/Width mode."""
+        if event is not None and getattr(event, "widget", None) is not self:
+            return
+        if getattr(self, "fit_mode", "page") in ("page", "width"):
+            if self._resize_timer:
+                self.after_cancel(self._resize_timer)
+            self._resize_timer = self.after(60, self._render_view)
 
     # ──────────────────────────────────────────────────────────
     # Scroll Synchronization (when lock_scroll is True)
@@ -1039,7 +1127,7 @@ class PageDiffWindow(ctk.CTkToplevel):
             vsb.set(first, last)
         except Exception:
             return
-        if not self.lock_scroll.get() or self._syncing:
+        if getattr(self, "_rendering", False) or not self.lock_scroll.get() or self._syncing:
             return
         self._syncing = True
         try:
@@ -1054,7 +1142,7 @@ class PageDiffWindow(ctk.CTkToplevel):
             hsb.set(first, last)
         except Exception:
             return
-        if not self.lock_scroll.get() or self._syncing:
+        if getattr(self, "_rendering", False) or not self.lock_scroll.get() or self._syncing:
             return
         self._syncing = True
         try:
