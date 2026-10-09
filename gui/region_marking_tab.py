@@ -376,6 +376,10 @@ class RegionInspectorFrame(ctk.CTkFrame):
             self.output_crops_dir = DEFAULT_CROPS_OUTPUT_DIR
 
         self.total_pages = get_page_count(self.eng_pdf_path) if self.eng_pdf_path else 0
+        if self.eng_pdf_path and self.total_pages > 0:
+            sz = self._page_size_pt(getattr(self, "current_page", 1) or 1)
+            if sz:
+                self.page_width_pt, self.page_height_pt = sz
 
     def _page_size_pt(self, page_num=1):
         """
@@ -448,6 +452,9 @@ class RegionInspectorFrame(ctk.CTkFrame):
             self._reapply_selected_template()
 
         self.current_page = max(1, min(self.current_page, max(1, self.total_pages)))
+        sz = self._page_size_pt(self.current_page)
+        if sz:
+            self.page_width_pt, self.page_height_pt = sz
 
         try:
             self.page_spin.configure(to=max(1, self.total_pages))
@@ -677,6 +684,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
         ctk.CTkButton(mgmt_btn_bar, text="➕ Add Selection", width=95, height=26, fg_color=XYLEM_BLUE, text_color=NEUTRAL_WHITE, font=_font(size=10, weight="bold"), command=self._on_btn_add_region).pack(side="left", padx=2)
         ctk.CTkButton(mgmt_btn_bar, text="🗑️ Delete Selection", width=95, height=26, fg_color=UI_CARD_WELL, text_color=DEPENDABLE_BLUE, font=_font(size=10), command=self._on_btn_delete_region).pack(side="left", padx=2)
         ctk.CTkButton(mgmt_btn_bar, text="🧹 Clear All", width=75, height=26, fg_color=UI_CARD_WELL, text_color=DEPENDABLE_BLUE, font=_font(size=10), command=self._on_btn_clear_regions).pack(side="left", padx=2)
+        ctk.CTkButton(mgmt_btn_bar, text="📐 Align to Margins", width=115, height=26, fg_color=UI_CARD_WELL, text_color=DEPENDABLE_BLUE, font=_font(size=10), command=self._on_align_to_margins).pack(side="left", padx=2)
 
         # Region Treeview (List of defined regions)
         r_table_frame = tk.Frame(right_card, bg=UI_CARD_BG)
@@ -1702,12 +1710,18 @@ class RegionInspectorFrame(ctk.CTkFrame):
         if not self.show_margins_var.get() or self.total_pages == 0:
             return None
         m = self._effective_margins()
+        img_w = 10 + self.page_width_pt * self.zoom
+        img_h = 10 + self.page_height_pt * self.zoom
+        grab_tol = MARGIN_GRAB_PX + 2
         for side, pos in self._guide_positions().items():
             if m[side] <= 0:
                 continue
-            near = cy if MARGIN_AXIS[side] == "y" else cx
-            if abs(near - pos) <= MARGIN_GRAB_PX:
-                return side
+            if MARGIN_AXIS[side] == "y":
+                if -15 <= cx <= img_w + 25 and abs(cy - pos) <= grab_tol:
+                    return side
+            else:
+                if -15 <= cy <= img_h + 25 and abs(cx - pos) <= grab_tol:
+                    return side
         return None
 
     # What the pointer turns into over each grab handle. Without this the
@@ -2220,6 +2234,55 @@ class RegionInspectorFrame(ctk.CTkFrame):
             self.active_region_id = None
             self._load_and_render_page()
 
+    def _on_align_to_margins(self):
+        """Align active region boundaries cleanly to page margins or content bounds."""
+        if not self.regions:
+            messagebox.showinfo("Align", "No regions defined to align.")
+            return
+        active_r = self._get_active_region()
+        if not active_r:
+            messagebox.showinfo("Align", "Please select a region to align.")
+            return
+
+        x0, y0, x1, y1 = active_r["roi_rect"]
+        pw = float(self.page_width_pt or 595.0)
+        ph = float(self.page_height_pt or 842.0)
+        m = self._effective_margins()
+
+        lm = float(m.get("left", 0.0))
+        rm = float(pw - m.get("right", 0.0))
+        tm = float(m.get("header", 0.0))
+        bm = float(ph - m.get("footer", 0.0))
+
+        # Check if region is a sub-region with a parent
+        parent_id = active_r.get("parent_id")
+        if parent_id is not None:
+            parent = next((p for p in self.regions if p["id"] == parent_id), None)
+            if parent and parent.get("roi_rect"):
+                lm, tm, rm, bm = parent["roi_rect"]
+
+        # Align edges to margin/parent bounds if within 45 pt, or expand width to margins
+        nx0 = lm if abs(x0 - lm) <= 45.0 else x0
+        nx1 = rm if abs(x1 - rm) <= 45.0 else x1
+        ny0 = tm if abs(y0 - tm) <= 45.0 else y0
+        ny1 = bm if abs(y1 - bm) <= 45.0 else y1
+
+        # If already far from margins or already aligned, snap width to full live content area
+        if (nx0, ny0, nx1, ny1) == (x0, y0, x1, y1):
+            if abs(x0 - lm) > 1.0 or abs(x1 - rm) > 1.0:
+                nx0, nx1 = lm, rm
+            elif abs(y1 - bm) > 1.0:
+                ny1 = bm
+
+        active_r["roi_rect"] = (round(nx0, 1), round(ny0, 1), round(nx1, 1), round(ny1, 1))
+        self._sync_regions_table()
+        self._draw_all_rois_on_canvas()
+        self._update_region_preview(active_r)
+        self.status_lbl.configure(
+            text=f"Aligned {active_r['label']} to margins ({nx0:.0f}, {ny0:.0f}, {nx1:.0f}, {ny1:.0f}) pt",
+            text_color=theme.TEXT_ATTENTION
+        )
+
     def _visible_tree_items(self, parent=""):
         """
         Every row the list is actually showing, top to bottom.
@@ -2423,7 +2486,9 @@ class RegionInspectorFrame(ctk.CTkFrame):
         # rectangle verbatim too), so what is drawn is what is verified.
         # Read the size off the document being loaded, never off the canvas: the
         # canvas is still showing the last one. See _page_size_pt.
-        page_size = self._page_size_pt(1)
+        page_size = self._page_size_pt(self.current_page or 1) or self._page_size_pt(1)
+        if page_size:
+            self.page_width_pt, self.page_height_pt = page_size
         total = self.total_pages or 0
 
         self.regions = []
@@ -2998,6 +3063,7 @@ class RegionInspectorFrame(ctk.CTkFrame):
 
             self.pil_image = img
             self.page_width_pt = pw
+            self.page_height_pt = ph
             self.tk_image = ImageTk.PhotoImage(img, master=self.canvas)
             self.canvas.image = self.tk_image
 
@@ -3161,23 +3227,86 @@ class RegionInspectorFrame(ctk.CTkFrame):
         pw = self.page_width_pt or (x1 + 1)
         ph = self.page_height_pt or (y1 + 1)
 
+        # Magnetic snap targets: page margins, page edges, and parent scope
+        m = self._effective_margins()
+        snap_dist = 5.0  # 5 pt magnetic alignment threshold
+        snap_x = [0.0, pw]
+        snap_y = [0.0, ph]
+        if m.get("left", 0) > 0:
+            snap_x.append(m["left"])
+        if m.get("right", 0) > 0:
+            snap_x.append(pw - m["right"])
+        if m.get("header", 0) > 0:
+            snap_y.append(m["header"])
+        if m.get("footer", 0) > 0:
+            snap_y.append(ph - m["footer"])
+
+        parent_id = r.get("parent_id")
+        if parent_id is not None:
+            parent = next((p for p in self.regions if p["id"] == parent_id), None)
+            if parent and parent.get("roi_rect"):
+                snap_x.extend([parent["roi_rect"][0], parent["roi_rect"][2]])
+                snap_y.extend([parent["roi_rect"][1], parent["roi_rect"][3]])
+
         if self._edit_corner is None:
-            # Move, kept whole: a box pushed at the edge stops rather than
-            # being silently clipped to a different size.
-            dx = max(-x0, min(dx, pw - x1))
-            dy = max(-y0, min(dy, ph - y1))
-            new = (x0 + dx, y0 + dy, x1 + dx, y1 + dy)
+            # Move whole box: snap leading or trailing edges to nearest target
+            target_dx = dx
+            target_dy = dy
+            nx0 = x0 + dx
+            nx1 = x1 + dx
+            ny0 = y0 + dy
+            ny1 = y1 + dy
+
+            for sx in snap_x:
+                if abs(nx0 - sx) <= snap_dist:
+                    target_dx = sx - x0
+                    break
+                elif abs(nx1 - sx) <= snap_dist:
+                    target_dx = (sx - (x1 - x0)) - x0
+                    break
+
+            for sy in snap_y:
+                if abs(ny0 - sy) <= snap_dist:
+                    target_dy = sy - y0
+                    break
+                elif abs(ny1 - sy) <= snap_dist:
+                    target_dy = (sy - (y1 - y0)) - y0
+                    break
+
+            target_dx = max(-x0, min(target_dx, pw - x1))
+            target_dy = max(-y0, min(target_dy, ph - y1))
+            new = (x0 + target_dx, y0 + target_dy, x1 + target_dx, y1 + target_dy)
         else:
             c = self._edit_corner
             nx0, ny0, nx1, ny1 = x0, y0, x1, y1
             if "w" in c:
-                nx0 = min(x1 - MIN_REGION_PT, x0 + dx)
+                cand_x0 = x0 + dx
+                for sx in snap_x:
+                    if abs(cand_x0 - sx) <= snap_dist:
+                        cand_x0 = sx
+                        break
+                nx0 = min(x1 - MIN_REGION_PT, cand_x0)
             if "e" in c:
-                nx1 = max(x0 + MIN_REGION_PT, x1 + dx)
+                cand_x1 = x1 + dx
+                for sx in snap_x:
+                    if abs(cand_x1 - sx) <= snap_dist:
+                        cand_x1 = sx
+                        break
+                nx1 = max(x0 + MIN_REGION_PT, cand_x1)
             if "n" in c:
-                ny0 = min(y1 - MIN_REGION_PT, y0 + dy)
+                cand_y0 = y0 + dy
+                for sy in snap_y:
+                    if abs(cand_y0 - sy) <= snap_dist:
+                        cand_y0 = sy
+                        break
+                ny0 = min(y1 - MIN_REGION_PT, cand_y0)
             if "s" in c:
-                ny1 = max(y0 + MIN_REGION_PT, y1 + dy)
+                cand_y1 = y1 + dy
+                for sy in snap_y:
+                    if abs(cand_y1 - sy) <= snap_dist:
+                        cand_y1 = sy
+                        break
+                ny1 = max(y0 + MIN_REGION_PT, cand_y1)
             new = (max(0.0, nx0), max(0.0, ny0), min(pw, nx1), min(ph, ny1))
 
         old = tuple(r["roi_rect"])
@@ -3296,6 +3425,19 @@ class RegionInspectorFrame(ctk.CTkFrame):
         y0 = max(0.0, (cy0 - 10) / self.zoom)
         x1 = min(self.page_width_pt, (cx1 - 10) / self.zoom)
         y1 = min(self.page_height_pt, (cy1 - 10) / self.zoom)
+
+        # Snap newly drawn box to nearby margins
+        m = self._effective_margins()
+        snap_dist = 5.0
+        if m.get("left", 0) > 0 and abs(x0 - m["left"]) <= snap_dist:
+            x0 = m["left"]
+        if m.get("right", 0) > 0 and abs(x1 - (self.page_width_pt - m["right"])) <= snap_dist:
+            x1 = self.page_width_pt - m["right"]
+        if m.get("header", 0) > 0 and abs(y0 - m["header"]) <= snap_dist:
+            y0 = m["header"]
+        if m.get("footer", 0) > 0 and abs(y1 - (self.page_height_pt - m["footer"])) <= snap_dist:
+            y1 = self.page_height_pt - m["footer"]
+
         new_roi = (round(x0, 1), round(y0, 1), round(x1, 1), round(y1, 1))
 
         self._add_new_region(

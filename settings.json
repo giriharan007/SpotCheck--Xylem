@@ -4,8 +4,8 @@
   "output_dir": "C:\\Xylem Project\\SpotCheck\\Input\\Batch-5\\SpotCheck_Output",
   "template": "10_xylem_A5_1c",
   "margins": {
-    "header": 40.0,
-    "footer": 40.0,
+    "header": 50.4,
+    "footer": 41.3,
     "left": 35.0,
     "right": 35.0,
     "skip_pages": {

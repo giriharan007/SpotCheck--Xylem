@@ -136,7 +136,22 @@ if not "!BUILD_RC!"=="0" (
         --hidden-import "gui.region_marking_tab" ^
         --hidden-import "gui.Review_tab" ^
         --hidden-import "gui.Side_by_Side_preview" ^
-        --hidden-import "gui.metadata_tab" ^
+        --exclude-module "torch" ^
+        --exclude-module "torchvision" ^
+        --exclude-module "transformers" ^
+        --exclude-module "tokenizers" ^
+        --exclude-module "scipy" ^
+        --exclude-module "pandas" ^
+        --exclude-module "pyarrow" ^
+        --exclude-module "duckdb" ^
+        --exclude-module "openai" ^
+        --exclude-module "langchain" ^
+        --exclude-module "langgraph" ^
+        --exclude-module "streamlit" ^
+        --exclude-module "altair" ^
+        --exclude-module "sympy" ^
+        --exclude-module "huggingface_hub" ^
+        --exclude-module "psycopg" ^
         run_gui.py >> "%BUILD_LOG%" 2>&1
     if errorlevel 1 (
         echo [ERROR] Both builds failed. See %BUILD_LOG%.

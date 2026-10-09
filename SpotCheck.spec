@@ -155,6 +155,23 @@ try:
 except Exception as e:
     print(f"[SPEC WARNING] openpyxl collect_all failed: {e}")
 
+# 6. PDFPlumber & Cryptography Collection (required for PDF parsing/pdfminer)
+try:
+    plumb_datas, plumb_binaries, plumb_hidden = collect_all('pdfplumber')
+    all_datas.extend(plumb_datas)
+    all_binaries.extend(plumb_binaries)
+    all_hiddenimports.extend(plumb_hidden)
+except Exception as e:
+    print(f"[SPEC WARNING] pdfplumber collect_all failed: {e}")
+
+try:
+    crypto_datas, crypto_binaries, crypto_hidden = collect_all('cryptography')
+    all_datas.extend(crypto_datas)
+    all_binaries.extend(crypto_binaries)
+    all_hiddenimports.extend(crypto_hidden)
+except Exception as e:
+    print(f"[SPEC WARNING] cryptography collect_all failed: {e}")
+
 # Remove duplicates while preserving order
 def deduplicate_list_of_tuples(items):
     seen = set()
@@ -170,6 +187,75 @@ all_datas = deduplicate_list_of_tuples(all_datas)
 all_binaries = deduplicate_list_of_tuples(all_binaries)
 all_hiddenimports = list(dict.fromkeys(all_hiddenimports))
 
+# Exclude heavy unnecessary packages that may be installed in the environment
+# but are completely unused by SpotCheck (e.g. PyTorch, SciPy, Pandas, PyArrow).
+unnecessary_excludes = [
+    # Machine Learning & AI Frameworks (huge bloat)
+    'torch',
+    'torchvision',
+    'torchaudio',
+    'transformers',
+    'tokenizers',
+    'safetensors',
+    'huggingface_hub',
+    'hf_xet',
+    'openai',
+    'groq',
+    'langchain',
+    'langchain_core',
+    'langchain_groq',
+    'langchain_protocol',
+    'langgraph',
+    'langsmith',
+
+    # Data Science & Heavy Math Libraries
+    'scipy',
+    'pandas',
+    'pyarrow',
+    'duckdb',
+    'altair',
+    'streamlit',
+    'sympy',
+    'mpmath',
+    'pydeck',
+    'matplotlib',
+    'scikit-image',
+    'skimage',
+    'imageio',
+    'tifffile',
+    'networkx',
+
+    # Databases & Web Stack
+    'psycopg',
+    'psycopg_binary',
+    'pyodbc',
+    'sqlalchemy',
+    'SQLAlchemy',
+    'sqlglot',
+    'starlette',
+    'uvicorn',
+    'fastapi',
+    'watchdog',
+    'websockets',
+    'pydantic',
+    'pydantic_core',
+    'httpcore',
+    'httpcore2',
+    'httpx',
+    'httpx2',
+    'httptools',
+    'ormsgpack',
+    'rich',
+    'markdown_it',
+    'mdurl',
+
+    # Testing & Notebooks
+    'pytest',
+    'IPython',
+    'jupyter',
+    'notebook',
+]
+
 a = Analysis(
     ['run_gui.py'],
     pathex=['.'],
@@ -179,7 +265,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=unnecessary_excludes,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -245,6 +331,28 @@ def drop_foreign_architecture(binaries):
     return kept
 
 
+def is_unnecessary_artifact(item):
+    dest = item[0] if isinstance(item, (list, tuple)) else str(item)
+    src = item[1] if isinstance(item, (list, tuple)) and len(item) > 1 else ""
+    lower = (str(dest) + " " + str(src)).lower().replace("\\", "/")
+    blocked = [
+        "torch", "scipy", "pandas", "pyarrow", "duckdb", "transformers",
+        "openai", "groq", "langchain", "langgraph", "langsmith", "streamlit",
+        "altair", "sympy", "mpmath", "huggingface", "hf_xet", "psycopg",
+        "tokenizers", "matplotlib", "pydantic", "sqlalchemy",
+        "pydeck", "skimage", "imageio", "tifffile", "networkx", "pytest",
+        "ipython", "jupyter", "starlette", "uvicorn", "fastapi", "watchdog"
+    ]
+    for b in blocked:
+        if (f"/{b}/" in lower or f"/{b}." in lower or f"/{b}-" in lower or 
+            f"/{b}_" in lower or f"_{b}" in lower or f"{b}_" in lower or 
+            f"{b}." in lower or lower.startswith(b) or f"site-packages/{b}" in lower):
+            return True
+    return False
+
+a.binaries = [b for b in a.binaries if not is_unnecessary_artifact(b)]
+a.datas = [d for d in a.datas if not is_unnecessary_artifact(d)]
+a.zipfiles = [z for z in a.zipfiles if not is_unnecessary_artifact(z)]
 a.binaries = drop_foreign_architecture(a.binaries)
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)

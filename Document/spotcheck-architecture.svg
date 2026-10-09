@@ -1,0 +1,302 @@
+<svg width="1400" height="920" viewBox="0 0 1400 920" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .title { font: 700 28px 'Segoe UI', Arial, sans-serif; fill: #003E51; }
+      .subtitle { font: 500 15px 'Segoe UI', Arial, sans-serif; fill: #3D5F6B; }
+      .section-hdr { font: 700 13px 'Segoe UI', Arial, sans-serif; letter-spacing: 0.08em; text-transform: uppercase; }
+      .box-title { font: 700 14px 'Segoe UI', Arial, sans-serif; fill: #003E51; }
+      .box-desc { font: 500 12px 'Segoe UI', Arial, sans-serif; fill: #3D5F6B; }
+      .mono-sm { font: 500 11.5px 'Consolas', 'Courier New', monospace; fill: #007DA3; }
+      
+      .panel-input { fill: #F4F8FA; stroke: #D0DFEB; stroke-width: 1.5; rx: 10; }
+      .panel-gui { fill: #EDF7FA; stroke: #007DA3; stroke-width: 1.5; rx: 10; }
+      .panel-core { fill: #F0FDF4; stroke: #16A34A; stroke-width: 1.5; rx: 10; }
+      .panel-module { fill: #FFFFFF; stroke: #B2D0DD; stroke-width: 1.2; rx: 8; }
+      .panel-lib { fill: #F8FAFC; stroke: #94A3B8; stroke-width: 1.2; rx: 8; }
+      .panel-output { fill: #FDF4EB; stroke: #D97706; stroke-width: 1.5; rx: 10; }
+      
+      .arrow { stroke: #003E51; stroke-width: 2.2; fill: none; marker-end: url(#arrow-main); }
+      .arrow-accent { stroke: #007DA3; stroke-width: 2; fill: none; marker-end: url(#arrow-accent); }
+      .dashed-queue { stroke: #007DA3; stroke-width: 2; fill: none; stroke-dasharray: 6 4; marker-end: url(#arrow-accent); }
+      .dashed-data { stroke: #16A34A; stroke-width: 1.8; fill: none; stroke-dasharray: 5 4; marker-end: url(#arrow-green); }
+    </style>
+
+    <marker id="arrow-main" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <polygon points="0 0, 9 4.5, 0 9" fill="#003E51"/>
+    </marker>
+    <marker id="arrow-accent" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <polygon points="0 0, 9 4.5, 0 9" fill="#007DA3"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <polygon points="0 0, 9 4.5, 0 9" fill="#16A34A"/>
+    </marker>
+  </defs>
+
+  <!-- Canvas Background -->
+  <rect width="1400" height="920" fill="#FFFFFF"/>
+
+  <!-- Header -->
+  <text x="700" y="44" text-anchor="middle" class="title">SpotCheck · Architecture &amp; Execution Pipeline</text>
+  <text x="700" y="68" text-anchor="middle" class="subtitle">Automated Multi-Language PDF Quality Assurance &amp; Visual Inspection Engine for Xylem Documentation</text>
+
+  <!-- ==================== LEFT: INPUTS ==================== -->
+  <g transform="translate(30, 95)">
+    <rect width="210" height="780" class="panel-input"/>
+    <text x="105" y="32" text-anchor="middle" class="section-hdr" fill="#007DA3">INPUT ASSETS</text>
+
+    <!-- Master PDF Card -->
+    <rect x="15" y="55" width="180" height="110" rx="8" fill="#FFFFFF" stroke="#007DA3" stroke-width="1.5"/>
+    <text x="105" y="85" text-anchor="middle" class="box-title">English Master PDF</text>
+    <text x="105" y="106" text-anchor="middle" class="mono-sm">master.pdf</text>
+    <text x="105" y="126" text-anchor="middle" class="box-desc">Single source of truth</text>
+    <text x="105" y="145" text-anchor="middle" class="box-desc">Baseline ground truth</text>
+
+    <!-- Translations Card -->
+    <rect x="15" y="185" width="180" height="120" rx="8" fill="#FFFFFF" stroke="#007DA3" stroke-width="1.5"/>
+    <text x="105" y="215" text-anchor="middle" class="box-title">Translated PDFs</text>
+    <text x="105" y="236" text-anchor="middle" class="mono-sm">1..N Localized Manuals</text>
+    <text x="105" y="256" text-anchor="middle" class="box-desc">IT, DE, FR, ES, ZH, SV...</text>
+    <text x="105" y="275" text-anchor="middle" class="box-desc">Auto-discovered in folder</text>
+    <text x="105" y="292" text-anchor="middle" class="box-desc">("One Folder = One Batch")</text>
+
+    <!-- Stylesheet Template Card -->
+    <rect x="15" y="325" width="180" height="115" rx="8" fill="#FFFFFF" stroke="#64748B" stroke-width="1.2"/>
+    <text x="105" y="355" text-anchor="middle" class="box-title">Stylesheet Template</text>
+    <text x="105" y="376" text-anchor="middle" class="mono-sm">*.template.json</text>
+    <text x="105" y="396" text-anchor="middle" class="box-desc">Pre-calibrated ROIs</text>
+    <text x="105" y="415" text-anchor="middle" class="box-desc">Headers, footers, logos</text>
+    <text x="105" y="432" text-anchor="middle" class="box-desc">5-mode match rules</text>
+
+    <!-- Batch Scanner Note -->
+    <rect x="15" y="460" width="180" height="120" rx="8" fill="#EBF3F7" stroke="#B2D0DD" stroke-width="1"/>
+    <text x="105" y="488" text-anchor="middle" class="box-title" font-size="12">Persistent Config</text>
+    <text x="105" y="508" text-anchor="middle" class="mono-sm">settings.json</text>
+    <text x="105" y="528" text-anchor="middle" class="box-desc">• Remembers paths</text>
+    <text x="105" y="546" text-anchor="middle" class="box-desc">• Saved template ID</text>
+    <text x="105" y="564" text-anchor="middle" class="box-desc">• Tolerance thresholds</text>
+  </g>
+
+  <!-- ==================== TOP CENTER: GUI LAYER ==================== -->
+  <g transform="translate(265, 95)">
+    <rect width="840" height="165" class="panel-gui"/>
+    <text x="420" y="28" text-anchor="middle" class="section-hdr" fill="#003E51">PRESENTATION LAYER · MAIN THREAD (TKINTER)</text>
+    <text x="420" y="46" text-anchor="middle" class="mono-sm" font-size="12">run_gui.py → gui/app_window.py (AppWindow)</text>
+
+    <!-- Tab 1: Inspection -->
+    <rect x="18" y="62" width="150" height="88" class="panel-module"/>
+    <text x="93" y="86" text-anchor="middle" class="box-title">Inspection Tab</text>
+    <text x="93" y="106" text-anchor="middle" class="box-desc">Path selector</text>
+    <text x="93" y="123" text-anchor="middle" class="box-desc">Template picker</text>
+    <text x="93" y="140" text-anchor="middle" class="box-desc">Live run controls</text>
+
+    <!-- Tab 2: Review Tab -->
+    <rect x="180" y="62" width="155" height="88" class="panel-module" stroke="#007DA3" stroke-width="1.8"/>
+    <text x="257" y="86" text-anchor="middle" class="box-title">Review Tab</text>
+    <text x="257" y="104" text-anchor="middle" class="mono-sm">gui/Review_tab.py</text>
+    <text x="257" y="122" text-anchor="middle" class="box-desc">Card findings gallery</text>
+    <text x="257" y="139" text-anchor="middle" class="box-desc">Pass / Review filters</text>
+
+    <!-- Tab 3: Side-by-Side Dual Preview -->
+    <rect x="347" y="62" width="160" height="88" class="panel-module" stroke="#007DA3" stroke-width="1.8"/>
+    <text x="427" y="86" text-anchor="middle" class="box-title">Side-by-Side View</text>
+    <text x="427" y="104" text-anchor="middle" class="mono-sm">Side_by_Side_preview.py</text>
+    <text x="427" y="122" text-anchor="middle" class="box-desc">Dual synced canvas</text>
+    <text x="427" y="139" text-anchor="middle" class="box-desc">Visual diff overlays</text>
+
+    <!-- Tab 4: Region Inspector -->
+    <rect x="519" y="62" width="150" height="88" class="panel-module"/>
+    <text x="594" y="86" text-anchor="middle" class="box-title">Region Inspector</text>
+    <text x="594" y="104" text-anchor="middle" class="mono-sm">region_marking_tab.py</text>
+    <text x="594" y="122" text-anchor="middle" class="box-desc">Interactive ROI box</text>
+    <text x="594" y="139" text-anchor="middle" class="box-desc">Template designer</text>
+
+    <!-- Tab 5: Meta Data Tab -->
+    <rect x="681" y="62" width="142" height="88" class="panel-module"/>
+    <text x="752" y="86" text-anchor="middle" class="box-title">Meta Data Tab</text>
+    <text x="752" y="104" text-anchor="middle" class="mono-sm">metadata_tab.py</text>
+    <text x="752" y="122" text-anchor="middle" class="box-desc">Page geometry audit</text>
+    <text x="752" y="139" text-anchor="middle" class="box-desc">Column flow check</text>
+  </g>
+
+  <!-- ==================== IPC & CONCURRENCY BRIDGE ==================== -->
+  <line x1="570" y1="260" x2="570" y2="305" class="arrow"/>
+  <text x="560" y="286" text-anchor="end" font-size="11" font-weight="600" fill="#003E51">threading.Thread(target=run_quality_inspection)</text>
+
+  <line x1="790" y1="305" x2="790" y2="260" class="dashed-queue"/>
+  <text x="800" y="286" text-anchor="start" font-size="11" font-weight="600" fill="#007DA3">queue.Queue() → self.after(120ms) live updates</text>
+
+  <!-- ==================== CENTER: CORE PIPELINE ENGINE ==================== -->
+  <g transform="translate(265, 305)">
+    <rect width="840" height="80" class="panel-core"/>
+    <text x="32" y="28" class="section-hdr" fill="#16A34A">CORE ORCHESTRATION ENGINE · WORKER THREAD</text>
+    <text x="32" y="52" class="box-title" font-size="16">core/pipeline.py — run_quality_inspection()</text>
+    <text x="32" y="70" class="box-desc">Sequential multi-stage executor · fault-tolerant wraps · unified 10-sheet report coordinator</text>
+
+    <!-- Page cache block -->
+    <rect x="580" y="12" width="245" height="56" rx="6" fill="#FFFFFF" stroke="#16A34A" stroke-width="1.2"/>
+    <text x="702" y="32" text-anchor="middle" class="box-title" font-size="13">core/docscan.py</text>
+    <text x="702" y="52" text-anchor="middle" class="box-desc">Process pool page scan &amp; shared cache</text>
+  </g>
+
+  <!-- Pipeline bus connector down to inspection modules -->
+  <line x1="685" y1="385" x2="685" y2="415" class="arrow"/>
+
+  <!-- ==================== MODULES: 12 CORE INSPECTION ENGINES ==================== -->
+  <g transform="translate(265, 415)">
+    <rect width="840" height="345" rx="10" fill="#FFFFFF" stroke="#003E51" stroke-width="1.5"/>
+    <text x="420" y="24" text-anchor="middle" class="section-hdr" fill="#003E51">CORE INSPECTION &amp; VERIFICATION MODULES (12 ENGINES)</text>
+
+    <!-- ROW 1 -->
+    <!-- Module 1: TOC Numerics -->
+    <rect x="18" y="40" width="192" height="85" class="panel-module"/>
+    <text x="114" y="62" text-anchor="middle" class="box-title">TOC Checks</text>
+    <text x="114" y="80" text-anchor="middle" class="mono-sm">core/toc.py</text>
+    <text x="114" y="98" text-anchor="middle" class="box-desc">Section numeric sequences</text>
+    <text x="114" y="114" text-anchor="middle" class="box-desc">Builds page_mapper index</text>
+
+    <!-- Module 2: Hyperlinks -->
+    <rect x="220" y="40" width="194" height="85" class="panel-module" stroke="#007DA3" stroke-width="1.8"/>
+    <text x="317" y="62" text-anchor="middle" class="box-title">Hyperlinks &amp; GoTo</text>
+    <text x="317" y="80" text-anchor="middle" class="mono-sm">core/links.py</text>
+    <text x="317" y="98" text-anchor="middle" class="box-desc">URI, GoTo, named anchors</text>
+    <text x="317" y="114" text-anchor="middle" class="box-desc">2D topic spatial mapper</text>
+
+    <!-- Module 3: Barcode & QR -->
+    <rect x="424" y="40" width="194" height="85" class="panel-module"/>
+    <text x="521" y="62" text-anchor="middle" class="box-title">Barcode &amp; QR Code</text>
+    <text x="521" y="80" text-anchor="middle" class="mono-sm">core/barcode_qr.py</text>
+    <text x="521" y="98" text-anchor="middle" class="box-desc">pyzbar + OpenCV fallback</text>
+    <text x="521" y="114" text-anchor="middle" class="box-desc">Per-page count &amp; presence</text>
+
+    <!-- Module 4: Tables -->
+    <rect x="628" y="40" width="194" height="85" class="panel-module" stroke="#007DA3" stroke-width="1.8"/>
+    <text x="725" y="62" text-anchor="middle" class="box-title">Table Extraction</text>
+    <text x="725" y="80" text-anchor="middle" class="mono-sm">Tables/Table_extraction.py</text>
+    <text x="725" y="98" text-anchor="middle" class="box-desc">Matrix line lattice audit</text>
+    <text x="725" y="114" text-anchor="middle" class="box-desc">Row/col count &amp; labeling</text>
+
+    <!-- ROW 2 -->
+    <!-- Module 5: Image Crops -->
+    <rect x="18" y="140" width="192" height="85" class="panel-module"/>
+    <text x="114" y="162" text-anchor="middle" class="box-title">Image Cropping</text>
+    <text x="114" y="180" text-anchor="middle" class="mono-sm">core/crop_images.py</text>
+    <text x="114" y="198" text-anchor="middle" class="box-desc">Ink clustering &amp; text mask</text>
+    <text x="114" y="214" text-anchor="middle" class="box-desc">TOC topic-based filing</text>
+
+    <!-- Module 6: Crop Comparison -->
+    <rect x="220" y="140" width="194" height="85" class="panel-module"/>
+    <text x="317" y="162" text-anchor="middle" class="box-title">Figure Comparison</text>
+    <text x="317" y="180" text-anchor="middle" class="mono-sm">core/compare_crops.py</text>
+    <text x="317" y="198" text-anchor="middle" class="box-desc">Coarse (35%) → fine (100%)</text>
+    <text x="317" y="214" text-anchor="middle" class="box-desc">Normalized TM_CCOEFF</text>
+
+    <!-- Module 7: Image Counts -->
+    <rect x="424" y="140" width="194" height="85" class="panel-module"/>
+    <text x="521" y="162" text-anchor="middle" class="box-title">Image Counts</text>
+    <text x="521" y="180" text-anchor="middle" class="mono-sm">core/image_counts.py</text>
+    <text x="521" y="198" text-anchor="middle" class="box-desc">Symmetric topic tally</text>
+    <text x="521" y="214" text-anchor="middle" class="box-desc">Missing &amp; extra detection</text>
+
+    <!-- Module 8: Region Engine -->
+    <rect x="628" y="140" width="194" height="85" class="panel-module"/>
+    <text x="725" y="162" text-anchor="middle" class="box-title">Stylesheet Regions</text>
+    <text x="725" y="180" text-anchor="middle" class="mono-sm">core/region_engine.py</text>
+    <text x="725" y="198" text-anchor="middle" class="box-desc">5-mode scoped matching</text>
+    <text x="725" y="214" text-anchor="middle" class="box-desc">templates.py anchor loader</text>
+
+    <!-- ROW 3 -->
+    <!-- Module 9: Text Overlap -->
+    <rect x="18" y="240" width="192" height="85" class="panel-module"/>
+    <text x="114" y="262" text-anchor="middle" class="box-title">Text Overlap</text>
+    <text x="114" y="280" text-anchor="middle" class="mono-sm">core/text_overlap.py</text>
+    <text x="114" y="298" text-anchor="middle" class="box-desc">Tier 1: Bounding-box sweep</text>
+    <text x="114" y="314" text-anchor="middle" class="box-desc">Tier 2: 300 DPI ink profiling</text>
+
+    <!-- Module 10: Untranslated -->
+    <rect x="220" y="240" width="194" height="85" class="panel-module"/>
+    <text x="317" y="262" text-anchor="middle" class="box-title">Untranslated Text</text>
+    <text x="317" y="80" text-anchor="middle" class="mono-sm">core/untranslated.py</text>
+    <text x="317" y="298" text-anchor="middle" class="box-desc">Verbatim master sentence match</text>
+    <text x="317" y="314" text-anchor="middle" class="box-desc">English function-word density</text>
+
+    <!-- Module 11: Margins & Overflow -->
+    <rect x="424" y="240" width="194" height="85" class="panel-module" stroke="#007DA3" stroke-width="1.8"/>
+    <text x="521" y="262" text-anchor="middle" class="box-title">Margins &amp; Overflow</text>
+    <text x="521" y="280" text-anchor="middle" class="mono-sm">margins.py / overflow.py</text>
+    <text x="521" y="298" text-anchor="middle" class="box-desc">Print envelope safe-zones</text>
+    <text x="521" y="314" text-anchor="middle" class="box-desc">Text &amp; graphic bleed check</text>
+
+    <!-- Module 12: Metadata & Page Diff -->
+    <rect x="628" y="240" width="194" height="85" class="panel-module"/>
+    <text x="725" y="262" text-anchor="middle" class="box-title">Metadata &amp; Page Diff</text>
+    <text x="725" y="280" text-anchor="middle" class="mono-sm">metadata.py / page_diff.py</text>
+    <text x="725" y="298" text-anchor="middle" class="box-desc">ISO trim size &amp; columns</text>
+    <text x="725" y="314" text-anchor="middle" class="box-desc">Masked visual subtraction</text>
+  </g>
+
+  <!-- ==================== BOTTOM: LIBRARIES ==================== -->
+  <g transform="translate(265, 775)">
+    <rect width="840" height="100" class="panel-lib"/>
+    <text x="420" y="26" text-anchor="middle" class="section-hdr" fill="#475569">EXTERNAL FOUNDATIONS &amp; DEPENDENCIES</text>
+    <text x="420" y="52" text-anchor="middle" class="box-title" font-size="14">PyMuPDF (fitz) · OpenCV (cv2) · NumPy · pyzbar · openpyxl · Pillow (PIL)</text>
+    <text x="420" y="78" text-anchor="middle" class="box-desc">Native C-accelerated PDF rendering, vector geometry analysis, computer vision, and Excel generation</text>
+  </g>
+
+  <!-- Connectors from Input to GUI and Pipeline -->
+  <path d="M240 150 L265 150" class="arrow"/>
+  <path d="M240 240 L255 240 L255 345 L265 345" class="arrow"/>
+
+  <!-- ==================== RIGHT: OUTPUT ARTIFACTS ==================== -->
+  <g transform="translate(1125, 95)">
+    <rect width="245" height="780" class="panel-output"/>
+    <text x="122" y="32" text-anchor="middle" class="section-hdr" fill="#D97706">OUTPUTS &amp; ARTIFACTS</text>
+
+    <!-- Unified Excel QA Report -->
+    <rect x="15" y="55" width="215" height="210" rx="8" fill="#FFFFFF" stroke="#D97706" stroke-width="2"/>
+    <text x="122" y="85" text-anchor="middle" class="box-title">Unified Excel QA Report</text>
+    <text x="122" y="105" text-anchor="middle" class="mono-sm" font-size="10.5">PDF_Quality_Inspection_Report.xlsx</text>
+    
+    <g transform="translate(26, 120)" font-family="'Segoe UI', Arial, sans-serif" font-size="11" fill="#3D5F6B">
+      <text x="0" y="0">• Summary Dashboard</text>
+      <text x="0" y="16">• TOC Numerics</text>
+      <text x="0" y="32">• Barcode &amp; QR Codes</text>
+      <text x="0" y="48">• Hyperlinks &amp; GoTo</text>
+      <text x="0" y="64">• Images Comparison</text>
+      <text x="0" y="80">• Image Counts Balance</text>
+      <text x="0" y="96">• Region Inspector ROIs</text>
+      <text x="0" y="112">• Text Overlaps</text>
+      <text x="0" y="128">• Untranslated English</text>
+      <text x="0" y="144">• Metadata &amp; Tables</text>
+    </g>
+
+    <!-- Cropped Comparison Evidence -->
+    <rect x="15" y="280" width="215" height="120" rx="8" fill="#FFFFFF" stroke="#B2D0DD" stroke-width="1.2"/>
+    <text x="122" y="308" text-anchor="middle" class="box-title">Graphic Evidence Crops</text>
+    <text x="122" y="328" text-anchor="middle" class="mono-sm" font-size="11">Cropped_Comparison/</text>
+    <text x="122" y="348" text-anchor="middle" class="box-desc">Master vs Translation pairs</text>
+    <text x="122" y="366" text-anchor="middle" class="box-desc">Organized by TOC chapters</text>
+    <text x="122" y="384" text-anchor="middle" class="box-desc">Tagged with match scores %</text>
+
+    <!-- Region Inspector Evidence -->
+    <rect x="15" y="415" width="215" height="110" rx="8" fill="#FFFFFF" stroke="#B2D0DD" stroke-width="1.2"/>
+    <text x="122" y="442" text-anchor="middle" class="box-title">Region ROI Evidence</text>
+    <text x="122" y="462" text-anchor="middle" class="mono-sm" font-size="11">Region_Inspector/</text>
+    <text x="122" y="482" text-anchor="middle" class="box-desc">Header, footer, logo crops</text>
+    <text x="122" y="500" text-anchor="middle" class="box-desc">Annotated pass/fail cards</text>
+
+    <!-- Review & Diff UI Integration -->
+    <rect x="15" y="540" width="215" height="140" rx="8" fill="#FFFFFF" stroke="#007DA3" stroke-width="1.5"/>
+    <text x="122" y="568" text-anchor="middle" class="box-title">Interactive App Review</text>
+    <text x="122" y="588" text-anchor="middle" class="mono-sm" font-size="11">gui/Review_tab.py</text>
+    <text x="122" y="608" text-anchor="middle" class="box-desc">• Live findings gallery</text>
+    <text x="122" y="626" text-anchor="middle" class="box-desc">• Dual-canvas Side-by-Side</text>
+    <text x="122" y="644" text-anchor="middle" class="box-desc">• Synchronized zoom &amp; pan</text>
+    <text x="122" y="662" text-anchor="middle" class="box-desc">• One-click Excel opening</text>
+  </g>
+
+  <!-- Pipeline to Output Connectors -->
+  <path d="M1105 345 L1125 160" class="arrow"/>
+  <path d="M1105 500 L1125 340" class="arrow"/>
+  <path d="M1105 590 L1125 470" class="arrow"/>
+  <path d="M1105 680 L1125 610" class="arrow"/>
+</svg>

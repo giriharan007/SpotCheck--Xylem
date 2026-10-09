@@ -22,7 +22,15 @@ Godwin output/
 models/
 *.safetensors
 *.bin
-Document/
+Document/*
+!Document/Architecture.html
+!Document/spotcheck-architecture.svg
+!Document/Logic document.xlsx
+!Document/SpotCheck_Xylem_Detailed_Report.doc
+!Document/SpotCheck_Xylem_Detailed_Report.pdf
+!Document/USER_GUIDE.md
+!Document/R&D.docx
+!Document/Spot-check tool presentation.pptx
 # Temporary / OS / Office lock files
 ~$*
 *.tmp

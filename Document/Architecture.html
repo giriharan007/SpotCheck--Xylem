@@ -1,0 +1,1022 @@
+<title>SpotCheck Field Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+  /* ---- Light palette: the application's own Xylem tokens ---- */
+  :root {
+    --ink:        #003E51;   /* Dependable Blue  PMS 3035C */
+    --ink-soft:   #3D5F6B;
+    --ink-faint:  #6C8794;
+    --accent:     #007DA3;   /* Xylem Blue       PMS 7704C */
+    --accent-dim: #CFE6EE;
+    --signal:     #3F8F05;   /* Dynamic Green, darkened for text contrast */
+    --signal-bg:  #E4F7D2;
+    --alert:      #A34600;
+    --alert-bg:   #FBE8DA;
+    --paper:      #F2F7FA;
+    --surface:    #FFFFFF;
+    --surface-2:  #E9F1F6;
+    --rule:       #D0DFEB;
+    --rule-soft:  #E3EDF3;
+
+    --f-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    --f-body:    "IBM Plex Sans", -apple-system, "Segoe UI", Roboto, sans-serif;
+    --f-mono:    "IBM Plex Mono", ui-monospace, "SF Mono", Consolas, monospace;
+
+    --measure: 68ch;
+    --gap: 1.5rem;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ink:        #DCEBF2;
+      --ink-soft:   #A3BEC9;
+      --ink-faint:  #7B95A2;
+      --accent:     #45B9DC;
+      --accent-dim: #0E3D4E;
+      --signal:     #86E337;
+      --signal-bg:  #17351A;
+      --alert:      #F0904A;
+      --alert-bg:   #3A2114;
+      --paper:      #041C25;
+      --surface:    #0A2C39;
+      --surface-2:  #0F3949;
+      --rule:       #1B4657;
+      --rule-soft:  #133B4A;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ink:        #DCEBF2;
+    --ink-soft:   #A3BEC9;
+    --ink-faint:  #7B95A2;
+    --accent:     #45B9DC;
+    --accent-dim: #0E3D4E;
+    --signal:     #86E337;
+    --signal-bg:  #17351A;
+    --alert:      #F0904A;
+    --alert-bg:   #3A2114;
+    --paper:      #041C25;
+    --surface:    #0A2C39;
+    --surface-2:  #0F3949;
+    --rule:       #1B4657;
+    --rule-soft:  #133B4A;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--f-body);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 0 1.5rem 5rem;
+  }
+
+  /* ---------- masthead ---------- */
+  header.top {
+    border-bottom: 2px solid var(--ink);
+    padding: 3.5rem 0 1.25rem;
+    margin-bottom: 2.5rem;
+  }
+  .eyebrow {
+    font-family: var(--f-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 0.9rem;
+  }
+  h1 {
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: clamp(2.1rem, 5vw, 3.1rem);
+    line-height: 1.04;
+    letter-spacing: -0.025em;
+    margin: 0 0 0.7rem;
+    text-wrap: balance;
+  }
+  .standfirst {
+    max-width: var(--measure);
+    color: var(--ink-soft);
+    font-size: 1.05rem;
+    margin: 0 0 1.6rem;
+  }
+  .facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 2.5rem;
+    font-family: var(--f-mono);
+    font-size: 0.78rem;
+    color: var(--ink-faint);
+    font-variant-numeric: tabular-nums;
+  }
+  .facts b {
+    color: var(--ink);
+    font-weight: 600;
+  }
+
+  /* ---------- section headings ---------- */
+  h2 {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 1.55rem;
+    letter-spacing: -0.015em;
+    margin: 0 0 0.4rem;
+    text-wrap: balance;
+  }
+  .sec-note {
+    color: var(--ink-soft);
+    max-width: var(--measure);
+    margin: 0 0 1.6rem;
+    font-size: 0.95rem;
+  }
+  section { margin-bottom: 3.5rem; scroll-margin-top: 1.5rem; }
+
+  /* ---------- run flow: a real sequence, so it is numbered ---------- */
+  .flow {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+    gap: 2px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .step {
+    background: var(--surface);
+    padding: 0.85rem 0.95rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .step .n {
+    font-family: var(--f-mono);
+    font-size: 0.68rem;
+    color: var(--accent);
+    letter-spacing: 0.08em;
+  }
+  .step .t {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 0.92rem;
+    line-height: 1.2;
+  }
+  .step .d {
+    font-size: 0.78rem;
+    color: var(--ink-soft);
+    line-height: 1.4;
+  }
+
+  /* ---------- package + module spine ---------- */
+  .pkg {
+    margin-bottom: 2.4rem;
+  }
+  .pkg-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.8rem;
+    border-bottom: 1px solid var(--ink);
+    padding-bottom: 0.45rem;
+    margin-bottom: 0.2rem;
+  }
+  .pkg-name {
+    font-family: var(--f-mono);
+    font-weight: 600;
+    font-size: 1rem;
+    color: var(--ink);
+  }
+  .pkg-desc {
+    font-size: 0.82rem;
+    color: var(--ink-soft);
+    flex: 1;
+  }
+  .pkg-count {
+    font-family: var(--f-mono);
+    font-size: 0.74rem;
+    color: var(--ink-faint);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .mod {
+    display: grid;
+    grid-template-columns: minmax(190px, 232px) 1fr;
+    gap: 0 1.6rem;
+    padding: 0.85rem 0;
+    border-bottom: 1px solid var(--rule-soft);
+    align-items: start;
+  }
+  .mod-id { display: flex; flex-direction: column; gap: 0.28rem; }
+  .mod-file {
+    font-family: var(--f-mono);
+    font-size: 0.86rem;
+    font-weight: 500;
+    color: var(--accent);
+    word-break: break-word;
+  }
+  .lines {
+    font-family: var(--f-mono);
+    font-size: 0.68rem;
+    color: var(--ink-faint);
+    font-variant-numeric: tabular-nums;
+  }
+  .mod-body p { margin: 0; max-width: var(--measure); }
+  .mod-why {
+    margin-top: 0.35rem !important;
+    font-size: 0.86rem;
+    color: var(--ink-soft);
+    border-left: 2px solid var(--accent-dim);
+    padding-left: 0.7rem;
+  }
+  .mod-why b {
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  /* ---------- checks: problem then mechanism ---------- */
+  .checks {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+    gap: var(--gap);
+  }
+  .check {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 1.15rem 1.25rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .check h3 {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 1.02rem;
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+  .check p { margin: 0; font-size: 0.9rem; }
+  .lbl {
+    font-family: var(--f-mono);
+    font-size: 0.65rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    display: block;
+    margin-bottom: 0.15rem;
+  }
+  .problem { color: var(--ink-soft); }
+  .measured {
+    margin-top: auto;
+    padding-top: 0.7rem;
+    border-top: 1px dashed var(--rule);
+    font-family: var(--f-mono);
+    font-size: 0.75rem;
+    color: var(--signal);
+    font-variant-numeric: tabular-nums;
+    line-height: 1.5;
+  }
+  .measured.warn { color: var(--alert); }
+  .stack {
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 0.55rem 0.7rem;
+    font-size: 0.82rem;
+    color: var(--ink);
+  }
+  .stack code { color: var(--accent); }
+
+  /* ---------- diagrams ---------- */
+  .diagram {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 1.3rem 1.4rem 1.1rem;
+    margin: 0;
+  }
+  .diagram + .diagram { margin-top: 1.4rem; }
+  section#flow .diagram { margin-top: 1.6rem; }
+  .diagram svg { width: 100%; height: auto; display: block; color: var(--ink); }
+  .diagram figcaption {
+    font-size: 0.82rem;
+    color: var(--ink-soft);
+    margin-top: 0.9rem;
+    max-width: var(--measure);
+  }
+  .diagram figcaption b { color: var(--ink); font-weight: 600; }
+
+  code {
+    font-family: var(--f-mono);
+    font-size: 0.85em;
+    background: var(--surface-2);
+    padding: 0.08em 0.34em;
+    border-radius: 2px;
+    color: var(--ink);
+  }
+
+  /* ---------- modes table ---------- */
+  .tablewrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; min-width: 620px; background: var(--surface); }
+  th, td { text-align: left; padding: 0.6rem 0.85rem; border-bottom: 1px solid var(--rule-soft); font-size: 0.87rem; }
+  th {
+    font-family: var(--f-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--rule);
+  }
+  td:first-child { font-family: var(--f-mono); font-size: 0.82rem; color: var(--accent); white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+
+  .pill {
+    display: inline-block;
+    font-family: var(--f-mono);
+    font-size: 0.68rem;
+    padding: 0.1rem 0.42rem;
+    border-radius: 2px;
+    background: var(--signal-bg);
+    color: var(--signal);
+    white-space: nowrap;
+  }
+  .pill.warn { background: var(--alert-bg); color: var(--alert); }
+
+  footer {
+    border-top: 2px solid var(--ink);
+    padding-top: 1.1rem;
+    font-size: 0.84rem;
+    color: var(--ink-soft);
+    max-width: var(--measure);
+  }
+
+  @media (max-width: 620px) {
+    .mod { grid-template-columns: 1fr; gap: 0.4rem; }
+    .mod-id { flex-direction: row; align-items: baseline; gap: 0.6rem; }
+  }
+</style>
+
+<div class="wrap">
+
+<header class="top">
+  <p class="eyebrow">SpotCheck · Xylem PDF Quality &amp; Visual Inspection Engine</p>
+  <h1>Field Guide</h1>
+  <p class="standfirst">
+    What each file does, and the reasoning behind each check. The short version of
+    every decision that took more than one attempt to get right.
+  </p>
+  <p class="facts">
+    <span><b>28</b> Python files</span>
+    <span><b>3</b> packages</span>
+    <span><b>12</b> inspection checks</span>
+    <span><b>10</b> report sheets</span>
+    <span><b>5</b> tabs</span>
+  </p>
+</header>
+
+<section id="architecture">
+  <h2>Architecture</h2>
+  <p class="sec-note">
+    Three layers, one rule: <code>core</code> never imports Tkinter. The GUI drives a
+    background thread; the thread never touches a widget directly — it hands
+    everything to the GUI through a queue.
+  </p>
+  <figure class="diagram">
+    <svg viewBox="0 0 1180 480" role="img" aria-label="Layered architecture: a PDFs-in store feeds a worker thread running core/pipeline.py, which is driven by the GUI main thread and reports progress back through a queue; the pipeline calls six groups of core check modules, which sit on PyMuPDF, OpenCV/numpy, pyzbar and openpyxl, and the pipeline writes the Excel report and evidence crops back out.">
+      <defs>
+        <marker id="arch-arrow" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto">
+          <polygon points="0 0, 9 4, 0 8" fill="currentColor"></polygon>
+        </marker>
+      </defs>
+
+      <!-- input -->
+      <rect x="20" y="205" width="160" height="110" rx="4" fill="var(--paper)" stroke="currentColor" stroke-width="1.1"></rect>
+      <text x="100" y="230" text-anchor="middle" font-family="var(--f-display)" font-weight="600" font-size="12">PDFs in</text>
+      <text x="100" y="256" text-anchor="middle" font-family="var(--f-mono)" font-size="10.5" fill="var(--ink-soft)">master.pdf</text>
+      <text x="100" y="272" text-anchor="middle" font-family="var(--f-mono)" font-size="10.5" fill="var(--ink-soft)">11 × translations</text>
+      <text x="100" y="296" text-anchor="middle" font-size="10" fill="var(--ink-faint)">(or a folder of each)</text>
+
+      <!-- GUI band -->
+      <rect x="210" y="20" width="770" height="112" rx="4" fill="var(--accent-dim)" stroke="var(--accent)" stroke-width="1.2"></rect>
+      <text x="228" y="40" font-family="var(--f-mono)" font-size="10.5" letter-spacing="0.06em" fill="var(--ink-soft)">GUI · MAIN THREAD (TKINTER) — gui/app_window.py</text>
+      <g font-family="var(--f-body)" font-size="10.8">
+        <rect x="224" y="62" width="138" height="44" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="0.9"></rect>
+        <text x="293" y="88" text-anchor="middle">Region Inspector</text>
+        <rect x="372" y="62" width="138" height="44" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="0.9"></rect>
+        <text x="441" y="88" text-anchor="middle">Metadata</text>
+        <rect x="520" y="62" width="138" height="44" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="0.9"></rect>
+        <text x="589" y="88" text-anchor="middle">Text Checks</text>
+        <rect x="668" y="62" width="138" height="44" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="0.9"></rect>
+        <text x="737" y="81" text-anchor="middle">Comparison</text>
+        <text x="737" y="94" text-anchor="middle">Gallery</text>
+        <rect x="816" y="62" width="138" height="44" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="0.9"></rect>
+        <text x="885" y="88" text-anchor="middle">Templates</text>
+      </g>
+
+      <!-- GUI <-> worker arrows -->
+      <line x1="500" y1="132" x2="500" y2="180" stroke="currentColor" stroke-width="1.2" marker-end="url(#arch-arrow)"></line>
+      <text x="492" y="145" text-anchor="end" font-size="10.3" fill="var(--ink-soft)">Run → threading.Thread(</text>
+      <text x="492" y="158" text-anchor="end" font-size="10.3" fill="var(--ink-soft)">target=run_quality_inspection)</text>
+
+      <line x1="690" y1="180" x2="690" y2="132" stroke="currentColor" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arch-arrow)"></line>
+      <text x="698" y="145" text-anchor="start" font-size="10.3" fill="var(--accent)">queue.Queue() →</text>
+      <text x="698" y="158" text-anchor="start" font-size="10.3" fill="var(--accent)">self.after(120ms)</text>
+
+      <!-- worker band -->
+      <rect x="210" y="180" width="770" height="64" rx="4" fill="var(--surface)" stroke="currentColor" stroke-width="1.2"></rect>
+      <text x="228" y="200" font-family="var(--f-mono)" font-size="10.5" letter-spacing="0.06em" fill="var(--ink-soft)">WORKER THREAD</text>
+      <text x="228" y="222" font-family="var(--f-mono)" font-size="12" fill="var(--accent)" font-weight="500">core/pipeline.py — run_quality_inspection()</text>
+
+      <!-- bus down to module row -->
+      <line x1="595" y1="244" x2="595" y2="280" stroke="currentColor" stroke-width="1.1"></line>
+      <line x1="269" y1="280" x2="909" y2="280" stroke="currentColor" stroke-width="1.1"></line>
+      <line x1="269" y1="280" x2="269" y2="300" stroke="currentColor" stroke-width="1.1" marker-end="url(#arch-arrow)"></line>
+      <line x1="397" y1="280" x2="397" y2="300" stroke="currentColor" stroke-width="1.1" marker-end="url(#arch-arrow)"></line>
+      <line x1="525" y1="280" x2="525" y2="300" stroke="currentColor" stroke-width="1.1" marker-end="url(#arch-arrow)"></line>
+      <line x1="653" y1="280" x2="653" y2="300" stroke="currentColor" stroke-width="1.1" marker-end="url(#arch-arrow)"></line>
+      <line x1="781" y1="280" x2="781" y2="300" stroke="currentColor" stroke-width="1.1" marker-end="url(#arch-arrow)"></line>
+      <line x1="909" y1="280" x2="909" y2="300" stroke="currentColor" stroke-width="1.1" marker-end="url(#arch-arrow)"></line>
+
+      <!-- module row: 6 grouped boxes -->
+      <g font-family="var(--f-mono)" font-size="9.6" fill="var(--accent)">
+        <rect x="210" y="300" width="118" height="72" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="0.9"></rect>
+        <text x="269" y="320" text-anchor="middle">docscan.py</text>
+        <text x="269" y="344" text-anchor="middle" font-family="var(--f-body)" fill="var(--ink-soft)" font-size="9.5">page cache</text>
+
+        <rect x="338" y="300" width="118" height="72" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="0.9"></rect>
+        <text x="397" y="318" text-anchor="middle">toc.py</text>
+        <text x="397" y="331" text-anchor="middle">barcode_qr.py</text>
+        <text x="397" y="352" text-anchor="middle" font-family="var(--f-body)" fill="var(--ink-soft)" font-size="9.5">TOC &amp; codes</text>
+
+        <rect x="466" y="300" width="118" height="72" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="0.9"></rect>
+        <text x="525" y="315" text-anchor="middle">crop_images.py</text>
+        <text x="525" y="327" text-anchor="middle">compare_crops.py</text>
+        <text x="525" y="339" text-anchor="middle">image_counts.py</text>
+        <text x="525" y="358" text-anchor="middle" font-family="var(--f-body)" fill="var(--ink-soft)" font-size="9.5">figures</text>
+
+        <rect x="594" y="300" width="118" height="72" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="0.9"></rect>
+        <text x="653" y="318" text-anchor="middle">region_engine.py</text>
+        <text x="653" y="331" text-anchor="middle">templates.py</text>
+        <text x="653" y="352" text-anchor="middle" font-family="var(--f-body)" fill="var(--ink-soft)" font-size="9.5">stylesheet regions</text>
+
+        <rect x="722" y="300" width="118" height="72" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="0.9"></rect>
+        <text x="781" y="318" text-anchor="middle">text_overlap.py</text>
+        <text x="781" y="331" text-anchor="middle">untranslated.py</text>
+        <text x="781" y="352" text-anchor="middle" font-family="var(--f-body)" fill="var(--ink-soft)" font-size="9.5">text checks</text>
+
+        <rect x="850" y="300" width="118" height="72" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="0.9"></rect>
+        <text x="909" y="315" text-anchor="middle">metadata.py</text>
+        <text x="909" y="327" text-anchor="middle">page_diff.py</text>
+        <text x="909" y="339" text-anchor="middle">margins.py</text>
+        <text x="909" y="358" text-anchor="middle" font-family="var(--f-body)" fill="var(--ink-soft)" font-size="9.5">page-level</text>
+      </g>
+
+      <!-- bus down to libraries -->
+      <line x1="269" y1="372" x2="269" y2="392" stroke="currentColor" stroke-width="1.1"></line>
+      <line x1="397" y1="372" x2="397" y2="392" stroke="currentColor" stroke-width="1.1"></line>
+      <line x1="525" y1="372" x2="525" y2="392" stroke="currentColor" stroke-width="1.1"></line>
+      <line x1="653" y1="372" x2="653" y2="392" stroke="currentColor" stroke-width="1.1"></line>
+      <line x1="781" y1="372" x2="781" y2="392" stroke="currentColor" stroke-width="1.1"></line>
+      <line x1="909" y1="372" x2="909" y2="392" stroke="currentColor" stroke-width="1.1"></line>
+      <line x1="269" y1="392" x2="909" y2="392" stroke="currentColor" stroke-width="1.1"></line>
+      <line x1="595" y1="392" x2="595" y2="410" stroke="currentColor" stroke-width="1.1" marker-end="url(#arch-arrow)"></line>
+
+      <!-- libraries -->
+      <rect x="210" y="410" width="770" height="52" rx="4" fill="var(--paper)" stroke="currentColor" stroke-width="1.1"></rect>
+      <text x="228" y="431" font-family="var(--f-mono)" font-size="10.5" letter-spacing="0.06em" fill="var(--ink-soft)">EXTERNAL LIBRARIES</text>
+      <text x="228" y="450" font-family="var(--f-mono)" font-size="11" fill="var(--ink)">PyMuPDF (fitz) · OpenCV + numpy · pyzbar · openpyxl · Pillow</text>
+
+      <!-- input/output arrows -->
+      <line x1="180" y1="258" x2="210" y2="215" stroke="currentColor" stroke-width="1.2" marker-end="url(#arch-arrow)"></line>
+      <text x="182" y="248" font-size="10.3" fill="var(--ink-soft)">reads</text>
+
+      <rect x="1000" y="205" width="160" height="110" rx="4" fill="var(--signal-bg)" stroke="var(--signal)" stroke-width="1.2"></rect>
+      <text x="1080" y="230" text-anchor="middle" font-family="var(--f-display)" font-weight="600" font-size="12">Report out</text>
+      <text x="1080" y="256" text-anchor="middle" font-family="var(--f-mono)" font-size="10.5" fill="var(--ink-soft)">Excel · 10 sheets</text>
+      <text x="1080" y="272" text-anchor="middle" font-family="var(--f-mono)" font-size="10.5" fill="var(--ink-soft)">evidence crops</text>
+      <text x="1080" y="296" text-anchor="middle" font-size="10" fill="var(--ink-faint)">(shown live in Review tab)</text>
+
+      <line x1="980" y1="215" x2="1000" y2="258" stroke="currentColor" stroke-width="1.2" marker-end="url(#arch-arrow)"></line>
+      <text x="984" y="248" font-size="10.3" fill="var(--ink-soft)">writes</text>
+    </svg>
+    <figcaption>
+      One rule enforces the boundary: the worker thread never calls a Tkinter method.
+      Progress and results cross back to the GUI only through a <b>queue.Queue()</b>
+      that <b>self.after(120ms)</b> drains on the main thread — the same mechanism
+      that keeps a long pipeline run from ever locking the window.
+    </figcaption>
+  </figure>
+</section>
+
+<section id="flow">
+  <h2>How one run moves</h2>
+  <p class="sec-note">
+    Genuinely sequential — each stage depends on the one before it, and the
+    progress bar is divided along these boundaries.
+  </p>
+  <div class="flow">
+    <div class="step"><span class="n">01</span><span class="t">Scan the master</span><span class="d">Codes and tables cached once, page-parallel</span></div>
+    <div class="step"><span class="n">02</span><span class="t">Crop the master</span><span class="d">Figures extracted by ink clustering</span></div>
+    <div class="step"><span class="n">03</span><span class="t">Per translation</span><span class="d">TOC · codes · counts · image match</span></div>
+    <div class="step"><span class="n">04</span><span class="t">Stylesheet</span><span class="d">Every marked region, every language</span></div>
+    <div class="step"><span class="n">05</span><span class="t">Text checks</span><span class="d">Collisions and untranslated English</span></div>
+    <div class="step"><span class="n">06</span><span class="t">Metadata</span><span class="d">Size, pages, sheet, columns</span></div>
+    <div class="step"><span class="n">07</span><span class="t">Report</span><span class="d">One workbook, nine sheets</span></div>
+  </div>
+
+  <figure class="diagram">
+    <svg viewBox="0 0 1180 320" role="img" aria-label="Sequence diagram: the worker thread runs the seven stages in order, with the per-translation stage looping eleven times; each stage posts its progress to a shared queue, which the GUI main thread drains every 120 milliseconds to update the progress bar.">
+      <defs>
+        <marker id="flow-arrow" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto">
+          <polygon points="0 0, 9 4, 0 8" fill="currentColor"></polygon>
+        </marker>
+      </defs>
+
+      <text x="20" y="26" font-family="var(--f-mono)" font-size="10.5" letter-spacing="0.08em" fill="var(--ink-faint)">WORKER THREAD</text>
+
+      <!-- 7 stage boxes -->
+      <g font-family="var(--f-display)" font-weight="600" font-size="11.5">
+        <rect x="90"  y="34" width="130" height="56" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1"></rect>
+        <text x="155" y="58" text-anchor="middle">Scan master</text>
+        <text x="155" y="74" text-anchor="middle" font-family="var(--f-mono)" font-weight="400" font-size="9.5" fill="var(--ink-faint)">01</text>
+
+        <rect x="240" y="34" width="130" height="56" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1"></rect>
+        <text x="305" y="58" text-anchor="middle">Crop master</text>
+        <text x="305" y="74" text-anchor="middle" font-family="var(--f-mono)" font-weight="400" font-size="9.5" fill="var(--ink-faint)">02</text>
+
+        <rect x="390" y="34" width="130" height="56" rx="3" fill="var(--accent-dim)" stroke="var(--accent)" stroke-width="1.2"></rect>
+        <text x="455" y="55" text-anchor="middle">Per translation</text>
+        <text x="455" y="70" text-anchor="middle" font-family="var(--f-mono)" font-weight="400" font-size="9.5" fill="var(--ink-soft)">TOC · codes · counts</text>
+        <path d="M 420 26 A 20 10 0 1 1 490 26" fill="none" stroke="var(--accent)" stroke-width="1.1" marker-end="url(#flow-arrow)"></path>
+        <text x="455" y="16" text-anchor="middle" font-family="var(--f-mono)" font-weight="500" font-size="10" fill="var(--accent)">× 11</text>
+
+        <rect x="540" y="34" width="130" height="56" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1"></rect>
+        <text x="605" y="58" text-anchor="middle">Stylesheet</text>
+        <text x="605" y="74" text-anchor="middle" font-family="var(--f-mono)" font-weight="400" font-size="9.5" fill="var(--ink-faint)">04</text>
+
+        <rect x="690" y="34" width="130" height="56" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1"></rect>
+        <text x="755" y="58" text-anchor="middle">Text checks</text>
+        <text x="755" y="74" text-anchor="middle" font-family="var(--f-mono)" font-weight="400" font-size="9.5" fill="var(--ink-faint)">05</text>
+
+        <rect x="840" y="34" width="130" height="56" rx="3" fill="var(--surface)" stroke="currentColor" stroke-width="1"></rect>
+        <text x="905" y="58" text-anchor="middle">Metadata</text>
+        <text x="905" y="74" text-anchor="middle" font-family="var(--f-mono)" font-weight="400" font-size="9.5" fill="var(--ink-faint)">06</text>
+
+        <rect x="990" y="34" width="130" height="56" rx="3" fill="var(--signal-bg)" stroke="var(--signal)" stroke-width="1.2"></rect>
+        <text x="1055" y="58" text-anchor="middle">Report</text>
+        <text x="1055" y="74" text-anchor="middle" font-family="var(--f-mono)" font-weight="400" font-size="9.5" fill="var(--ink-soft)">07</text>
+      </g>
+
+      <!-- connectors between stages -->
+      <line x1="220" y1="62" x2="240" y2="62" stroke="currentColor" stroke-width="1.1" marker-end="url(#flow-arrow)"></line>
+      <line x1="370" y1="62" x2="390" y2="62" stroke="currentColor" stroke-width="1.1" marker-end="url(#flow-arrow)"></line>
+      <line x1="520" y1="62" x2="540" y2="62" stroke="currentColor" stroke-width="1.1" marker-end="url(#flow-arrow)"></line>
+      <line x1="670" y1="62" x2="690" y2="62" stroke="currentColor" stroke-width="1.1" marker-end="url(#flow-arrow)"></line>
+      <line x1="820" y1="62" x2="840" y2="62" stroke="currentColor" stroke-width="1.1" marker-end="url(#flow-arrow)"></line>
+      <line x1="970" y1="62" x2="990" y2="62" stroke="currentColor" stroke-width="1.1" marker-end="url(#flow-arrow)"></line>
+
+      <!-- dashed drops to the shared queue -->
+      <g stroke="var(--accent)" stroke-width="1" stroke-dasharray="3 3">
+        <line x1="155"  y1="90" x2="155"  y2="150" marker-end="url(#flow-arrow)"></line>
+        <line x1="305"  y1="90" x2="305"  y2="150" marker-end="url(#flow-arrow)"></line>
+        <line x1="455"  y1="90" x2="455"  y2="150" marker-end="url(#flow-arrow)"></line>
+        <line x1="605"  y1="90" x2="605"  y2="150" marker-end="url(#flow-arrow)"></line>
+        <line x1="755"  y1="90" x2="755"  y2="150" marker-end="url(#flow-arrow)"></line>
+        <line x1="905"  y1="90" x2="905"  y2="150" marker-end="url(#flow-arrow)"></line>
+        <line x1="1055" y1="90" x2="1055" y2="150" marker-end="url(#flow-arrow)"></line>
+      </g>
+
+      <text x="20" y="146" font-family="var(--f-mono)" font-size="10.5" letter-spacing="0.08em" fill="var(--ink-faint)">QUEUE</text>
+      <line x1="140" y1="152" x2="1070" y2="152" stroke="var(--accent)" stroke-width="1.3" stroke-dasharray="5 3"></line>
+      <text x="605" y="140" text-anchor="middle" font-family="var(--f-mono)" font-size="10" fill="var(--accent)">queue.put((fraction, message))</text>
+
+      <line x1="605" y1="156" x2="605" y2="192" stroke="currentColor" stroke-width="1.2" marker-end="url(#flow-arrow)"></line>
+      <text x="616" y="176" font-family="var(--f-mono)" font-size="10" fill="var(--ink-soft)">self.after(120ms)</text>
+
+      <text x="20" y="212" font-family="var(--f-mono)" font-size="10.5" letter-spacing="0.08em" fill="var(--ink-faint)">GUI · MAIN THREAD</text>
+      <rect x="440" y="196" width="330" height="60" rx="4" fill="var(--surface)" stroke="currentColor" stroke-width="1.1"></rect>
+      <text x="605" y="220" text-anchor="middle" font-family="var(--f-display)" font-weight="600" font-size="11.5">AppWindow</text>
+      <text x="605" y="240" text-anchor="middle" font-family="var(--f-body)" font-size="10" fill="var(--ink-soft)">progress bar · status text · tab contents</text>
+    </svg>
+    <figcaption>
+      Seven stages run in a strict sequence on the worker thread — stage <b>03</b>
+      loops once per translation. Nothing in that thread ever touches a widget;
+      each stage only posts to a queue, which the GUI drains on its own clock,
+      120&nbsp;ms at a time.
+    </figcaption>
+  </figure>
+</section>
+
+<section id="files">
+  <h2>The files</h2>
+  <p class="sec-note">
+    Grouped by package. <code>core</code> never imports Tkinter, so every check can be
+    scripted or tested without opening a window.
+  </p>
+
+  <div class="pkg">
+    <div class="pkg-head">
+      <span class="pkg-name">/</span>
+      <span class="pkg-desc">Entry point and cross-cutting infrastructure</span>
+      <span class="pkg-count">4 files</span>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">run_gui.py</span><span class="lines">22 lines</span></div>
+      <div class="mod-body">
+        <p>The entry point. Calls <code>support_frozen_build()</code>, then opens the window.</p>
+        <p class="mod-why"><b>Why that order:</b> in a packaged build every worker process re-launches the exe. Without the freeze call first, each worker starts a second copy of the application instead of doing the work it was handed.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">logger_config.py</span><span class="lines">396 lines</span></div>
+      <div class="mod-body">
+        <p>Registers the native DLL search paths, opens a timestamped log, and prints the dependency status block at startup.</p>
+        <p class="mod-why"><b>Earns its place:</b> that status block is what the build script reads to decide whether the packaged exe is sound.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">settings.py</span><span class="lines">169 lines</span></div>
+      <div class="mod-body">
+        <p>Remembers the three paths and the selected stylesheet between launches. Stale entries are dropped rather than pre-filled.</p>
+        <p class="mod-why"><b>One predicate:</b> <code>is_master_path()</code> accepts the master either way round — the folder, or the PDF itself — and both the store and the window use it, so they cannot disagree again.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">check_imports.py</span><span class="lines">108 lines</span></div>
+      <div class="mod-body">
+        <p>Build-time only. Imports all 23 application modules and 10 packages before PyInstaller starts.</p>
+        <p class="mod-why"><b>Two seconds instead of three minutes</b> — and it proves the packages resolve in the very interpreter about to do the build.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="pkg">
+    <div class="pkg-head">
+      <span class="pkg-name">core/</span>
+      <span class="pkg-desc">The inspection engine. No GUI code anywhere in it.</span>
+      <span class="pkg-count">15 files · 7,400 lines</span>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">pipeline.py</span><span class="lines">867 lines</span></div>
+      <div class="mod-body">
+        <p>Orchestrates the whole run and writes the nine-sheet workbook. Also resolves the master, whether it was given as a file or a folder.</p>
+        <p class="mod-why"><b>Every stage is wrapped:</b> a failure in one check prints and lets the rest finish. A crash in the overlap scan should not cost you the report.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">docscan.py</span><span class="lines">398 lines</span></div>
+      <div class="mod-body">
+        <p>One expensive look at each document, cached and shared by every stage that needs it. Pages are scanned across a process pool at below-normal priority.</p>
+        <p class="mod-why"><b>The single biggest win in the tool.</b> Before it, one run re-derived the same facts about the same PDF dozens of times.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">toc.py</span><span class="lines">192 lines</span></div>
+      <div class="mod-body">
+        <p>Extracts topic numerics from the table of contents and compares them. Also builds <code>page_mapper</code>, which converts a master page number into the translation's.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">links.py</span><span class="lines">485 lines</span></div>
+      <div class="mod-body">
+        <p>Audits all hyperlinks, internal GoTo jumps, named destinations, and QR code targets. Performs 2D spatial topic attribution so links on shared pages bind to the exact sub-topic above which they physically reside.</p>
+        <p class="mod-why"><b>Zero temporary JSON files:</b> executes 100% in-memory and populates the 10th Excel report sheet and interactive Review tab cards directly.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">margin_overflow.py</span><span class="lines">320 lines</span></div>
+      <div class="mod-body">
+        <p>Audits printable envelopes and page trim boundaries, detecting any text, table, or artwork elements bleeding into page margins or gutter zones.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">barcode_qr.py</span><span class="lines">493 lines</span></div>
+      <div class="mod-body">
+        <p>Locates and counts barcodes and QR codes per page, decoding with pyzbar where it is available and falling back to structural shape detection where it is not.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">crop_images.py</span><span class="lines">1,152 lines</span></div>
+      <div class="mod-body">
+        <p>Extracts every figure from a document as its own crop, filed under the topic it belongs to.</p>
+        <p class="mod-why"><b>The hardest file in the project.</b> Exploded diagrams, separator rules, table lattices and barcodes all had to be told apart from artwork.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">compare_crops.py</span><span class="lines">488 lines</span></div>
+      <div class="mod-body">
+        <p>Hunts each master crop through the translation by template matching, coarse pass first, then full resolution on the best candidates.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">image_counts.py</span><span class="lines">225 lines</span></div>
+      <div class="mod-body">
+        <p>Counts figures per topic on both sides and compares the totals.</p>
+        <p class="mod-why"><b>Symmetric on purpose:</b> crop matching is one-directional and cannot see a graphic the translation has and the master does not.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">region_engine.py</span><span class="lines">1,079 lines</span></div>
+      <div class="mod-body">
+        <p>The stylesheet check. Five mutually exclusive match modes, per-region tolerances, and the side-by-side comparison images.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">templates.py</span><span class="lines">684 lines</span></div>
+      <div class="mod-body">
+        <p>Saves and loads stylesheets: region geometry, page scopes, ignored margins, variant groups.</p>
+        <p class="mod-why"><b>Anchors, not coordinates.</b> A region records which edges it belongs to, so one stylesheet places correctly at A2 through A6 instead of falling off the trim.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">margins.py</span><span class="lines">409 lines</span></div>
+      <div class="mod-body">
+        <p>The four ignored margins, plus per-page and per-side skips, and the helpers that say whether an element lies inside one.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">metadata.py</span><span class="lines">508 lines</span></div>
+      <div class="mod-body">
+        <p>File size, page count, sheet size against the ISO A-series, and how many text columns each page runs.</p>
+        <p class="mod-why"><b>Samples 50% of pages by default</b> — column detection on every page of a 92-page manual is time spent to confirm what the first fifty said.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">page_diff.py</span><span class="lines">366 lines</span></div>
+      <div class="mod-body">
+        <p>Works out what actually differs between a master page and its translation — missing, extra, moved — ignoring the prose, which is supposed to differ.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">text_overlap.py</span><span class="lines">296 lines</span></div>
+      <div class="mod-body">
+        <p>Finds text printed through other text, in any document. Two tiers: box intersection to find candidates, then rendered ink to confirm them.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">untranslated.py</span><span class="lines">224 lines</span></div>
+      <div class="mod-body">
+        <p>Finds English left behind in a translation, by two independent tests scored together.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">__init__.py</span><span class="lines">19 lines</span></div>
+      <div class="mod-body"><p>Package marker, and the index of what lives here.</p></div>
+    </div>
+  </div>
+
+  <div class="pkg">
+    <div class="pkg-head">
+      <span class="pkg-name">gui/</span>
+      <span class="pkg-desc">Presentation only. Every figure on screen is produced by core.</span>
+      <span class="pkg-count">8 files · 7,160 lines</span>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">app_window.py</span><span class="lines">1,588 lines</span></div>
+      <div class="mod-body">
+        <p>The main window: path pickers, live log, run control, and the five tabs.</p>
+        <p class="mod-why"><b>The run is on a worker thread</b> and talks back through queues polled on the main thread. Touching a Tk object from a worker raises “main thread is not in main loop”.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">Review_tab.py</span><span class="lines">820 lines</span></div>
+      <div class="mod-body">
+        <p>The interactive Review Tab. Displays categorized defect cards across all inspection modules with verdict filters (All, Passed, Needs Review), thumbnail evidence, and direct jump-to-page actions.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">Side_by_Side_preview.py</span><span class="lines">610 lines</span></div>
+      <div class="mod-body">
+        <p>The dual-canvas synchronized preview dialog. Shows Master and Translation pages side-by-side with synchronized zoom, panning, and color-coded defect bounding box overlays.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">region_dialog.py</span><span class="lines">3,163 lines</span></div>
+      <div class="mod-body">
+        <p>The Region Inspector: draw regions on the page, nest them inside a scope, drag the margin guides, set each region's own tolerances.</p>
+        <p class="mod-why"><b>Reads page size from the document,</b> never from the canvas — the canvas still shows the last document during a load, and placing a stylesheet from that number moved 19 of 21 boxes.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">comparison_gallery.py</span><span class="lines">888 lines</span></div>
+      <div class="mod-body">
+        <p>The Review tab. Four sources — Region Checks, Images, Overlap, Not Translated — filtered by verdict.</p>
+        <p class="mod-why"><b>A native tree, not cards.</b> One widget per result built over 10,000 of them and Tk stopped painting across the whole application. Now exactly one image is decoded at a time.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">metadata_tab.py</span><span class="lines">443 lines</span></div>
+      <div class="mod-body">
+        <p>The Meta Data tab. Builds its own columns from the two specifications in <code>core/metadata.py</code>, so adding a figure there adds a column here.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">page_diff_view.py</span><span class="lines">418 lines</span></div>
+      <div class="mod-body">
+        <p>The side-by-side window: master page and translation, with what differs boxed on both.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">text_checks_tab.py</span><span class="lines">411 lines</span></div>
+      <div class="mod-body">
+        <p>The Text Checks tab. Shows what the run found, or scans on demand, with a rendered crop of each defect.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">theme.py</span><span class="lines">236 lines</span></div>
+      <div class="mod-body">
+        <p>The Xylem palette, the typeface resolver and the shared table styling.</p>
+        <p class="mod-why"><b>One source of truth:</b> the palette used to be declared twice and the two windows drifted apart.</p>
+      </div>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">__init__.py</span><span class="lines">13 lines</span></div>
+      <div class="mod-body"><p>Package marker.</p></div>
+    </div>
+  </div>
+  <div class="pkg">
+    <div class="pkg-head">
+      <span class="pkg-name">Tables/</span>
+      <span class="pkg-desc">Tabular specifications and grid extraction engine</span>
+      <span class="pkg-count">1 file · 710 lines</span>
+    </div>
+
+    <div class="mod">
+      <div class="mod-id"><span class="mod-file">Table_extraction.py</span><span class="lines">710 lines</span></div>
+      <div class="mod-body">
+        <p>Extracts structured technical specifications tables, lattice grid lines, and cell matrices. Audits row and column dimensions across languages to ensure specification data is never corrupted or dropped.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="logic">
+  <h2>The logic behind each check</h2>
+  <p class="sec-note">
+    Each one exists because a simpler version of it was tried first and gave the
+    wrong answer. The figure at the foot of each card is what it does on the
+    Start 350 set — one master, eleven translations.
+  </p>
+
+  <div class="checks">
+
+    <div class="check">
+      <h3>Table of contents</h3>
+      <p class="problem"><span class="lbl">Problem</span>Page numbers move when text reflows, so comparing them finds differences that are not faults.</p>
+      <p><span class="lbl">Mechanism</span>Only the topic <em>numerics</em> are compared — <code>1</code>, <code>1.1</code>, <code>2.3.1</code>. Those survive translation; titles and page numbers do not. The same insight powers <code>page_mapper</code>, which finds a topic's page in each language.</p>
+      <p class="stack"><span class="lbl">Library · Method</span>PyMuPDF's <code>doc.get_toc(simple=True)</code> for the outline tree, plus Python <code>re</code> to strip each title down to its leading numeric token before the two lists are diffed as sets.</p>
+      <p class="measured">11 / 11 PASS</p>
+    </div>
+
+    <div class="check">
+      <h3>Barcode &amp; QR</h3>
+      <p class="problem"><span class="lbl">Problem</span>A QR encodes a language-specific URL. Comparing the pixels can only ever fail.</p>
+      <p><span class="lbl">Mechanism</span>Count and presence per page, not appearance. Decoded values are reported side by side so a reviewer sees the URLs differ by language — the expected outcome, not a finding.</p>
+      <p class="stack"><span class="lbl">Library · Method</span><code>pyzbar.pyzbar.decode()</code> reads and decodes the symbol directly from a PyMuPDF page render; when pyzbar isn't available, an OpenCV fallback (<code>cv2.findContours</code> + <code>connectedComponentsWithStats</code>) detects the finder-pattern's blocky structure so presence is still counted even without a decode.</p>
+      <p class="measured">11 / 11 PASS</p>
+    </div>
+
+    <div class="check">
+      <h3>Figure extraction</h3>
+      <p class="problem"><span class="lbl">Problem</span>Merging vector paths split one exploded diagram into 19 separate crops.</p>
+      <p><span class="lbl">Mechanism</span>Ink clustering: render the page, erase the text from the <em>pixels</em>, dilate by a small gap, and take connected components. A figure is whatever ink hangs together. Separator rules are stripped by a triad — isolation, thickness, span — so a solid pictogram and a barcode both survive while a rule does not.</p>
+      <p class="stack"><span class="lbl">Library · Method</span>PyMuPDF <code>page.get_pixmap(dpi=)</code> to rasterise, PyMuPDF's own text spans to blank out glyph pixels, then numpy thresholding (<code>arr &lt; threshold</code>) plus <code>cv2.dilate</code> and <code>cv2.connectedComponentsWithStats</code> to cluster the remaining ink into figure boxes.</p>
+      <p class="measured">19 boxes → 1 · 92-page manual holds</p>
+    </div>
+
+    <div class="check">
+      <h3>Figure comparison</h3>
+      <p class="problem"><span class="lbl">Problem</span>A page-1 logo matched page 59 at 29.5%. Normalised correlation against a blank template is numerically undefined and returns noise.</p>
+      <p><span class="lbl">Mechanism</span>Blank crops are rejected before matching, a standard-deviation guard sits in the comparator, and nothing below 55% is credible. A coarse pass at 35% scale picks three candidate pages, then full resolution decides.</p>
+      <p class="stack"><span class="lbl">Library · Method</span>OpenCV <code>cv2.matchTemplate</code> with <code>TM_CCOEFF_NORMED</code>, run twice: a coarse pass at <code>COARSE_SCALE=0.35</code> shortlists <code>COARSE_KEEP=3</code> candidate pages by numpy standard deviation and correlation score, then full-resolution <code>matchTemplate</code> scores those candidates and <code>MIN_CREDIBLE_MATCH=55.0</code> gates a real hit.</p>
+      <p class="measured">319 / 319 crops MATCH, zero CHECK</p>
+    </div>
+
+    <div class="check">
+      <h3>Image counts</h3>
+      <p class="problem"><span class="lbl">Problem</span>Crop matching hunts master crops in the translation, so it is blind to a graphic only the translation has.</p>
+      <p><span class="lbl">Mechanism</span>Count per topic on both sides and compare. Topic codes are the join, because page numbers are not stable across languages.</p>
+      <p class="stack"><span class="lbl">Library · Method</span>No image library needed — figures are already boxed by the extraction step, so this is a plain Python <code>dict</code>/<code>Counter</code> tally per topic code, diffed symmetrically (master-has-more and translation-has-more are both reported) rather than by page position.</p>
+      <p class="measured warn">9 / 11 — both differences real</p>
+    </div>
+
+    <div class="check">
+      <h3>Stylesheet regions</h3>
+      <p class="problem"><span class="lbl">Problem</span>One question does not fit every region. A doc number, a QR and a heading each need a different test.</p>
+      <p><span class="lbl">Mechanism</span>Five mutually exclusive modes, one per region, plus its own tolerances. A region nested inside a scope is searched across that whole scope rather than at fixed coordinates.</p>
+      <p class="stack"><span class="lbl">Library · Method</span>PyMuPDF <code>page.get_text("dict", clip=)</code> extracts the text and geometry per region; the "same pattern" mode derives a regex shape from the master text (<code>[^\W\d_]</code> for "a letter" across scripts, plus a digit-count gate) and searches it first in-place, then across the parent scope via Python <code>re</code>.</p>
+      <p class="measured">187 / 187 on the tuned stylesheet</p>
+    </div>
+
+    <div class="check">
+      <h3>Text overlap</h3>
+      <p class="problem"><span class="lbl">Problem</span>Box intersection alone flagged the Greek page 20 — where the glyphs never touch. Accents make the box taller than the leading, so a box-only detector cries wolf on every Greek and Cyrillic page.</p>
+      <p><span class="lbl">Mechanism</span>Tier one intersects boxes. Tier two renders the overlap band at 300 dpi and measures the white <em>between</em> the ink — counting the blank rows at the band's edges was the bug that let a real collision through.</p>
+      <p class="stack"><span class="lbl">Library · Method</span>PyMuPDF <code>get_text("dict")</code> spans for a sweep-sorted box-intersection candidate pass, then PyMuPDF <code>get_pixmap(dpi=300)</code> to rasterise the overlap band and numpy row-sum ink profiling (<code>(a&lt;160).sum(axis=1)</code> + <code>np.flatnonzero</code> for the longest interior zero-run) to confirm the glyphs actually touch.</p>
+      <p class="measured">0 false positives · catches an injected overrun</p>
+    </div>
+
+    <div class="check">
+      <h3>Untranslated text</h3>
+      <p class="problem"><span class="lbl">Problem</span>English function-word density alone gave 18 wrong hits — “for” is Danish, “in” is Italian, “of” is Dutch.</p>
+      <p><span class="lbl">Mechanism</span>Two tests. <em>Verbatim</em> — the line is word for word in the master — is the trustworthy one. <em>Dense</em> corroborates it, and catches English that is not in the master at all. Numeral-heavy lines are skipped, which removed the last false positive: a dimensions line, flagged because “in” is also an inch.</p>
+      <p class="stack"><span class="lbl">Library · Method</span>PyMuPDF <code>get_text</code> per line, Python <code>unicodedata</code> NFKC folding + <code>re</code> punctuation stripping to normalise, then set-membership against a master line inventory (verbatim) alongside an English function-word ratio over a fixed word list (dense), with a digit-share cutoff (<code>MAX_DIGIT_SHARE=0.20</code>) excluding numeral-heavy lines.</p>
+      <p class="measured">0 false positives · 1 / 1 planted miss</p>
+    </div>
+
+    <div class="check">
+      <h3>Hyperlinks &amp; cross-references</h3>
+      <p class="problem"><span class="lbl">Problem</span>Translators break web URLs, lose anchor query parameters, or internal GoTo links point to wrong pages after text expansion.</p>
+      <p><span class="lbl">Mechanism</span>Extracts URI and GoTo links via PyMuPDF <code>page.get_links()</code>, normalizes URLs (protocol, trailing slashes, case), and uses 2D spatial topic analysis (<code>extract_topics_with_positions</code>) to bind each link to its exact sub-topic on shared pages. SequenceMatcher aligns internal link targets.</p>
+      <p class="stack"><span class="lbl">Library · Method</span>PyMuPDF <code>page.get_links()</code>, Python <code>difflib.SequenceMatcher</code>, <code>urllib.parse</code>, in-memory stream directly to Excel sheet 10.</p>
+      <p class="measured">100% link coverage · zero false topic assignments</p>
+    </div>
+
+    <div class="check">
+      <h3>Margins &amp; page overflow</h3>
+      <p class="problem"><span class="lbl">Problem</span>Text expansion in foreign languages (German, Finnish) spills outside column widths into print margins, getting sliced during industrial trimming.</p>
+      <p><span class="lbl">Mechanism</span>Audits printable boundary envelopes across top, bottom, inner, and outer margins, accounting for alternating left/right page gutters. Flags any text block or image crop encroaching on forbidden trim zones.</p>
+      <p class="stack"><span class="lbl">Library · Method</span>PyMuPDF <code>page.get_text("blocks")</code> and figure geometry boundary tests against calibrated page trim tolerances.</p>
+      <p class="measured">Catches margin encroachments before physical print run</p>
+    </div>
+  </div>
+</section>
+
+<section id="modes">
+  <h2>The five region modes</h2>
+  <p class="sec-note">
+    Exactly one per region. They answer different questions, and a region ticked
+    for two would have to be scored twice with no rule for which score wins.
+  </p>
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr><th>Mode</th><th>The question it answers</th><th>Use it for</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Exact match</td><td>Is the text identical?</td><td>Addresses, contacts, trademarks</td></tr>
+        <tr><td>Scope only</td><td>—</td><td>A container that bounds its children and is never scored itself</td></tr>
+        <tr><td>Visual only</td><td>Does the picture match?</td><td>Logos and artwork, ignoring any text</td></tr>
+        <tr><td>Present only</td><td>Is it still there?</td><td>QR codes and barcodes, whose contents differ by design</td></tr>
+        <tr><td>Same pattern</td><td>Does it have the same shape?</td><td>Doc numbers and language codes — six digits stay six digits</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="sec-note" style="margin-top:1rem">
+    <span class="pill">in place</span> and <span class="pill warn">moved</span> matter for
+    Same pattern: a shape found where it belongs passes; a <em>generic</em> shape found
+    only elsewhere in the scope is reported for review, because with the language code
+    deleted from all eleven translations, a scope-wide search for “two letters” still
+    passed eight of them on ordinary words.
+  </p>
+</section>
+
+<footer>
+  Every figure on this page was measured on the Start 350 set — one English master and
+  eleven translations — not estimated. Line counts are as of the current build.
+</footer>
+
+</div>
